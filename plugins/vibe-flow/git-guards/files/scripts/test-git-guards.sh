@@ -49,8 +49,8 @@ names=$(git -C "$R" show --name-only --format='' HEAD)
 git -C "$R" log -1 --format='%(trailers:key=Session-Id)' | grep -q test && ok "трейлер Session-Id проставлен" || bad "трейлер Session-Id"
 [ -z "$(git -C "$R" status --porcelain a.txt)" ] && ok "после коммита индекс синхронизирован (a.txt чист)" || bad "индекс синхронизирован" "$(git -C "$R" status --short)"
 [ "$(cat "$R/b.txt")" = "чужое" ] && ok "чужая правка на диске цела" || bad "чужая правка цела"
-[ -z "$(ls -A "$(git -C "$R" rev-parse --git-dir)/monitorex-locks" 2>/dev/null | grep -v '^$')" ] && ok "локи сняты после успеха" || ok "локи сняты после успеха"
-[ ! -f "$(git -C "$R" rev-parse --git-dir)/index.lock" ] && ok "index.lock снят" || bad "index.lock снят"
+[ -z "$(ls -A "$(git -C "$R" rev-parse --absolute-git-dir)/monitorex-locks" 2>/dev/null | grep -v '^$')" ] && ok "локи сняты после успеха" || bad "локи сняты после успеха"
+[ ! -f "$(git -C "$R" rev-parse --absolute-git-dir)/index.lock" ] && ok "index.lock снят" || bad "index.lock снят"
 
 echo "== safe-commit: отказы =="
 R2="$TMP/r2"; mkrepo "$R2"
@@ -61,7 +61,7 @@ out=$(commit "$R2" "правка b" b.txt); rc=$?
 [ "$(git -C "$R2" rev-parse HEAD)" = "$(git -C "$R2" rev-parse HEAD)" ] && \
   [ "$(git -C "$R2" log --oneline | wc -l | tr -d ' ')" = "1" ] && ok "ветка не двинулась при отказе" || bad "ветка не двинулась"
 git -C "$R2" ls-files -s a.txt | grep -q . && ok "чужой staged-снимок уцелел" || bad "staged-снимок уцелел"
-[ ! -f "$(git -C "$R2" rev-parse --git-dir)/index.lock" ] && ok "index.lock снят после отказа" || bad "index.lock снят после отказа"
+[ ! -f "$(git -C "$R2" rev-parse --absolute-git-dir)/index.lock" ] && ok "index.lock снят после отказа" || bad "index.lock снят после отказа"
 
 R3="$TMP/r3"; mkrepo "$R3"
 out=$(commit "$R3" "нечего" a.txt); rc=$?

@@ -1,6 +1,6 @@
 {
   "name": "vibe-flow-vercel",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Пакет vibe-flow для Vercel: монитор деплоя и логи.",
   "author": {
     "name": "Школа вайбкодинга"
