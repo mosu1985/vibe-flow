@@ -27,7 +27,7 @@
 В Claude Code, в папке своего проекта:
 
 ```
-/plugin marketplace add <owner>/vibe-flow
+/plugin marketplace add mosu1985/vibe-flow
 /plugin install vibe-flow@vibe-school
 /vibe-flow:init
 ```
