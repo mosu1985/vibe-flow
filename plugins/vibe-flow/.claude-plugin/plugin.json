@@ -1,6 +1,6 @@
 {
   "name": "vibe-flow",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Ядро vibe-flow: ревьюеры плана, оркестрация бригады агентов, финальный гейт release-gate, git-guards и правила CLAUDE.md для любого проекта.",
   "author": {
     "name": "Школа вайбкодинга"

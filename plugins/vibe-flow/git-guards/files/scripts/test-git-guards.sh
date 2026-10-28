@@ -396,6 +396,28 @@ git -C "$R8" config core.hooksPath .husky/_
 out=$(run_pp "refs/heads/main $RSHA refs/heads/main $RSHA"); rc=$?
 [ $rc -ne 0 ] && echo "$out" | grep -q 'не канонический' && ok "неканонический core.hooksPath — отказ" || bad "неканонический hooksPath" "$out"
 
+echo "== гейт проекта (GG_PLAN_GATE) =="
+RP="$TMP/rp"; mkrepo "$RP"; mkdir -p "$RP/scripts"
+printf '#!/bin/sh\ngrep -q "^GATE-OK$" "$1" || { echo "гейт проекта: нет GATE-OK"; exit 1; }\n' > "$RP/scripts/gate.sh"
+printf 'GG_PLAN_GATE="scripts/gate.sh"\n' > "$RP/.gitguards.conf"
+git -C "$RP" add -A; git -C "$RP" commit -qm gate
+echo v2 > "$RP/a.txt"
+out=$(commit "$RP" "правка" a.txt); rc=$?
+[ $rc -ne 0 ] && echo "$out" | grep -q 'гейт проекта' && ok "гейт проекта отказал — коммита нет" || bad "гейт проекта отказ" "$out"
+out=$(commit "$RP" "$(printf 'правка\n\nGATE-OK')" a.txt); rc=$?
+[ $rc -eq 0 ] && ok "гейт проекта пропустил" || bad "гейт проекта пропуск" "$out"
+printf 'GG_PLAN_GATE="scripts/nope.sh"\n' > "$RP/.gitguards.conf"
+echo v3 > "$RP/a.txt"
+out=$(commit "$RP" "правка" a.txt); rc=$?
+[ $rc -ne 0 ] && echo "$out" | grep -q 'несуществующий' && ok "GG_PLAN_GATE на несуществующий файл — отказ" || bad "GG_PLAN_GATE без файла" "$out"
+
+# Проектные тесты: scripts/git-guards/test-local-*.sh. Их ставит не install.sh,
+# а сам проект — поэтому обновление набора их не затирает. Видят все helpers.
+for t in "$ROOT"/scripts/git-guards/test-local-*.sh; do
+    [ -f "$t" ] || continue
+    . "$t"
+done
+
 echo
 echo "=========================================="
 echo "  прошло: $PASS   провалено: $FAIL"
