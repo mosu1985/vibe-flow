@@ -1,0 +1,67 @@
+#!/usr/bin/env sh
+# КАНОНИЧЕСКИЙ pre-commit. Живёт в репозитории, устанавливается скриптом
+# scripts/install-git-guards.sh в $GIT_COMMON_DIR/monitorex-hooks —
+# вне любого checkout, чтобы переключение веток не подменяло guard.
+#
+# ПОЛИТИКА: в ОБЩЕМ рабочем дереве обычный `git commit` запрещён — индекс там
+# общий, и пока идут тесты сосед успевает сделать `git add`, который уедет в
+# ваш коммит (у git нет pre-add hook). В linked worktree индекс свой — можно.
+set -e
+
+# 🔴 Сравниваем СЫРОЙ вывод обеих команд, а не нормализованные пути:
+# на macOS /var/folders — симлинк на /private/var, и `cd … && pwd` даёт другую
+# строку, чем --absolute-git-dir. Из-за этого проверка молча не срабатывала.
+# В основном дереве оба дают ".git"; в linked worktree --git-dir указывает на
+# .git/worktrees/<имя> — этого достаточно, чтобы их различить.
+GITDIR_RAW=$(git rev-parse --git-dir)
+COMMON_RAW=$(git rev-parse --git-common-dir)
+COMMON=$(cd "$COMMON_RAW" && pwd -P)
+
+# Служебные операции (merge/rebase/cherry-pick) — под commit-локом, взятым заранее.
+for f in MERGE_HEAD REBASE_HEAD CHERRY_PICK_HEAD; do
+    if [ -f "$(git rev-parse --git-path $f)" ]; then
+        if [ -d "$COMMON/monitorex-locks/commit" ]; then exit 0; fi
+        echo ""
+        echo "🔴 Служебная операция ($f) требует лока."
+        echo "   Взять: scripts/git-lock.sh status  →  затем повторить"
+        echo ""
+        exit 1
+    fi
+done
+
+if [ "$GITDIR_RAW" = "$COMMON_RAW" ]; then   # мы в ОСНОВНОМ дереве
+    if [ "${MONITOREX_SAFE_COMMIT:-0}" = "1" ]; then exit 0; fi
+
+    # Разовая owner-отметка: живёт 15 минут, привязана к target, ГАСИТСЯ здесь
+    # же после использования. Переменной окружения намеренно нет — её агент
+    # выставит не задумываясь, а отметку ставит человек командой с вопросом.
+    CONFIRM="$COMMON/monitorex-locks/CONFIRM"
+    if [ -f "$CONFIRM" ]; then
+        age=$(( $(date +%s) - $(stat -f %m "$CONFIRM") ))
+        if [ "$age" -lt 900 ] && grep -q '^target=commit$' "$CONFIRM"; then
+            rm -f "$CONFIRM"
+            echo "⚠️  обычный commit разрешён разовой отметкой (она погашена)"
+            npm test
+            exit $?
+        fi
+    fi
+    echo ""
+    echo "🔴 Обычный git commit в общем рабочем дереве запрещён."
+    echo ""
+    echo "   Индекс здесь общий: пока идёт коммит, параллельная сессия успевает"
+    echo "   сделать git add — и её файлы уезжают в ваш коммит. Так уже было"
+    echo "   (2026-08-06: 7 чужих файлов в коммите про вёрстку фильтров)."
+    echo ""
+    echo "   Коммитить так:"
+    echo "     scripts/git-safe-commit.sh --message-file <файл> -- <пути>"
+    echo ""
+    echo "   Нужен частичный стейджинг (git add -p) — делайте его в worktree:"
+    echo "     scripts/wt-new.sh <имя>"
+    echo ""
+    echo "   Разовый осознанный обход (человеком, с подтверждением):"
+    echo "     scripts/git-confirm.sh commit"
+    echo ""
+    exit 1
+fi
+
+npm test

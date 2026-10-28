@@ -1,0 +1,111 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "score",
+    "verdict",
+    "summary",
+    "deductions",
+    "findings"
+  ],
+  "properties": {
+    "score": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 10,
+      "description": "Итоговый балл плана по рубрике: 10.0 минус сумма вычетов, один знак после запятой"
+    },
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "pass",
+        "fail"
+      ],
+      "description": "pass если НЕТ ни одного findings с severity critical или high, иначе fail. Балл на вердикт НЕ влияет: план с score 6.5 и только medium/low замечаниями — это pass"
+    },
+    "summary": {
+      "type": "string",
+      "description": "2-4 предложения по-русски: главное, что критик думает о плане"
+    },
+    "deductions": {
+      "type": "array",
+      "description": "Расшифровка балла. Пустой массив только при score = 10.0",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "weight",
+          "reason"
+        ],
+        "properties": {
+          "weight": {
+            "type": "number",
+            "description": "Положительное число — сколько баллов снято по этому пункту, вес из рубрики"
+          },
+          "reason": {
+            "type": "string",
+            "description": "За что именно снято, по-русски, конкретно"
+          }
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "description": "Замечания к плану. Каждое должно быть действием, а не наблюдением",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "severity",
+          "title",
+          "detail",
+          "failure_scenario",
+          "evidence",
+          "plan_section",
+          "suggested_fix"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Короткий идентификатор вида C1, C2, C3 — чтобы на замечание можно было сослаться в ответе"
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "critical",
+              "high",
+              "medium",
+              "low"
+            ],
+            "description": "Класс дефекта строго по таблице весов рубрики: critical = ломает прод или теряет данные / дыра в изоляции или правах; high = нарушено критическое правило проекта, дефект логики плана, непроверенное допущение о внешней системе, от которого зависит контроль доступа или источник данных; medium = нагрузка без оценки, пробел в покрытии, прочие непроверенные допущения; low = неполнота описания и косметика. critical и high БЛОКИРУЮТ план — ставить их без конкретного сценария отказа в failure_scenario запрещено, такое замечание понижается до medium"
+          },
+          "title": {
+            "type": "string",
+            "description": "Одна строка по-русски: суть замечания"
+          },
+          "detail": {
+            "type": "string",
+            "description": "Почему это проблема и что произойдёт, если оставить как есть. Конкретный сценарий отказа, а не общие слова"
+          },
+          "failure_scenario": {
+            "type": "string",
+            "description": "При каких входах или состоянии что именно сломается — конкретно, по-русски. Обязателен для critical и high: без него замечание считается наблюдением и понижается до medium. Для medium и low допустима строка '—'"
+          },
+          "evidence": {
+            "type": "string",
+            "description": "Опора замечания в РЕПОЗИТОРИИ в виде путь:строка (например src/billing/cache.ts:87) — что именно в коде подтверждает дефект. Если замечание относится к тексту плана и опоры в коде нет, написать 'только план' и объяснить в detail, почему кода недостаточно. Замечание уровня critical/high без опоры в коде или без объяснения, почему её нет, ослаблено и должно быть понижено"
+          },
+          "plan_section": {
+            "type": "string",
+            "description": "К какому шагу или разделу плана относится. '—' если к плану целиком"
+          },
+          "suggested_fix": {
+            "type": "string",
+            "description": "Что конкретно изменить в плане. Это правка ПЛАНА, а не кода"
+          }
+        }
+      }
+    }
+  }
+}

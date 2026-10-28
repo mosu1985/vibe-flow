@@ -1,0 +1,22 @@
+{
+  "name": "vibe-school",
+  "owner": { "name": "Школа вайбкодинга" },
+  "description": "Рабочая среда разработки с Claude Code: план под ревью двух моделей, бригада агентов с моделью и effort на каждого, финальный гейт перед push и защита параллельных сессий git.",
+  "plugins": [
+    {
+      "name": "vibe-flow",
+      "source": "./plugins/vibe-flow",
+      "description": "Ядро для любого проекта: ревьюеры плана, оркестрация, release-gate, git-guards и правила CLAUDE.md. После установки — /vibe-flow:init в проекте."
+    },
+    {
+      "name": "vibe-flow-vercel",
+      "source": "./plugins/vibe-flow-vercel",
+      "description": "Для проектов на Vercel: монитор деплоя конкретного коммита и чтение логов сборки и рантайма."
+    },
+    {
+      "name": "vibe-flow-supabase",
+      "source": "./plugins/vibe-flow-supabase",
+      "description": "Для проектов на Supabase: агент БД (запросы, схема, RLS) и безопасные миграции."
+    }
+  ]
+}

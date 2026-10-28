@@ -1,0 +1,403 @@
+#!/usr/bin/env sh
+# КАНОНИЧЕСКИЙ pre-push. Живёт в репозитории, ставится в
+# $GIT_COMMON_DIR/monitorex-hooks (вне checkout) — иначе переключение
+# основного дерева на старую ревизию подсовывает git старую версию этого
+# файла, и его собственные проверки просто исчезают.
+#
+# 🔴 ЕДИНСТВЕННАЯ автоматическая проверка типов в проекте (см. ниже) плюс
+# барьеры параллельных сессий. Порядок важен: дешёвые отказы раньше tsc.
+
+set -e
+
+COMMON=$(git rev-parse --git-common-dir)
+case "$COMMON" in /*) ;; *) COMMON="$(cd "$COMMON" && pwd -P)" ;; esac
+ZERO="0000000000000000000000000000000000000000"
+
+# ── Конфигурация проекта ─────────────────────────────────────────────────────
+# Хук лежит ВНЕ рабочего дерева и обслуживает любой стек, поэтому всё, что
+# зависит от проекта, приходит из .gitguards.conf в корне дерева. Файла нет —
+# работают значения ниже: барьеры параллельных сессий действуют всегда, а
+# проверка типов молча пропускается (проверять нечем).
+GG_PROTECTED="main"
+GG_TYPECHECK_CMD=""
+GG_DEV_READY_GLOBS=""
+GG_REQUIRE_DEV_READY=0
+GG_DEV_CMD=""
+GG_RELEASE_GATE=0
+GG_RELEASE_GATE_SKIP="*.md"
+GG_TOP=$(git rev-parse --show-toplevel 2>/dev/null || echo .)
+if [ -f "$GG_TOP/.gitguards.conf" ]; then . "$GG_TOP/.gitguards.conf"; fi
+
+# Гейт release-gate включается ПОЛИТИКОЙ репозитория, а не веткой: дерево от
+# старой базы не знает о новом флаге в своём .gitguards.conf и обошло бы гейт.
+# Поэтому в силе и флаг защищённой ветки на remote, и флаг основного дерева —
+# включён хоть где-то, значит включён (fail-closed). Remote-ветка — главный
+# источник: рабочая копия основного дерева бывает отставшей на сотни коммитов.
+gate_on() { grep -qE '^GG_RELEASE_GATE="?1"?' 2>/dev/null; }
+if [ "$GG_RELEASE_GATE" != "1" ]; then
+    if git show "refs/remotes/${1:-origin}/$GG_PROTECTED:.gitguards.conf" 2>/dev/null | gate_on; then
+        GG_RELEASE_GATE=1
+    elif [ -f "$(dirname "$COMMON")/.gitguards.conf" ] \
+         && gate_on < "$(dirname "$COMMON")/.gitguards.conf"; then
+        GG_RELEASE_GATE=1
+    fi
+fi
+# Маски «ревью не нужно» — тоже политика, а не настройка ветки: ветка,
+# прописавшая себе GG_RELEASE_GATE_SKIP="*", ушла бы без ревью. Берём их из
+# конфига защищённой ветки на remote, нет его — из основного дерева.
+skip_policy() {
+    grep -E '^GG_RELEASE_GATE_SKIP=' | tail -1 \
+        | sed -e 's/^GG_RELEASE_GATE_SKIP=//' -e "s/^[\"']//" -e "s/[\"']\$//"
+}
+GG_RELEASE_GATE_SKIP="*.md"
+if gpol=$(git show "refs/remotes/${1:-origin}/$GG_PROTECTED:.gitguards.conf" 2>/dev/null); then
+    if printf '%s\n' "$gpol" | grep -q '^GG_RELEASE_GATE_SKIP='; then
+        GG_RELEASE_GATE_SKIP=$(printf '%s\n' "$gpol" | skip_policy)
+    fi
+elif [ -f "$(dirname "$COMMON")/.gitguards.conf" ] \
+     && grep -q '^GG_RELEASE_GATE_SKIP=' "$(dirname "$COMMON")/.gitguards.conf"; then
+    GG_RELEASE_GATE_SKIP=$(skip_policy < "$(dirname "$COMMON")/.gitguards.conf")
+fi
+GATE_DIR="$COMMON/monitorex-locks/release-gate"
+
+PROTECTED="$GG_PROTECTED"
+ALLOW="$COMMON/monitorex-locks/push-allow"
+# Личность сессии. Пусто — значит доказать своё авторство нечем, и каждый
+# новый коммит придётся подтверждать списком. Для человека это разово:
+# export MONITOREX_ACTOR="mihail".
+ACTOR="${CLAUDE_CODE_SESSION_ID:-${MONITOREX_ACTOR:-}}"
+
+# ─── 0. Хуки обязаны быть каноническими ─────────────────────────────────────
+# `npm install` запускает `prepare: husky`, который возвращает относительный
+# core.hooksPath — тогда worktree со старой базы обошёл бы guard.
+# Сравниваем РАЗРЕШЁННЫЕ пути, а не строки: на macOS /var/folders —
+# симлинк на /private/var, и одинаковый каталог даёт две разные строки.
+HP=$(git config core.hooksPath || echo "")
+HP_R=""
+[ -n "$HP" ] && HP_R=$(cd "$HP" 2>/dev/null && pwd -P || echo "")
+EXPECT="$COMMON/monitorex-hooks"
+EXPECT_R=$(cd "$EXPECT" 2>/dev/null && pwd -P || echo "$EXPECT")
+if [ "$HP_R" != "$EXPECT_R" ]; then
+     echo ""
+     echo "🔴 core.hooksPath не канонический: '${HP:-не задан}'"
+     echo "   Ожидается: $EXPECT"
+     echo "   Похоже, npm install вернул husky-путь. Починить:"
+     echo "     bash scripts/install-git-guards.sh"
+     echo ""
+     exit 1
+fi
+
+# ─── 1. stdin читается ОДИН раз ─────────────────────────────────────────────
+# Второй цикл получил бы EOF, pushed_any остался бы 0 — и проверка типов
+# молча не запустилась бы вовсе.
+REFS=$(cat)
+[ -n "$REFS" ] || exit 0
+
+REMOTE_NAME="$1"
+
+pushing_head=0
+pushed_any=0
+
+# ─── 2. Барьеры по каждому отправляемому ref ────────────────────────────────
+while read -r local_ref local_sha remote_ref remote_sha; do
+    [ -z "$local_sha" ] && continue
+    pushed_any=1
+
+    # --- удаление ветки ---
+    if [ "$local_sha" = "$ZERO" ]; then
+        case "$remote_ref" in
+          refs/heads/"$PROTECTED")
+            echo ""; echo "🔴 Удаление защищённой ветки $PROTECTED запрещено локально."
+            echo "   Не полагаемся на настройки GitHub — они нам не видны."; echo ""
+            exit 1 ;;
+        esac
+        continue
+    fi
+
+    # --- теги ---
+    case "$remote_ref" in
+      refs/tags/*)
+        if [ "$remote_sha" != "$ZERO" ]; then
+            echo ""; echo "🔴 Перезапись тега $remote_ref деструктивна — отказ."; echo ""
+            exit 1
+        fi
+        continue ;;
+      refs/heads/*) ;;
+      *)
+        echo ""; echo "🔴 Push в $remote_ref не поддержан guard-ом (fail-closed)."; echo ""
+        exit 1 ;;
+    esac
+
+    # --- обновление ветки: обязателен fast-forward ---
+    if [ "$remote_sha" != "$ZERO" ]; then
+        if ! git cat-file -e "$remote_sha" 2>/dev/null; then
+            echo ""; echo "🔴 Объекта $remote_sha нет локально — сравнить не с чем."
+            echo "   Сделайте git fetch и повторите."; echo ""
+            exit 1
+        fi
+        if ! git merge-base --is-ancestor "$remote_sha" "$local_sha"; then
+            echo ""; echo "🔴 Не fast-forward: $remote_ref откатится назад."
+            echo "   Это стирает чужие коммиты. Перебазируйтесь на свежую ветку."; echo ""
+            exit 1
+        fi
+    fi
+
+    # --- владение: чей коммит уезжает ---
+    # Авария 02.09.2026: пуш увёз на remote коммит соседней сессии, которого
+    # никто не согласовывал. Раньше так же уехал `2a2280f1`, ждавший решения
+    # о деплое. Смотрим ТОЛЬКО коммиты, которых ещё нет ни на одном remote —
+    # старая история сюда не попадает и ничего не ломает.
+    if [ "$remote_sha" = "$ZERO" ]; then
+        new_commits=$(git rev-list "$local_sha" --not --remotes="$REMOTE_NAME" 2>/dev/null)
+    else
+        # Не «remote_sha..local_sha»: так в проверку попадали коммиты, уже
+        # лежащие в ДРУГИХ ветках remote (merge-коммиты main после ff-подтяжки
+        # ветки), и хук называл их чужой работой (25.10.2026, PR #227).
+        new_commits=$(git rev-list "$local_sha" --not "$remote_sha" --remotes="$REMOTE_NAME" 2>/dev/null)
+    fi
+
+    foreign=""
+    for sha in $new_commits; do
+        owner=$(git log -1 --format='%(trailers:key=Session-Id,valueonly)' "$sha" | tr -d '\n')
+        [ -n "$ACTOR" ] && [ "$owner" = "$ACTOR" ] && continue          # свой
+        if [ -f "$ALLOW" ] && grep -qx "$sha" "$ALLOW" 2>/dev/null; then
+            continue                                                    # разрешён явно
+        fi
+        foreign="$foreign$sha
+"
+    done
+
+    if [ -n "$foreign" ]; then
+        echo ""
+        echo "🔴 В отправке есть коммиты, которые эта сессия не создавала:"
+        echo ""
+        printf '%s' "$foreign" | while read -r sha; do
+            [ -n "$sha" ] || continue
+            printf '     %s  %s\n' "$(git rev-parse --short "$sha")" "$(git log -1 --format=%s "$sha")"
+            printf '       автор: %s   Session-Id: %s\n' \
+                "$(git log -1 --format='%an' "$sha")" \
+                "$(git log -1 --format='%(trailers:key=Session-Id,valueonly)' "$sha" | tr -d '\n' | sed 's/^$/нет/')"
+        done
+        echo ""
+        echo "   Отправить чужую работу от своего имени можно только осознанно:"
+        echo "     scripts/git-allow-push.sh add <sha…>"
+        echo ""
+        [ -z "$ACTOR" ] && echo "   (личность сессии не задана — задайте MONITOREX_ACTOR, иначе своими"
+        [ -z "$ACTOR" ] && echo "    не считаются даже собственные коммиты)"
+        [ -z "$ACTOR" ] && echo ""
+        exit 1
+    fi
+
+    # --- release-gate: дифф ветки прочитал ревьюер Opus ---
+    # Ревьюеры смотрят план, а ошибки живут в коде. Код от субагентов на
+    # Sonnet/Haiku после реализации раньше не смотрел никто. Вердикт ставит
+    # агент release-gate (scripts/release-gate.sh pass), привязан к ДЕРЕВУ
+    # коммита: правка содержимого снимает его, пересборка без правок — нет.
+    if [ "$GG_RELEASE_GATE" = "1" ]; then
+        bref="refs/remotes/$REMOTE_NAME/$PROTECTED"
+        if ! git rev-parse --verify -q "$bref" >/dev/null 2>&1; then
+            echo ""
+            echo "🔴 release-gate: нет $bref — не с чем сравнить. Сделайте git fetch."
+            echo ""
+            exit 1
+        fi
+        if ! gbase=$(git merge-base "$bref" "$local_sha" 2>/dev/null); then
+            echo ""
+            echo "🔴 release-gate: у $(git rev-parse --short "$local_sha") нет общей истории с $bref — дифф не построить."
+            echo ""
+            exit 1
+        fi
+        # Логика масок совпадает с release-gate.sh — иначе скрипт скажет
+        # «ревью не нужно», а хук откажет. --no-renames: переименование кода
+        # в *.md иначе выглядело бы как «только документация».
+        need=$(git -c core.quotePath=false diff --no-renames --name-only "$gbase" "$local_sha" | while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            skip=0
+            set -f
+            for pat in $GG_RELEASE_GATE_SKIP; do
+                case "$f" in ($pat) skip=1 ;; esac
+            done
+            set +f
+            [ "$skip" = 1 ] || printf '%s\n' "$f"
+        done)
+        gtree=$(git rev-parse "$local_sha^{tree}")
+        # Вердикт засчитывается, только если он настоящий: строка verdict=
+        # и head=, чьё дерево совпадает с отправляемым. Пустой файл, созданный
+        # мимо скрипта, вердиктом не считается.
+        gvalid=0
+        if [ -f "$GATE_DIR/$gtree" ] \
+           && grep -qE '^verdict=(pass|override)$' "$GATE_DIR/$gtree"; then
+            ghead=$(sed -n 's/^head=//p' "$GATE_DIR/$gtree" | head -1)
+            if [ -n "$ghead" ] \
+               && [ "$(git rev-parse -q --verify "$ghead^{tree}" 2>/dev/null)" = "$gtree" ]; then
+                gvalid=1
+            fi
+        fi
+        if [ -n "$need" ] && [ "$gvalid" = 0 ]; then
+            echo ""
+            echo "🔴 release-gate: дифф $(git rev-parse --short "$local_sha") не прошёл финальное ревью."
+            echo ""
+            echo "   Код уходит дальше только после вердикта ревьюера Opus. Запустите"
+            echo "   агента release-gate на этом дереве — он прочитает дифф от $PROTECTED"
+            echo "   и при ✅ запишет вердикт (scripts/release-gate.sh status — проверить)."
+            echo ""
+            echo "   Вердикт привязан к содержимому: после любой правки ревью заново."
+            echo "   Обход — только человеком: scripts/release-gate.sh override"
+            if [ ! -f "$GG_TOP/scripts/release-gate.sh" ]; then
+                # Дерево от базы старше гейта: агенту нечем записать вердикт.
+                echo ""
+                echo "   ⚠️ В этом дереве нет scripts/release-gate.sh — оно заведено от базы"
+                echo "   старше гейта. Сначала влейте свежую $PROTECTED: git merge $bref"
+            fi
+            echo ""
+            exit 1
+        fi
+        if [ -n "$need" ]; then
+            echo "✅ release-gate: $(sed -n 's/^verdict=//p' "$GATE_DIR/$gtree") для tree $(echo "$gtree" | cut -c1-8)"
+        fi
+    fi
+
+    # --- содержимое: удаления чужих файлов ---
+    case "$remote_ref" in
+      refs/heads/"$PROTECTED")
+        rref="refs/remotes/$REMOTE_NAME/$PROTECTED"
+        if git rev-parse --verify -q "$rref" >/dev/null 2>&1; then
+            dels=$(git diff --diff-filter=D --name-only "$rref" "$local_sha" -- 2>/dev/null)
+            if [ -n "$dels" ]; then
+                # 🔴 У этого барьера ДОЛЖЕН быть осознанный обход, как у всех
+                # остальных. До 10.09.2026 его не было: совет «перебазируйтесь»
+                # не помогает, когда база свежая, а удаление намеренное, и
+                # единственным выходом оставался --no-verify — то есть снятие
+                # ЗАОДНО проверки типов и проверки авторства. Обход, гасящий все
+                # барьеры разом, приучает применять его по любому поводу.
+                # Отметка ставится поимённо человеком (scripts/git-allow-delete.sh),
+                # живёт 15 минут и гасится здесь после первого применения.
+                ALLOWDEL="$COMMON/monitorex-locks/delete-allow"
+                fresh=0
+                if [ -f "$ALLOWDEL" ]; then
+                    dage=$(( $(date +%s) - $(stat -f %m "$ALLOWDEL" 2>/dev/null || echo 0) ))
+                    [ "$dage" -lt 900 ] && fresh=1
+                fi
+                # Сверяем ПОФАЙЛОВО: отметка на два пути не должна разрешить
+                # удаление третьего, случайно попавшего в тот же коммит.
+                unapproved=$(printf '%s\n' "$dels" | while IFS= read -r d; do
+                    [ -n "$d" ] || continue
+                    if [ "$fresh" = "1" ] && grep -qxF -- "$d" "$ALLOWDEL" 2>/dev/null; then
+                        :
+                    else
+                        printf '%s\n' "$d"
+                    fi
+                done)
+
+                if [ -n "$unapproved" ]; then
+                    echo ""
+                    echo "🔴 Этот push УДАЛЯЕТ файлы из $PROTECTED:"
+                    echo "$dels" | sed 's/^/     /'
+                    if [ "$fresh" = "1" ]; then
+                        echo ""
+                        echo "   Отметка есть, но НЕ покрывает:"
+                        printf '%s\n' "$unapproved" | sed 's/^/     /'
+                    fi
+                    echo ""
+                    echo "   Ветка от устаревшей базы сносит чужую работу тихо — fast-forward"
+                    echo "   при этом проходит штатно. Сначала git fetch и сверьте дифф."
+                    echo ""
+                    echo "   Если удаление намеренное — подтвердите поимённо:"
+                    echo "     scripts/git-allow-delete.sh add <путь…>"
+                    echo ""
+                    exit 1
+                fi
+
+                rm -f "$ALLOWDEL"
+                echo "⚪️ Удаление подтверждено отметкой; она погашена:"
+                echo "$dels" | sed 's/^/     /'
+            fi
+        fi ;;
+    esac
+
+    [ "$local_sha" = "$(git rev-parse HEAD)" ] && pushing_head=1
+done <<REFS_EOF
+$REFS
+REFS_EOF
+
+[ "$pushed_any" = "0" ] && exit 0
+
+if [ "$pushing_head" = "0" ]; then
+  echo ""
+  echo "🔴 Отправляется коммит, который НЕ является HEAD."
+  echo ""
+  echo "   Проверить типы можно только у того состояния, что лежит в рабочем"
+  echo "   дереве. Отправляя другой коммит, хук проверил бы не то, что уходит,"
+  echo "   и его «ок» был бы обманом."
+  echo ""
+  echo "   Переключитесь на нужный коммит либо отправляйте с --no-verify,"
+  echo "   понимая, что типы не проверит никто."
+  echo ""
+  exit 1
+fi
+
+# ─── 2. Рабочее дерево обязано совпадать с тем, что уходит ──────────────────
+# tsc проверяет файлы на диске, а не содержимое коммита. При грязном дереве
+# зелёная проверка не относится к отправляемому коду: незакоммиченная правка
+# легко «чинит» тип, сломанный в самом коммите.
+dirty=$(git status --porcelain -- \
+  '*.ts' '*.tsx' '*.mts' '*.cts' \
+  'tsconfig*.json' 'next.config.*' 'package.json' 2>/dev/null)
+
+if [ -n "$dirty" ]; then
+  echo ""
+  echo "🔴 В рабочем дереве есть незакоммиченные изменения кода:"
+  echo ""
+  echo "$dirty" | sed 's/^/     /'
+  echo ""
+  echo "   Проверка типов смотрит файлы на диске, поэтому её результат"
+  echo "   относился бы к дереву, а не к отправляемому коммиту."
+  echo ""
+  echo "   Закоммитьте изменения либо спрячьте их: git stash -u"
+  echo ""
+  exit 1
+fi
+
+# ─── 3. Артефакты сборки, без которых проверка типов слепа ──────────────────
+# Для Next это .next/types и .next/dev/types: tsconfig.include тянет их, чтобы
+# проверить соглашения App Router (сигнатуры page/route/layout, params как
+# Promise, generateMetadata). Их отсутствие для tsc НЕ ошибка — он молча
+# проверит меньше и всё равно скажет «ок». Именно это и надо перехватить.
+#
+# 🔴 Проект, где такой генерации нет, оставляет GG_REQUIRE_DEV_READY=0 — тогда
+# блок пропускается целиком. Ставить сюда несуществующий путь нельзя: push
+# станет невозможен, а причина будет выглядеть как поломка хука.
+ready=""
+if [ "$GG_REQUIRE_DEV_READY" = "1" ] && [ -n "$GG_DEV_READY_GLOBS" ]; then
+  ready=$(find $GG_DEV_READY_GLOBS -name '*.ts' 2>/dev/null | wc -l | tr -d ' ')
+  if [ "$ready" = "0" ]; then
+    echo ""
+    echo "🔴 Нет сгенерированных типов ($GG_DEV_READY_GLOBS)."
+    echo ""
+    echo "   Без них проверка проходит зелёной, но НЕ смотрит сигнатуры страниц"
+    echo "   и роутов — а это ровно те ошибки, что ломают рантайм."
+    echo ""
+    if [ -n "$GG_DEV_CMD" ]; then
+      echo "   Запустите хотя бы раз:  $GG_DEV_CMD"
+    else
+      echo "   Запустите dev-сервер или сборку, чтобы их сгенерировать."
+    fi
+    echo ""
+    exit 1
+  fi
+fi
+
+# ─── 4. Собственно проверка ─────────────────────────────────────────────────
+# 🔴 Пустой GG_TYPECHECK_CMD означает «в этом проекте типов нет» — и это
+# осознанное решение установщика, а не поломка. Говорим об этом вслух: молчание
+# здесь неотличимо от «проверка прошла».
+if [ -z "$GG_TYPECHECK_CMD" ]; then
+  echo "⚪️ Проверка типов не настроена (GG_TYPECHECK_CMD пуст в .gitguards.conf)."
+else
+  if [ -n "$ready" ]; then
+    echo "🔍 Проверка типов ($ready файлов сгенерированных типов)…"
+  else
+    echo "🔍 Проверка типов…"
+  fi
+  sh -c "$GG_TYPECHECK_CMD"
+fi
