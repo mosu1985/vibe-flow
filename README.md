@@ -93,10 +93,10 @@ Claude прочитает статью, покажет план и всё пос
 
 Как устроено внутри и как править — [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Лицензия
+## License
 
-[CC BY-NC 4.0](LICENSE): © mosu1985 (Школа вайбкодинга).
+[CC BY-NC 4.0](LICENSE) © mosu1985 (Vibe Coding School).
 
-- ✅ Использовать vibe-flow как рабочую среду в своих проектах можно, в том числе в коммерческих.
-- ✅ Можно делать форки и доработки, если указан автор и ссылка на этот репозиторий.
-- 🚫 Нельзя продавать или коммерчески распространять vibe-flow или его части (агенты, скиллы, скрипты, правила), в том числе на маркетплейсах скиллов.
+- ✅ You may use vibe-flow as a working environment in your own projects, including commercial ones.
+- ✅ You may fork and modify it, provided you credit the author and link to this repository.
+- 🚫 You may not sell or commercially distribute vibe-flow or any of its parts (agents, skills, scripts, rules), including on skill marketplaces.
