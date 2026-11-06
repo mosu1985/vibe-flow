@@ -1,10 +1,11 @@
 {
   "name": "vibe-flow-vercel",
-  "version": "1.0.3",
-  "description": "Пакет vibe-flow для Vercel: монитор деплоя и логи.",
+  "version": "1.0.4",
+  "description": "vibe-flow package for Vercel: deploy monitor and logs.",
   "author": {
-    "name": "Школа вайбкодинга"
+    "name": "Vibe Coding School"
   },
+  "license": "CC-BY-NC-4.0",
   "keywords": [
     "vibe-coding",
     "workflow",

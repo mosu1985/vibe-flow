@@ -1,34 +1,34 @@
 # vibe-flow
 
-Рабочая среда для разработки с Claude Code, проверенная на живом продакшен-проекте.
-Ставится в любой проект за пару минут.
+A Claude Code development environment, battle-tested on a live production project.
+Installs into any project in a couple of minutes.
 
-## Что вы получаете
+## What you get
 
 ```
-Задача
-  └─ 📋 План ── ревьюеры: безопасность · нагрузка · доступ · тесты
-               └─ внешний критик на другой модели (Codex, если установлен)
-               └─ гейт: нет открытых critical/high → план одобряете вы
-  └─ 🔀 Реализация ── сам Claude или бригада агентов,
-                      каждому — своя модель и effort (Opus / Sonnet / Haiku)
-  └─ 🧪 Тесты → коммит в своём рабочем дереве
-  └─ 🚦 release-gate ── Opus читает ВЕСЬ дифф ветки; без его ✅ git не пустит push
-  └─ 🚀 «Пушим?» ── только с вашего «да» → деплой → монитор деплоя
+Task
+  └─ 📋 Plan ── reviewers: security · performance · access · tests
+               └─ external critic on a different model (Codex, if installed)
+               └─ gate: no open critical/high issues → you approve the plan
+  └─ 🔀 Implementation ── Claude itself or a crew of agents,
+                          each with its own model and effort (Opus / Sonnet / Haiku)
+  └─ 🧪 Tests → commit in its own worktree
+  └─ 🚦 release-gate ── Opus reads the ENTIRE branch diff; without its ✅ git won't allow the push
+  └─ 🚀 "Push?" ── only after your "yes" → deploy → deploy monitor
 ```
 
-- **План проверяют несколько ревьюеров**, и он не уходит в работу, пока у них есть серьёзные замечания
-- **Код от любых моделей проверяется перед push** — жёстко, git-хуком, а не обещанием
-- **Параллельные сессии Claude не мешают друг другу**: у каждой своё рабочее дерево, коммит через изолированный индекс, чужие файлы не уезжают в ваш коммит
-- **Модель не может обойти проверки сама**: `--no-verify`, самоодобрение и отметки обхода блокирует хук; обходы — только человеком
+- **The plan is checked by several reviewers**, and it doesn't go into work while they still have serious concerns
+- **Code from any model is checked before push**: enforced by a git hook, not by a promise
+- **Parallel Claude sessions don't get in each other's way**: each has its own worktree, commits go through an isolated index, other sessions' files never end up in your commit
+- **The model can't bypass the checks on its own**: `--no-verify`, self-approval and bypass marks are blocked by a hook; bypasses are for humans only
 
-## Установка
+## Installation
 
-**Ученикам школы вайбкодинга** (подключён MCP базы знаний) — одной фразой в Claude Code, в папке проекта:
+**Vibe Coding School students** (with the knowledge base MCP connected): one phrase in Claude Code, in your project folder:
 
-> Установи vibe-flow из базы знаний школы
+> Install vibe-flow from the school knowledge base
 
-Claude прочитает статью, покажет план и всё поставит. Вручную — в Claude Code, в папке своего проекта:
+Claude will read the article, show you the plan and install everything. Manually, in Claude Code, in your project folder:
 
 ```
 /plugin marketplace add mosu1985/vibe-flow
@@ -36,59 +36,69 @@ Claude прочитает статью, покажет план и всё пос
 /vibe-flow:init
 ```
 
-`init` развернёт защиту git, впишет правила в `CLAUDE.md`, изучит проект и опишет его стек, а в конце попросит разрешения закоммитить установку — **соглашайтесь**: без этого коммита рабочие деревья не получат скрипты. После него **перезапустите сессию Claude Code**.
+`init` sets up git protection, writes the rules into `CLAUDE.md`, studies the project and describes its stack, and at the end asks permission to commit the installation. **Say yes**: without that commit, worktrees won't get the scripts. After it, **restart your Claude Code session**.
 
-Пакеты под стек (по желанию — `init` сам подскажет, нужны ли):
+Stack packages (optional; `init` will tell you whether you need them):
 
 ```
-/plugin install vibe-flow-vercel@vibe-school     # проект на Vercel
-/plugin install vibe-flow-supabase@vibe-school   # проект на Supabase
+/plugin install vibe-flow-vercel@vibe-school     # project on Vercel
+/plugin install vibe-flow-supabase@vibe-school   # project on Supabase
 ```
 
-**Нужно:** Claude Code, `git`, `bash`, `python3`. Проверено на macOS; Linux и Windows через WSL — механизм тот же, но не прогонялся. Нет git-репозитория — `init` предложит его создать.
-**По желанию:**
-- GitHub CLI `gh` (`gh auth login`) — чтобы Claude сам создавал и вливал PR
-- Codex CLI (`npm i -g @openai/codex` → `codex login`) — второй, независимый критик плана. План и фрагменты кода при этом уходят в OpenAI
-- Расширение Claude in Chrome — проверки в браузере
+**Required:** Claude Code, `git`, `bash`, `python3`. Tested on macOS; Linux and Windows via WSL use the same mechanism but haven't been tested. No git repository? `init` will offer to create one.
+**Optional:**
+- GitHub CLI `gh` (`gh auth login`): lets Claude create and merge PRs itself
+- Codex CLI (`npm i -g @openai/codex` → `codex login`): a second, independent plan critic. The plan and code fragments are sent to OpenAI
+- Claude in Chrome extension: checks in the browser
 
-## Как работать
+## How to work
 
-1. Опишите задачу. Claude заведёт для неё отдельное рабочее дерево (`scripts/wt-new.sh <имя>` → папка `<проект>-wt/<имя>`) и предложит открыть в нём новую сессию: `cd <путь> && claude`. Так задачи и параллельные сессии не мешают друг другу
-2. Сложная задача — Claude перейдёт в режим планирования, прогонит план через ревьюеров и покажет вам упрощённую версию. Одобрите — он реализует сам или соберёт бригаду агентов
-3. Тесты, коммит, финальная проверка `release-gate` — автоматически
-4. «Пушим ветку?» → «да» → push. Отдельно: «Вливаем в main? Это деплой» → «да» → PR и мерж
+1. Describe the task. Claude creates a separate worktree for it (`scripts/wt-new.sh <name>` → folder `<project>-wt/<name>`) and suggests opening a new session there: `cd <path> && claude`. This way tasks and parallel sessions don't interfere with each other
+2. Complex task: Claude switches to plan mode, runs the plan through the reviewers and shows you a simplified version. Approve it, and Claude implements it alone or assembles a crew of agents
+3. Tests, commit and the final `release-gate` check happen automatically
+4. "Push the branch?" → "yes" → push. Separately: "Merge into main? This is a deploy" → "yes" → PR and merge
 
-Посмотреть начатые задачи: `scripts/wt-status.sh`. Закрыть отработанную: `scripts/wt-done.sh <имя>`.
+See started tasks: `scripts/wt-status.sh`. Close a finished one: `scripts/wt-done.sh <name>`.
 
-**Первый push в новый GitHub-репозиторий** делаете вы: `! git push -u origin main --no-verify` — пока на GitHub пусто, проверкам не с чем сравнивать.
+**The first push to a new GitHub repository** is done by you: `! git push -u origin main --no-verify`. While GitHub is empty, the checks have nothing to compare against.
 
-## Только человек может
+## Only a human can
 
-Команды вводятся в строке Claude Code через `!`, из папки того рабочего дерева, которое пушится (`! cd <путь> && …`):
+Commands are typed in the Claude Code prompt with `!`, from the folder of the worktree being pushed (`! cd <path> && …`):
 
-| Что | Команда |
+| What | Command |
 |---|---|
-| Пропустить финальную проверку | `scripts/release-gate.sh override --yes` |
-| Отправить без всех проверок | `git push --no-verify` |
-| Разрешить отправить коммиты прошлой сессии или сделанные вами в терминале | `scripts/git-allow-push.sh add <sha> --yes` |
+| Skip the final check | `scripts/release-gate.sh override --yes` |
+| Push without any checks | `git push --no-verify` |
+| Allow pushing commits from a previous session or ones you made in the terminal | `scripts/git-allow-push.sh add <sha> --yes` |
 
-Последнее — частая ситуация: после перезапуска Claude push называет ваши же вчерашние коммиты «не созданными этой сессией». Это защита от чужой работы в вашем push; посмотрите список и разрешите.
+The last one is common: after a Claude restart, push calls your own commits from yesterday "not created by this session". This protects your push from other people's work; review the list and allow it.
 
-## Обновление
+## Updating
 
 ```
 /plugin marketplace update vibe-school
 /plugin update vibe-flow@vibe-school
 ```
-Затем перезапустите сессию и снова `/vibe-flow:init`.
+Then restart the session and run `/vibe-flow:init` again.
 
-Повторный `init` обновит скрипты и блок правил, не трогая ваши настройки (`.gitguards.conf`) и ваш текст в `CLAUDE.md`.
+Re-running `init` updates the scripts and the rules block without touching your settings (`.gitguards.conf`) or your own text in `CLAUDE.md`.
 
-## Состав
+## Contents
 
-**Ядро `vibe-flow`** — агенты: plan-reviewer, security-reviewer, performance-reviewer, access-control-reviewer, test-impact-reviewer, codex-plan-critic, orchestration-router, team-planner, orchestrator, release-gate, senior-backend-engineer, test-runner, dev-server-restart, commit-and-ask, push-to-production, browser-operator, discovery-interview. Скиллы: `init`, `plan-mode-review`, `architecture-map`, `smoke-ui`.
+**Core `vibe-flow`**: agents plan-reviewer, security-reviewer, performance-reviewer, access-control-reviewer, test-impact-reviewer, codex-plan-critic, orchestration-router, team-planner, orchestrator, release-gate, senior-backend-engineer, test-runner, dev-server-restart, commit-and-ask, push-to-production, browser-operator, discovery-interview. Skills: `init`, `plan-mode-review`, `architecture-map`, `smoke-ui`.
 
-**`vibe-flow-vercel`** — vercel-deploy-monitor, vercel-logs-reader и скиллы логов.
-**`vibe-flow-supabase`** — supabase-admin и скилл безопасных миграций.
+**`vibe-flow-vercel`**: vercel-deploy-monitor, vercel-logs-reader and log skills.
+**`vibe-flow-supabase`**: supabase-admin and a safe migrations skill.
 
-Как устроено внутри и как править — [CONTRIBUTING.md](CONTRIBUTING.md).
+The agents, skills and rules themselves are written in Russian.
+
+How it works inside and how to modify it: [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## License
+
+[CC BY-NC 4.0](LICENSE) © mosu1985 (Vibe Coding School).
+
+- ✅ You may use vibe-flow as a working environment in your own projects, including commercial ones.
+- ✅ You may fork and modify it, provided you credit the author and link to this repository.
+- 🚫 You may not sell or commercially distribute vibe-flow or any of its parts (agents, skills, scripts, rules), including on skill marketplaces.
