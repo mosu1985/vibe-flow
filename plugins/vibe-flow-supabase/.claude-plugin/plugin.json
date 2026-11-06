@@ -1,10 +1,11 @@
 {
   "name": "vibe-flow-supabase",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Пакет vibe-flow для Supabase: агент БД и миграции.",
   "author": {
     "name": "Школа вайбкодинга"
   },
+  "license": "CC-BY-NC-4.0",
   "keywords": [
     "vibe-coding",
     "workflow",
