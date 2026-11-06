@@ -411,6 +411,53 @@ echo v3 > "$RP/a.txt"
 out=$(commit "$RP" "правка" a.txt); rc=$?
 [ $rc -ne 0 ] && echo "$out" | grep -q 'несуществующий' && ok "GG_PLAN_GATE на несуществующий файл — отказ" || bad "GG_PLAN_GATE без файла" "$out"
 
+echo "== wt-new: основа новой ветки — свежий origin =="
+WO="$TMP/wo.git"; git init -q --bare "$WO"
+W="$TMP/w"; mkrepo "$W"; git -C "$W" branch -M main
+git -C "$W" remote add origin "$WO"; git -C "$W" push -q origin main 2>/dev/null
+mkdir -p "$W/scripts" "$W/githooks"
+cp "$ROOT/scripts/wt-new.sh" "$ROOT/scripts/install-git-guards.sh" "$W/scripts/"
+cp "$ROOT/githooks/pre-commit" "$ROOT/githooks/pre-push" "$W/githooks/"
+WINIT=$(git -C "$W" rev-parse HEAD)
+WN="$TMP/wn"; git clone -q "$WO" "$WN" 2>/dev/null
+git -C "$WN" config user.email t@t; git -C "$WN" config user.name t
+wn_push() { echo "$1" > "$WN/a.txt"; git -C "$WN" commit -qam "$1"; git -C "$WN" push -q origin HEAD:main 2>/dev/null; git -C "$WN" rev-parse HEAD; }
+wcommit() { echo "$1" > "$W/b.txt"; git -C "$W" -c core.hooksPath=/dev/null commit -qam "$1"; git -C "$W" rev-parse HEAD; }
+
+FRESH=$(wn_push "сосед влил")                     # на GitHub новее, чем в главной папке
+out=$(bash "$W/scripts/wt-new.sh" t1 2>&1); rc=$?
+[ $rc -eq 0 ] && [ "$(git -C "$W" rev-parse wt/t1)" = "$FRESH" ] \
+    && ok "главная отстала — основа свежий origin/main" || bad "основа свежий origin/main" "$out"
+[ -z "$(git -C "$W" config branch.wt/t1.merge)" ] \
+    && ok "у новой ветки нет upstream origin/main (--no-track)" || bad "--no-track" "$(git -C "$W" config branch.wt/t1.merge)"
+echo "$out" | grep -q 'главная папка отстаёт' \
+    && ok "сказано, что главная папка отстаёт" || bad "предупреждение об отставании" "$out"
+
+git -C "$W" merge -q --ff-only origin/main
+LOCALSHA=$(wcommit "локальный коммит main")       # main впереди origin (не отправлено)
+out=$(bash "$W/scripts/wt-new.sh" t2 2>&1); rc=$?
+[ $rc -eq 0 ] && [ "$(git -C "$W" rev-parse wt/t2)" = "$LOCALSHA" ] \
+    && ok "локальная main впереди — основа локальная (коммиты не теряются)" || bad "локальная впереди" "$out"
+
+out=$(bash "$W/scripts/wt-new.sh" t3 "$WINIT" 2>&1); rc=$?
+[ $rc -eq 0 ] && [ "$(git -C "$W" rev-parse wt/t3)" = "$WINIT" ] \
+    && ok "явная база важнее свежего origin" || bad "явная база" "$out"
+
+FRESH2=$(wn_push "сосед влил ещё")                # теперь main и origin/main разошлись
+out=$(bash "$W/scripts/wt-new.sh" t4 2>&1); rc=$?
+[ $rc -eq 0 ] && [ "$(git -C "$W" rev-parse wt/t4)" = "$FRESH2" ] && echo "$out" | grep -q 'разошлась' \
+    && ok "разошлись — основа origin/main и предупреждение" || bad "разошлись" "$out"
+
+git -C "$W" remote set-url origin "$TMP/nope.git"   # «нет сети»
+out=$(bash "$W/scripts/wt-new.sh" t5 2>&1); rc=$?
+[ $rc -eq 0 ] && echo "$out" | grep -q 'не удалось обновить' && git -C "$W" rev-parse -q --verify wt/t5 >/dev/null \
+    && ok "без сети — предупреждение и дерево от того, что есть" || bad "без сети" "$out"
+
+git -C "$W" remote remove origin                  # репозиторий без origin
+out=$(bash "$W/scripts/wt-new.sh" t6 2>&1); rc=$?
+[ $rc -eq 0 ] && [ "$(git -C "$W" rev-parse wt/t6)" = "$LOCALSHA" ] \
+    && ok "без origin — основа локальная main" || bad "без origin" "$out"
+
 # Проектные тесты: scripts/git-guards/test-local-*.sh. Их ставит не install.sh,
 # а сам проект — поэтому обновление набора их не затирает. Видят все helpers.
 for t in "$ROOT"/scripts/git-guards/test-local-*.sh; do

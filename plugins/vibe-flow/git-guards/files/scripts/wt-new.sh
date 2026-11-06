@@ -2,12 +2,16 @@
 # wt-new.sh — рабочее место сессии: свой каталог, своя ветка, свой индекс,
 # свой HEAD и свой dev-сервер на свободном порту.
 #
-#   wt-new.sh <имя> [база]                  новое дерево и новая ветка
+#   wt-new.sh <имя> [база]                  новое дерево и ветка от свежего origin/main
 #   wt-new.sh --resume <ветка> [имя]        дерево на СУЩЕСТВУЮЩЕЙ ветке
 #   wt-new.sh <имя> --new                   новое, несмотря на похожую начатую
 #
 # Всё, что зависит от стека (dev-команда, признак готовности, базовый порт),
 # берётся из .gitguards.conf в корне репозитория.
+#
+# Основа новой ветки по умолчанию — защищённая ветка (GG_PROTECTED) в самом
+# свежем виде: перед созданием скрипт сам делает `git fetch`. Явная [база]
+# (ветка, тег, коммит) отменяет это поведение.
 set -eu
 usage() { sed -n '3,8p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 [ $# -ge 1 ] || usage
@@ -21,9 +25,10 @@ GG_DEV_PORT_BASE=3000
 GG_DEV_PORT_ENV="PORT"
 GG_DEV_READY_GLOBS=""
 GG_DEV_READY_WAIT=80
+GG_PROTECTED="main"
 [ -f "$ROOT/.gitguards.conf" ] && . "$ROOT/.gitguards.conf"
 
-RESUME=""; FORCE_NEW=0; NAME=""; BASE="HEAD"
+RESUME=""; FORCE_NEW=0; NAME=""; BASE=""
 if [ "$1" = "--resume" ]; then
     [ $# -ge 2 ] || usage
     RESUME="$2"; NAME="${3:-}"
@@ -102,10 +107,67 @@ if [ -e "$DIR" ]; then
     exit 1
 fi
 
+# ── Основа новой ветки ───────────────────────────────────────────────────────
+# 🔴 Раньше основой был HEAD главного дерева. Но вливание идёт на GitHub, а
+# локальную главную ветку после мержа никто не подтягивает: каждая новая
+# задача стартовала со СТАРОГО кода — без правок соседних, уже влитых веток.
+# Отсюда повторные починки уже починенного и конфликты при мерже. Поэтому
+# по умолчанию — свежая защищённая ветка с origin, а не то, что лежит на диске.
+has_ref() { git -C "$ROOT" rev-parse --verify -q "$1^{commit}" >/dev/null 2>&1; }
+short() { git -C "$ROOT" rev-parse --short "$1"; }
+if [ -z "$RESUME" ] && [ -z "$BASE" ]; then
+    LOCAL="refs/heads/$GG_PROTECTED"; REMOTE="refs/remotes/origin/$GG_PROTECTED"
+    if git -C "$ROOT" remote get-url origin >/dev/null 2>&1; then
+        # Без интерактивного запроса пароля и без вечного ожидания на мёртвой
+        # сети: при сбое — предупреждение и работа с тем, что есть локально.
+        GIT_TERMINAL_PROMPT=0 git -C "$ROOT" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=20 \
+            fetch -q origin "$GG_PROTECTED" 2>/dev/null \
+            || echo "  ⚠️  не удалось обновить origin/$GG_PROTECTED (нет сети, доступа или такой ветки на origin) — беру то, что есть локально"
+    fi
+    if has_ref "$REMOTE" && has_ref "$LOCAL"; then
+        if git -C "$ROOT" merge-base --is-ancestor "$REMOTE" "$LOCAL"; then
+            BASE="$LOCAL"       # локальная ветка та же или впереди (неотправленные коммиты)
+        elif git -C "$ROOT" merge-base --is-ancestor "$LOCAL" "$REMOTE"; then
+            BASE="$REMOTE"      # обычный случай: локальная отстала после мержей на GitHub
+        else
+            BASE="$REMOTE"
+            N=$(git -C "$ROOT" rev-list --count "$REMOTE..$LOCAL")
+            echo "  ⚠️  локальная $GG_PROTECTED разошлась с origin/$GG_PROTECTED — основа origin/$GG_PROTECTED;"
+            echo "      $N локальных коммита(ов) $GG_PROTECTED в новую ветку НЕ попадут"
+        fi
+    elif has_ref "$REMOTE"; then
+        BASE="$REMOTE"
+    elif has_ref "$LOCAL"; then
+        BASE="$LOCAL"           # репозиторий без origin — только локальная ветка
+    else
+        BASE="HEAD"             # нет защищённой ветки вовсе (новый репозиторий)
+    fi
+    case "$BASE" in
+        refs/remotes/*) LABEL="${BASE#refs/remotes/}" ;;
+        refs/heads/*)   LABEL="${BASE#refs/heads/}" ;;
+        *)              LABEL="$BASE" ;;
+    esac
+    echo "  основа: $LABEL ($(short "$BASE"))"
+
+    # Главное дерево на защищённой ветке и отстаёт — сказать: dev-сервер
+    # главной папки показывает старую версию, и это выглядит как поломка.
+    if [ "$BASE" = "$REMOTE" ] && has_ref "$LOCAL" \
+       && [ "$(git -C "$MAIN" symbolic-ref -q HEAD 2>/dev/null)" = "$LOCAL" ] \
+       && git -C "$ROOT" merge-base --is-ancestor "$LOCAL" "$REMOTE"; then
+        BEHIND=$(git -C "$ROOT" rev-list --count "$LOCAL..$REMOTE")
+        if [ "$BEHIND" -gt 0 ]; then
+            echo "  ℹ️  главная папка отстаёт от origin/$GG_PROTECTED на $BEHIND коммит(ов): git -C \"$MAIN\" pull --ff-only"
+        fi
+    fi
+fi
+
 if [ -n "$RESUME" ]; then
     git -C "$ROOT" worktree add "$DIR" "$BRANCH"
 else
-    git -C "$ROOT" worktree add -b "$BRANCH" "$DIR" "$BASE"
+    # --no-track: от origin/<ветка> git иначе назначил бы её upstream'ом новой
+    # ветки, и `git status` писал бы «впереди origin/main». Свой upstream
+    # ветка получает при первом `git push -u origin <ветка>`.
+    git -C "$ROOT" worktree add --no-track -b "$BRANCH" "$DIR" "$BASE"
 fi
 
 # ── Зависимости ──────────────────────────────────────────────────────────────
