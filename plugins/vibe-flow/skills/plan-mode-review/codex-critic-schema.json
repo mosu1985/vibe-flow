@@ -13,7 +13,7 @@
       "type": "number",
       "minimum": 0,
       "maximum": 10,
-      "description": "Итоговый балл плана по рубрике: 10.0 минус сумма вычетов, один знак после запятой"
+      "description": "Final plan score per the rubric: 10.0 minus the sum of deductions, one decimal place"
     },
     "verdict": {
       "type": "string",
@@ -21,15 +21,15 @@
         "pass",
         "fail"
       ],
-      "description": "pass если НЕТ ни одного findings с severity critical или high, иначе fail. Балл на вердикт НЕ влияет: план с score 6.5 и только medium/low замечаниями — это pass"
+      "description": "pass if there is NO finding with severity critical or high, otherwise fail. The score does NOT affect the verdict: a plan with score 6.5 and only medium/low findings is a pass"
     },
     "summary": {
       "type": "string",
-      "description": "2-4 предложения по-русски: главное, что критик думает о плане"
+      "description": "2-4 sentences in English: the main thing the critic thinks about the plan"
     },
     "deductions": {
       "type": "array",
-      "description": "Расшифровка балла. Пустой массив только при score = 10.0",
+      "description": "Breakdown of the score. Empty array only when score = 10.0",
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -40,18 +40,18 @@
         "properties": {
           "weight": {
             "type": "number",
-            "description": "Положительное число — сколько баллов снято по этому пункту, вес из рубрики"
+            "description": "Positive number: how many points were deducted for this item, the weight from the rubric"
           },
           "reason": {
             "type": "string",
-            "description": "За что именно снято, по-русски, конкретно"
+            "description": "What exactly was deducted for, in English, concretely"
           }
         }
       }
     },
     "findings": {
       "type": "array",
-      "description": "Замечания к плану. Каждое должно быть действием, а не наблюдением",
+      "description": "Findings on the plan. Each must be an action, not an observation",
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -68,7 +68,7 @@
         "properties": {
           "id": {
             "type": "string",
-            "description": "Короткий идентификатор вида C1, C2, C3 — чтобы на замечание можно было сослаться в ответе"
+            "description": "Short identifier like C1, C2, C3, so a finding can be referenced in the reply"
           },
           "severity": {
             "type": "string",
@@ -78,31 +78,31 @@
               "medium",
               "low"
             ],
-            "description": "Класс дефекта строго по таблице весов рубрики: critical = ломает прод или теряет данные / дыра в изоляции или правах; high = нарушено критическое правило проекта, дефект логики плана, непроверенное допущение о внешней системе, от которого зависит контроль доступа или источник данных; medium = нагрузка без оценки, пробел в покрытии, прочие непроверенные допущения; low = неполнота описания и косметика. critical и high БЛОКИРУЮТ план — ставить их без конкретного сценария отказа в failure_scenario запрещено, такое замечание понижается до medium"
+            "description": "Defect class strictly per the rubric weight table: critical = breaks production or loses data / hole in isolation or permissions; high = a critical project rule is violated, plan logic defect, unverified assumption about an external system on which access control or the data source depends; medium = load without an estimate, coverage gap, other unverified assumptions; low = incomplete description and cosmetics. critical and high BLOCK the plan: assigning them without a concrete failure scenario in failure_scenario is forbidden, such a finding is downgraded to medium"
           },
           "title": {
             "type": "string",
-            "description": "Одна строка по-русски: суть замечания"
+            "description": "One line in English: the gist of the finding"
           },
           "detail": {
             "type": "string",
-            "description": "Почему это проблема и что произойдёт, если оставить как есть. Конкретный сценарий отказа, а не общие слова"
+            "description": "Why this is a problem and what will happen if left as is. A concrete failure scenario, not generalities"
           },
           "failure_scenario": {
             "type": "string",
-            "description": "При каких входах или состоянии что именно сломается — конкретно, по-русски. Обязателен для critical и high: без него замечание считается наблюдением и понижается до medium. Для medium и low допустима строка '—'"
+            "description": "Under which inputs or state what exactly breaks: concrete, in English. Required for critical and high: without it the finding counts as an observation and is downgraded to medium. For medium and low the string '—' is acceptable"
           },
           "evidence": {
             "type": "string",
-            "description": "Опора замечания в РЕПОЗИТОРИИ в виде путь:строка (например src/billing/cache.ts:87) — что именно в коде подтверждает дефект. Если замечание относится к тексту плана и опоры в коде нет, написать 'только план' и объяснить в detail, почему кода недостаточно. Замечание уровня critical/high без опоры в коде или без объяснения, почему её нет, ослаблено и должно быть понижено"
+            "description": "The finding's anchor in the REPOSITORY as path:line (for example src/billing/cache.ts:87): what exactly in the code confirms the defect. If the finding concerns the plan text and there is no anchor in code, write 'plan only' and explain in detail why code is not enough. A critical/high finding without a code anchor or without an explanation of why there is none is weakened and must be downgraded"
           },
           "plan_section": {
             "type": "string",
-            "description": "К какому шагу или разделу плана относится. '—' если к плану целиком"
+            "description": "Which step or section of the plan it refers to. '—' if the whole plan"
           },
           "suggested_fix": {
             "type": "string",
-            "description": "Что конкретно изменить в плане. Это правка ПЛАНА, а не кода"
+            "description": "What exactly to change in the plan. This is an edit to the PLAN, not to code"
           }
         }
       }

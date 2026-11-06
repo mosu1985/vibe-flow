@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# install-git-guards.sh — ставит канонические хуки ВНЕ рабочего дерева.
+# install-git-guards.sh — installs the canonical hooks OUTSIDE the working tree.
 #
-# Почему не .husky: husky резолвит хук относительно текущего checkout.
-# Worktree со старой базы или переключение основного дерева на ревизию до
-# внедрения guard подсунут git СТАРУЮ версию хука — вместе с отсутствием в
-# ней всех проверок. Каталог в git-common-dir от переключений не зависит.
+# Why not .husky: husky resolves the hook relative to the current checkout.
+# A worktree on an old base, or switching the main working tree to a revision
+# from before the guard existed, would hand git the OLD version of the hook —
+# without any of its checks. A directory in git-common-dir does not depend on checkouts.
 #
-# Идемпотентен: одинаковое содержимое не трогает, другое — перезаписывает.
+# Idempotent: identical content is left alone, different content is overwritten.
 set -eu
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 COMMON=$(git -C "$ROOT" rev-parse --git-common-dir)
@@ -17,15 +17,15 @@ mkdir -p "$DEST"
 for h in pre-commit pre-push; do
     src="$ROOT/githooks/$h"; dst="$DEST/$h"
     if [ -f "$dst" ] && cmp -s "$src" "$dst"; then
-        echo "  = $h без изменений"
+        echo "  = $h unchanged"
     else
         tmp="$dst.tmp.$$"
-        cp "$src" "$tmp"; chmod +x "$tmp"; mv "$tmp" "$dst"   # атомарная подмена
-        echo "  + $h установлен"
+        cp "$src" "$tmp"; chmod +x "$tmp"; mv "$tmp" "$dst"   # atomic swap
+        echo "  + $h installed"
     fi
     shasum -a 256 "$src" | cut -d' ' -f1 > "$DEST/$h.sha256"
 done
 
 git -C "$ROOT" config core.hooksPath "$DEST"
 echo "  core.hooksPath = $DEST"
-echo "Готово. Проверить: scripts/git-lock.sh status"
+echo "Done. Check: scripts/git-lock.sh status"

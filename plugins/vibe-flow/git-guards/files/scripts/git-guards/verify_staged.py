@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-"""Сверка списков путей git по NUL-протоколу.
+"""Compare lists of git paths over the NUL protocol.
 
-Зачем не shell: `git diff --name-only` при core.quotePath C-квотит кириллицу
-и необычные имена, `sort`/`diff` ломаются на переводе строки внутри имени,
-а pathspec-каталог раскрывается в несколько файлов. Всё это в проекте
-встречается — пути вида `дир/файл с пробелом.txt` живые.
+Why not shell: with core.quotePath, `git diff --name-only` C-quotes non-ASCII
+and unusual names, `sort`/`diff` break on a newline inside a name, and a
+directory pathspec expands into several files. All of this happens in real
+projects — paths like `dír/fïle with spaces.txt` are live.
 
-Читает NUL-разделённый список с stdin.
+Reads a NUL-separated list from stdin.
 
-  --expect <пути…>     stdin ⊆ ожидаемых. Каждый путь из stdin обязан быть
-                       либо ровно одним из аргументов, либо лежать внутри
-                       аргумента-каталога. Лишний путь → rc=1 со списком.
-  --intersects <пути…> Есть ли пересечение stdin с аргументами.
-                       Есть → rc=0 (для `if` в shell), нет → rc=1.
+  --expect <paths…>     stdin ⊆ expected. Every path from stdin must either
+                        be exactly one of the arguments or lie inside a
+                        directory argument. An extra path → rc=1 with a list.
+  --intersects <paths…> Whether stdin intersects the arguments.
+                        Yes → rc=0 (for `if` in shell), no → rc=1.
 """
 
 import os
@@ -39,7 +39,7 @@ def covered_by(path: str, expected: list[str]) -> bool:
 
 def main() -> int:
     if len(sys.argv) < 2:
-        print("нужен режим: --expect | --intersects", file=sys.stderr)
+        print("mode required: --expect | --intersects", file=sys.stderr)
         return 2
 
     mode, expected = sys.argv[1], sys.argv[2:]
@@ -48,23 +48,23 @@ def main() -> int:
     if mode == "--expect":
         extra = [p for p in actual if not covered_by(p, expected)]
         if extra:
-            print("🔴 в коммит попали пути, которых не просили:", file=sys.stderr)
+            print("🔴 the commit contains paths that were not requested:", file=sys.stderr)
             for p in extra:
                 print(f"     {p}", file=sys.stderr)
-            print("   Это чужая работа — коммит остановлен.", file=sys.stderr)
+            print("   This is someone else's work — commit stopped.", file=sys.stderr)
             return 1
         return 0
 
     if mode == "--intersects":
         hit = [p for p in actual if covered_by(p, expected)]
         if hit:
-            print("🔴 пересечение с чужими изменениями:", file=sys.stderr)
+            print("🔴 overlap with someone else's changes:", file=sys.stderr)
             for p in hit:
                 print(f"     {p}", file=sys.stderr)
-            return 0     # пересечение ЕСТЬ
-        return 1         # пересечения нет
+            return 0     # there IS an overlap
+        return 1         # no overlap
 
-    print(f"неизвестный режим: {mode}", file=sys.stderr)
+    print(f"unknown mode: {mode}", file=sys.stderr)
     return 2
 
 

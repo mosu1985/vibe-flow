@@ -1,37 +1,37 @@
 ---
 name: vercel-logs-runtime
-description: Проверить runtime-логи Vercel (ошибки serverless/edge-функций)
+description: Check Vercel runtime logs (serverless/edge function errors)
 disable-model-invocation: false
 ---
 
-Проверь runtime-логи Vercel для диагностики ошибок в serverless- и edge-функциях.
+Check the Vercel runtime logs to diagnose errors in serverless and edge functions.
 
-## Выбор способа
+## Choosing a method
 
-1. **Основной — скрипт Request Logs** (работает без MCP, нужен `VERCEL_TOKEN` и `.vercel/project.json`):
+1. **Main — the Request Logs script** (works without MCP, needs `VERCEL_TOKEN` and `.vercel/project.json`):
    ```bash
    node "${CLAUDE_PLUGIN_ROOT}/scripts/vercel-request-logs.mjs" --minutes 60 --step 1 --status 500
    ```
-   Либо запусти агента `vibe-flow-vercel:vercel-logs-reader` — он сам подберёт период и шаг.
-2. **Запасной — MCP Vercel** (`get_runtime_logs`, `get_runtime_errors`), если подключён. Фильтр `level: ["error", "warning"]`, по умолчанию последние 24 часа, limit 100. Идентификаторы проекта и команды — из `.vercel/project.json`, не угадывать.
-3. **Совсем нет доступа** — честно сообщи «недоступно: нет токена / MCP» и что сделать (`vercel link`, `VERCEL_TOKEN` в `.env.local`).
+   Or launch the `vibe-flow-vercel:vercel-logs-reader` agent — it picks the period and step itself.
+2. **Fallback — the Vercel MCP** (`get_runtime_logs`, `get_runtime_errors`), if connected. Filter `level: ["error", "warning"]`, by default the last 24 hours, limit 100. Project and team identifiers come from `.vercel/project.json`, do not guess.
+3. **No access at all** — honestly report "unavailable: no token / MCP" and what to do (`vercel link`, `VERCEL_TOKEN` in `.env.local`).
 
-Если в проекте настроен Log Drain на собственный эндпоинт — логи можно взять оттуда (адрес спроси у пользователя или найди в `CLAUDE.md`).
+If the project has a Log Drain set up to its own endpoint, the logs can be taken from there (ask the user for the address or find it in `CLAUDE.md`).
 
-## 🔴 Ограничения Request Logs API
+## 🔴 Request Logs API limitations
 
-- Окно запроса — максимум 60 секунд (больше → `ExceedsBillingLimitError`); для периода скрипт бьёт на минутные окна
-- Хранение ~3 суток; глубже — тот же код ошибки, не путать с лимитом окна
-- `limit` может игнорироваться (~50 строк); полноту даёт серверный фильтр метода/маршрута, не курсор
+- The request window is at most 60 seconds (more → `ExceedsBillingLimitError`); for a period the script splits into one-minute windows
+- Retention is ~3 days; deeper gives the same error code, do not confuse it with the window limit
+- `limit` may be ignored (~50 lines); completeness comes from the server-side method/route filter, not the cursor
 
-## Анализ
+## Analysis
 
-- Группируй ошибки по типу (API-маршрут, edge-функция, middleware)
-- Считай частоту; ищи паттерны (одна ошибка, один эндпоинт, один регион)
-- Различай наблюдаемый сбой и предполагаемую причину
+- Group errors by type (API route, edge function, middleware)
+- Count frequency; look for patterns (one error, one endpoint, one region)
+- Distinguish the observed failure from the suspected cause
 
-## Результат
+## Result
 
-- Список ошибок: время, источник, сообщение
-- Какие маршруты затронуты
-- Рекомендации по исправлению
+- A list of errors: time, source, message
+- Which routes are affected
+- Recommendations for fixing

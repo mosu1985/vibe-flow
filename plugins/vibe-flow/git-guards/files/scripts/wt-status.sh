@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# wt-status.sh — что в репозитории НЕ доделано.
+# wt-status.sh — what in the repository is NOT finished.
 #
-# ЗАЧЕМ. Защита набора строилась против того, чтобы сессия утащила ЧУЖИЕ
-# изменения, и с этим справляется. Но был противоположный пробел: сессия не
-# видела СВОЕЙ прошлой работы. `CLAUDE.md` предписывает начинать с
-# `wt-new.sh <имя-задачи>`, шага «посмотри, не начата ли эта работа» в процессе
-# не было вовсе — и вторая сессия по той же теме, назвав задачу чуть иначе,
-# отпочковывалась от main и писала всё заново. Проверено 10.09.2026: файл,
-# сделанный в прошлой сессии, в новом дереве не виден, предупреждения нет.
+# WHY. The kit's guards were built to stop a session from grabbing OTHER sessions'
+# changes, and they handle that. But there was the opposite gap: a session did not
+# see ITS OWN earlier work. `CLAUDE.md` says to start with `wt-new.sh <task-name>`,
+# and there was no "check whether this work has already started" step at all — so
+# a second session on the same topic, naming the task slightly differently, would
+# branch off main and write everything again. Verified 10.09.2026: a file made in
+# the previous session is not visible in the new tree, and there is no warning.
 #
-#   scripts/wt-status.sh            — отчёт для человека
-#   scripts/wt-status.sh --hook     — для SessionStart: молчит, когда всё доделано
-#   scripts/wt-status.sh --names    — только имена веток (для wt-new.sh)
+#   scripts/wt-status.sh            — report for a human
+#   scripts/wt-status.sh --hook     — for SessionStart: silent when everything is finished
+#   scripts/wt-status.sh --names    — branch names only (for wt-new.sh)
 set -eu
 
 MODE="${1:-report}"
@@ -23,15 +23,15 @@ GG_BRANCH_PREFIX="wt/"
 GG_PROTECTED="main"
 [ -f "$ROOT/.gitguards.conf" ] && . "$ROOT/.gitguards.conf"
 
-# База сравнения: и локальная главная ветка, и её слепок на remote. Работа,
-# доехавшая до main любым путём, доделанной считается — в том числе если
-# въехала с переписанным SHA и сама ветка выглядит отставшей.
+# Comparison base: both the local main branch and its remote snapshot. Work that
+# reached main by any route counts as finished — including when it landed with a
+# rewritten SHA and the branch itself looks behind.
 BASES=""
 git rev-parse --verify -q "refs/heads/$GG_PROTECTED" >/dev/null 2>&1 && BASES="$BASES refs/heads/$GG_PROTECTED"
 git rev-parse --verify -q "refs/remotes/origin/$GG_PROTECTED" >/dev/null 2>&1 && BASES="$BASES refs/remotes/origin/$GG_PROTECTED"
 [ -n "$BASES" ] || exit 0
 
-# Карта «ветка → её рабочее дерево»
+# Map "branch → its worktree"
 MAP=$(git worktree list --porcelain 2>/dev/null | awk '
     /^worktree /{w=substr($0, 10)} /^branch /{sub("refs/heads/","",$2); print $2"\t"w}')
 
@@ -41,23 +41,23 @@ for ref in $(git for-each-ref --format='%(refname:short)' "refs/heads/$GG_BRANCH
     n=$(git rev-list --count "$ref" --not $BASES 2>/dev/null || echo 0)
     [ "$n" = "0" ] && continue
     COUNT=$((COUNT+1))
-    # 🔴 «Не доехало до main» и «не существует больше нигде» — разные тревоги.
-    # Первое значит «не доделано», второе — «единственная копия на этом диске».
-    # Показывать только первое означало бы уравнять брошенную ветку, лежащую на
-    # origin, с работой, которую потеряет отказ диска.
+    # 🔴 "Did not reach main" and "exists nowhere else" are different alarms.
+    # The first means "unfinished", the second "the only copy is on this disk".
+    # Showing only the first would equate an abandoned branch sitting on origin
+    # with work that a disk failure would destroy.
     nowhere=$(git rev-list --count "$ref" --not --remotes $BASES 2>/dev/null || echo 0)
     when=$(git log -1 --format='%ad' --date=format:'%d.%m' "$ref" 2>/dev/null)
     w=$(printf '%s\n' "$MAP" | awk -F'\t' -v b="$ref" '$1==b{print $2}')
     if [ -n "$w" ]; then
         d=$(git -C "$w" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
-        extra="дерево: $(basename "$w")"
-        [ "$d" != "0" ] && extra="$extra · незакоммичено: $d"
+        extra="tree: $(basename "$w")"
+        [ "$d" != "0" ] && extra="$extra · uncommitted: $d"
     else
-        extra="дерева нет → scripts/wt-new.sh --resume $ref"
+        extra="no tree → scripts/wt-new.sh --resume $ref"
     fi
     risk=""
-    [ "$nowhere" != "0" ] && risk=" 🔴 $nowhere нет НИГДЕ"
-    LINES="$LINES$(printf '   %-32s %2s не в %s · %s · %s%s' "$ref" "$n" "$GG_PROTECTED" "$when" "$extra" "$risk")
+    [ "$nowhere" != "0" ] && risk=" 🔴 $nowhere exist NOWHERE else"
+    LINES="$LINES$(printf '   %-32s %2s not in %s · %s · %s%s' "$ref" "$n" "$GG_PROTECTED" "$when" "$extra" "$risk")
 "
 done
 
@@ -69,18 +69,18 @@ case "$MODE" in
     done
     ;;
   --hook)
-    # 🔴 Молчание, когда всё доделано: хук выполняется в КАЖДОЙ сессии, и
-    # постоянный шум сделал бы его невидимым ровно тогда, когда он нужен.
+    # 🔴 Silent when everything is finished: the hook runs in EVERY session, and
+    # constant noise would make it invisible exactly when it is needed.
     [ "$COUNT" = "0" ] && exit 0
-    printf '🔶 В репозитории есть незавершённая работа (%s ветк.):\n' "$COUNT"
+    printf '🔶 The repository has unfinished work (%s branches):\n' "$COUNT"
     printf '%s' "$LINES"
-    printf '   Прежде чем заводить новое дерево — проверьте, не начата ли задача здесь.\n'
+    printf '   Before creating a new tree, check whether the task has already been started here.\n'
     ;;
   *)
     if [ "$COUNT" = "0" ]; then
-        echo "Незавершённых веток нет — вся работа в $GG_PROTECTED."
+        echo "No unfinished branches — all work is in $GG_PROTECTED."
     else
-        printf '🔶 Незавершённая работа (%s ветк.):\n' "$COUNT"
+        printf '🔶 Unfinished work (%s branches):\n' "$COUNT"
         printf '%s' "$LINES"
     fi
     ;;

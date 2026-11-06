@@ -1,50 +1,50 @@
 ---
 name: vercel-deploy-logs
-description: Проверить логи деплоя Vercel через MCP-инструменты Vercel (если подключены) — статус и ошибки сборки
+description: Check Vercel deploy logs via the Vercel MCP tools (if connected) — status and build errors
 disable-model-invocation: false
 ---
 
-Проверь логи деплоя Vercel, используя MCP-инструменты Vercel.
+Check the Vercel deploy logs using the Vercel MCP tools.
 
-## Внешний инструмент опционален
+## The external tool is optional
 
-MCP Vercel может быть не подключён. Проверь, видны ли инструменты `list_deployments` / `get_deployment` / `get_deployment_build_logs` (в зависимости от сборки MCP имена могут иметь префикс `mcp__…Vercel__`). Если нет — честно скажи «недоступно: MCP Vercel не подключён» и предложи путь через API: агент `vibe-flow-vercel:vercel-deploy-monitor` (деплой по SHA) или скилл `/vibe-flow-vercel:vercel-logs`.
+The Vercel MCP may not be connected. Check whether the tools `list_deployments` / `get_deployment` / `get_deployment_build_logs` are visible (depending on the MCP build the names may have a `mcp__…Vercel__` prefix). If not — honestly say "unavailable: the Vercel MCP is not connected" and suggest the API route: the `vibe-flow-vercel:vercel-deploy-monitor` agent (deploy by SHA) or the `/vibe-flow-vercel:vercel-logs` skill.
 
-## Данные проекта
+## Project data
 
-Не угадывай идентификаторы. Возьми `projectId` и `orgId` (teamId) из `.vercel/project.json` в корне проекта (создаётся `vercel link`). Нет файла — спроси пользователя или попроси выполнить `vercel link`.
+Do not guess identifiers. Take `projectId` and `orgId` (teamId) from `.vercel/project.json` in the project root (created by `vercel link`). No file — ask the user or ask them to run `vercel link`.
 
-## Шаги
+## Steps
 
-### 1. Список деплоев
-- `list_deployments` с projectId и teamId
-- Покажи последние 5: дата, статус, коммит, URL
+### 1. List the deploys
+- `list_deployments` with projectId and teamId
+- Show the last 5: date, status, commit, URL
 
-### 2. Статус нужного деплоя
-- **ERROR или BUILDING:** `get_deployment_build_logs` (limit ~200)
-- **READY:** подтверди успешный деплой
-- 🔴 Сверяй `meta.githubCommitSha` с нужным коммитом: «последний» в списке может быть чужим preview
-- 🔴 `state=BUILDING` бывает залипшим после завершения сборки: смотри `ready` против `buildingAt` (если `ready` > `buildingAt` — сборка закончена). Логи сборки тоже могут отставать
-- `BLOCKED` — сборка не стартовала; причину искать в `readyStateReason`/`seatBlock` деплоя (частая: не опознан email автора коммита). MCP-инструмент `get_deployment` на таких деплоях может падать с «Response validation failed» — тогда тянуть `GET /v13/deployments/{id}` напрямую
+### 2. Status of the deploy you need
+- **ERROR or BUILDING:** `get_deployment_build_logs` (limit ~200)
+- **READY:** confirm the successful deploy
+- 🔴 Compare `meta.githubCommitSha` with the commit you need: the "latest" in the list may be someone else's preview
+- 🔴 `state=BUILDING` can be stuck after the build has finished: look at `ready` against `buildingAt` (if `ready` > `buildingAt` — the build is finished). The build logs may lag too
+- `BLOCKED` — the build did not start; look for the cause in the deploy's `readyStateReason`/`seatBlock` (a common one: the commit author's email was not recognized). The MCP tool `get_deployment` may fail on such deploys with "Response validation failed" — then fetch `GET /v13/deployments/{id}` directly
 
-### 3. Анализ ошибок
-- Найди строки с `error`, `Error`, `failed`, `Failed`
-- Определи файл и строку, предложи решение
-- Отказ `SIGKILL` + «Out of Memory» — это память контейнера сборки, а не код: потолок `--max-old-space-size` понижать, не повышать; тяжёлый шаг (проверку типов) выносить из сборки
+### 3. Error analysis
+- Find lines with `error`, `Error`, `failed`, `Failed`
+- Identify the file and line, propose a fix
+- A `SIGKILL` + "Out of Memory" failure is the build container's memory, not the code: lower the `--max-old-space-size` ceiling, don't raise it; move the heavy step (the type check) out of the build
 
-## Формат вывода
+## Output format
 
 ```
-Статус деплоя
+Deploy status
 - ID: {deployment_id}
-- Статус: ✅ READY / ❌ ERROR / 🚫 BLOCKED / 🔄 BUILDING
+- Status: ✅ READY / ❌ ERROR / 🚫 BLOCKED / 🔄 BUILDING
 - URL: {url}
-- Коммит: {sha} — {message}
-- Время: {created_at}
+- Commit: {sha} — {message}
+- Time: {created_at}
 
-Ошибки (если есть):
+Errors (if any):
 {error_logs}
 
-Рекомендации:
-- {что исправить}
+Recommendations:
+- {what to fix}
 ```

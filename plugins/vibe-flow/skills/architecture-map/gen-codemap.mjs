@@ -1,27 +1,27 @@
 #!/usr/bin/env node
 /**
- * gen-codemap.mjs — общий генератор «карты кода» (Node >= 18, без зависимостей).
+ * gen-codemap.mjs — shared "code map" generator (Node >= 18, no dependencies).
  *
- * Сканирует проект (fs + regex) и пишет greppable индекс в docs/codemap/:
- *   INDEX.md       — счётчики, дерево каталогов верхнего уровня
- *   routes.md      — точки входа HTTP: Next.js (app/pages router), Express/Fastify,
+ * Scans the project (fs + regex) and writes a greppable index to docs/codemap/:
+ *   INDEX.md       — counters, top-level directory tree
+ *   routes.md      — HTTP entry points: Next.js (app/pages router), Express/Fastify,
  *                    FastAPI/Flask, Django urls
- *   pages.md       — страницы Next.js (app/**\/page.*, pages/**)
- *   exports.md     — экспорты модулей TS/JS и top-level def/class в Python
- *   migrations.md  — файлы миграций (каталоги migrations/)
+ *   pages.md       — Next.js pages (app/**\/page.*, pages/**)
+ *   exports.md     — TS/JS module exports and top-level def/class in Python
+ *   migrations.md  — migration files (migrations/ directories)
  *
- * Использование (из корня проекта):
+ * Usage (from the project root):
  *   node gen-codemap.mjs [--root <dir>] [--out <dir>]
- *   --root  корень проекта (по умолчанию — текущий каталог)
- *   --out   куда писать (по умолчанию <root>/docs/codemap)
+ *   --root  project root (default: current directory)
+ *   --out   where to write (default: <root>/docs/codemap)
  *
- * Вывод детерминирован: без меток времени, чтобы повторная генерация без
- * изменений в коде не давала диффа (иначе INDEX.md «меняется» при каждом запуске).
+ * Output is deterministic: no timestamps, so regenerating without
+ * code changes produces no diff (otherwise INDEX.md "changes" on every run).
  */
 import fs from "node:fs";
 import path from "node:path";
 
-// ── аргументы ───────────────────────────────────────────────────────────────
+// ── arguments ───────────────────────────────────────────────────────────────
 const argv = process.argv.slice(2);
 function arg(name) {
   const i = argv.indexOf(name);
@@ -30,18 +30,18 @@ function arg(name) {
 const ROOT = path.resolve(arg("--root") || process.cwd());
 const OUT_DIR = path.resolve(arg("--out") || path.join(ROOT, "docs", "codemap"));
 
-// Каталоги, которые не обходим
+// Directories we do not walk
 const SKIP_DIRS = new Set([
   "node_modules", ".git", "dist", "build", ".next", ".nuxt", ".svelte-kit", ".output",
   "venv", ".venv", "env", "__pycache__", "site-packages", ".tox", ".mypy_cache",
   ".pytest_cache", "coverage", "target", "out", "vendor", ".turbo", ".cache",
   ".vercel", ".idea", ".vscode", "Pods", "DerivedData",
 ]);
-const MAX_FILE_BYTES = 512 * 1024; // большие файлы (бандлы, дампы) не читаем
+const MAX_FILE_BYTES = 512 * 1024; // large files (bundles, dumps) are not read
 const JS_EXT = /\.(?:[cm]?[jt]s|[jt]sx)$/;
 const PY_EXT = /\.py$/;
 
-// ── обход ───────────────────────────────────────────────────────────────────
+// ── walk ───────────────────────────────────────────────────────────────────
 /** @type {{abs:string, rel:string, size:number}[]} */
 const files = [];
 function walk(dir) {
@@ -55,12 +55,12 @@ function walk(dir) {
   for (const e of entries) {
     const abs = path.join(dir, e.name);
     if (e.isDirectory()) {
-      // скрытые каталоги, служебные и сам каталог вывода пропускаем
+      // skip hidden and service directories and the output directory itself
       if (SKIP_DIRS.has(e.name) || e.name.startsWith(".") || abs === OUT_DIR) continue;
       walk(abs);
     } else if (e.isFile()) {
       let size = 0;
-      try { size = fs.statSync(abs).size; } catch { /* пропуск */ }
+      try { size = fs.statSync(abs).size; } catch { /* skip */ }
       files.push({ abs, rel: path.relative(ROOT, abs).split(path.sep).join("/"), size });
     }
   }
@@ -76,10 +76,10 @@ const isTest = (rel) =>
   /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(rel) ||
   /(?:^|\/)test_[^/]+\.py$|_test\.py$|(?:^|\/)conftest\.py$/.test(rel);
 
-// ── Next.js: маршруты ───────────────────────────────────────────────────────
+// ── Next.js: routes ───────────────────────────────────────────────────────
 const HTTP = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
 
-/** Путь файла app-router → URL: убираем app/, имя файла, (группы) и @слоты */
+/** app-router file path → URL: strip app/, the file name, (groups) and @slots */
 function appUrl(rel) {
   const m = rel.match(/(?:^|\/)(?:src\/)?app\/(.*)$/);
   if (!m) return null;
@@ -88,7 +88,7 @@ function appUrl(rel) {
   const url = segs.filter((s) => !/^\(.*\)$/.test(s) && !s.startsWith("@")).join("/");
   return "/" + url;
 }
-/** Путь файла pages-router → URL */
+/** pages-router file path → URL */
 function pagesUrl(rel) {
   const m = rel.match(/(?:^|\/)(?:src\/)?pages\/(.*)$/);
   if (!m) return null;
@@ -100,7 +100,7 @@ const routes = []; // {url, methods, file, kind}
 const pages = []; // {url, file, kind}
 
 for (const f of files) {
-  // isTest тут не применяем: app/api/test/route.ts — настоящий маршрут
+  // isTest is not applied here: app/api/test/route.ts is a real route
   if (!JS_EXT.test(f.rel) || /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(f.rel)) continue;
 
   // app router: route.ts
@@ -134,7 +134,7 @@ for (const f of files) {
   }
 }
 
-// ── Express / Fastify / Hono / Koa-router: грубый regex ─────────────────────
+// ── Express / Fastify / Hono / Koa-router: rough regex ─────────────────────
 const NODE_ROUTE_RE =
   /\b([A-Za-z_$][\w$]*)\.(get|post|put|patch|delete|all|options|head)\(\s*(['"`])((?:\/|\*)[^'"`]*)\3/g;
 const NODE_ROUTER_NAME = /^(?:app|router|server|fastify|api|route|routes|r|[\w$]*(?:Router|router|App|app|Server|server|Api|api))$/;
@@ -170,7 +170,7 @@ for (const f of files) {
   }
 }
 
-// ── Миграции ────────────────────────────────────────────────────────────────
+// ── Migrations ────────────────────────────────────────────────────────────────
 const migrations = [];
 for (const f of files) {
   if (!/(?:^|\/)migrations\//.test(f.rel)) continue;
@@ -184,7 +184,7 @@ for (const f of files) {
   migrations.push({ file: f.rel, desc });
 }
 
-// ── Экспорты модулей ────────────────────────────────────────────────────────
+// ── Module exports ────────────────────────────────────────────────────────
 const exportsIdx = []; // {file, items: string[]}
 const JS_EXPORT_RES = [
   [/^export\s+(?:default\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)/gm, "fn"],
@@ -230,7 +230,7 @@ for (const f of files) {
   if (items.length) exportsIdx.push({ file: f.rel, items });
 }
 
-// ── Вывод ───────────────────────────────────────────────────────────────────
+// ── Output ───────────────────────────────────────────────────────────────────
 fs.mkdirSync(OUT_DIR, { recursive: true });
 const write = (name, text) => fs.writeFileSync(path.join(OUT_DIR, name), text.endsWith("\n") ? text : text + "\n");
 const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
@@ -240,24 +240,24 @@ routes.sort((a, b) => cmp(a.url, b.url) || cmp(a.file, b.file) || cmp(a.methods.
 {
   const byKind = {};
   for (const r of routes) byKind[r.kind] = (byKind[r.kind] || 0) + 1;
-  let t = `# Точки входа HTTP (${routes.length})\n\nАвто-генерация gen-codemap.mjs. Типы: ${Object.entries(byKind).map(([k, v]) => `${k}=${v}`).join(", ") || "—"}.\n\n| URL | Методы | Тип | Файл |\n|---|---|---|---|\n`;
+  let t = `# HTTP entry points (${routes.length})\n\nAuto-generated by gen-codemap.mjs. Kinds: ${Object.entries(byKind).map(([k, v]) => `${k}=${v}`).join(", ") || "—"}.\n\n| URL | Methods | Kind | File |\n|---|---|---|---|\n`;
   for (const r of routes) t += `| \`${r.url}\` | ${r.methods.join(", ") || "—"} | ${r.kind} | \`${r.file}\` |\n`;
-  if (!routes.length) t += "\n_Не найдено._\n";
+  if (!routes.length) t += "\n_None found._\n";
   write("routes.md", t);
 }
 // pages.md
 pages.sort((a, b) => cmp(a.url, b.url) || cmp(a.file, b.file));
 {
-  let t = `# Страницы (${pages.length})\n\nАвто-генерация gen-codemap.mjs (Next.js app/pages router).\n\n| URL | Файл |\n|---|---|\n`;
+  let t = `# Pages (${pages.length})\n\nAuto-generated by gen-codemap.mjs (Next.js app/pages router).\n\n| URL | File |\n|---|---|\n`;
   for (const p of pages) t += `| \`${p.url}\` | \`${p.file}\` |\n`;
-  if (!pages.length) t += "\n_Не найдено (проект не на Next.js или страниц нет)._\n";
+  if (!pages.length) t += "\n_None found (the project is not on Next.js, or has no pages)._\n";
   write("pages.md", t);
 }
 // exports.md
 exportsIdx.sort((a, b) => cmp(a.file, b.file));
 {
   const total = exportsIdx.reduce((s, e) => s + e.items.length, 0);
-  let t = `# Экспорты модулей (${exportsIdx.length} файлов, ${total} имён)\n\nАвто-генерация gen-codemap.mjs. Формат: \`файл\` — вид имя, … (fn/const/class/type/interface/enum, re = реэкспорт, cjs = module.exports, def/class для Python).\n\n`;
+  let t = `# Module exports (${exportsIdx.length} files, ${total} names)\n\nAuto-generated by gen-codemap.mjs. Format: \`file\` — kind name, … (fn/const/class/type/interface/enum, re = re-export, cjs = module.exports, def/class for Python).\n\n`;
   for (const e of exportsIdx) {
     const shown = e.items.slice(0, MAX_ITEMS_PER_FILE).map((x) => x.trim()).join(", ");
     t += `- \`${e.file}\` — ${shown}${e.items.length > MAX_ITEMS_PER_FILE ? ` … (+${e.items.length - MAX_ITEMS_PER_FILE})` : ""}\n`;
@@ -267,14 +267,14 @@ exportsIdx.sort((a, b) => cmp(a.file, b.file));
 // migrations.md
 migrations.sort((a, b) => cmp(a.file, b.file));
 {
-  let t = `# Миграции (${migrations.length})\n\nАвто-генерация gen-codemap.mjs. Каталоги \`migrations/\`.\n\n`;
+  let t = `# Migrations (${migrations.length})\n\nAuto-generated by gen-codemap.mjs. \`migrations/\` directories.\n\n`;
   for (const m of migrations) t += `- \`${m.file}\`${m.desc ? ` — ${m.desc}` : ""}\n`;
-  if (!migrations.length) t += "_Не найдено._\n";
+  if (!migrations.length) t += "_None found._\n";
   write("migrations.md", t);
 }
 // INDEX.md
 {
-  const top = new Map(); // имя -> {count, sub: Map}
+  const top = new Map(); // name -> {count, sub: Map}
   let rootFiles = 0;
   for (const f of files) {
     const segs = f.rel.split("/");
@@ -285,10 +285,10 @@ migrations.sort((a, b) => cmp(a.file, b.file));
     top.set(segs[0], t);
   }
   const rel = (p) => path.relative(ROOT, p).split(path.sep).join("/") || ".";
-  let t = `# Индекс кода\n\nКорень: \`${path.basename(ROOT)}\` · файлов: ${files.length} · генератор: gen-codemap.mjs (скилл architecture-map)\n\n`;
-  t += `## Справочники\n- [routes.md](routes.md) — точки входа HTTP: ${routes.length}\n- [pages.md](pages.md) — страницы: ${pages.length}\n- [exports.md](exports.md) — модули с экспортами: ${exportsIdx.length}\n- [migrations.md](migrations.md) — миграции: ${migrations.length}\n- [ARCHITECTURE.md](ARCHITECTURE.md) — нарратив: домены, хабы (пишет Claude, не генератор)\n\n`;
-  t += `## Дерево верхнего уровня\n\n| Каталог | Файлов | Крупные подкаталоги |\n|---|---|---|\n`;
-  t += `| \`.\` (корень) | ${rootFiles} | |\n`;
+  let t = `# Code index\n\nRoot: \`${path.basename(ROOT)}\` · files: ${files.length} · generator: gen-codemap.mjs (architecture-map skill)\n\n`;
+  t += `## Reference\n- [routes.md](routes.md) — HTTP entry points: ${routes.length}\n- [pages.md](pages.md) — pages: ${pages.length}\n- [exports.md](exports.md) — modules with exports: ${exportsIdx.length}\n- [migrations.md](migrations.md) — migrations: ${migrations.length}\n- [ARCHITECTURE.md](ARCHITECTURE.md) — narrative: domains, hubs (written by Claude, not the generator)\n\n`;
+  t += `## Top-level tree\n\n| Directory | Files | Large subdirectories |\n|---|---|---|\n`;
+  t += `| \`.\` (root) | ${rootFiles} | |\n`;
   for (const [name, v] of [...top.entries()].sort((a, b) => cmp(a[0], b[0]))) {
     const subs = [...v.sub.entries()].filter(([, c]) => c >= 10).sort((a, b) => b[1] - a[1] || cmp(a[0], b[0])).slice(0, 8)
       .map(([n, c]) => `${n} (${c})`).join(", ");
@@ -297,4 +297,4 @@ migrations.sort((a, b) => cmp(a.file, b.file));
   write("INDEX.md", t);
   console.log(`codemap → ${rel(OUT_DIR) === "." ? OUT_DIR : OUT_DIR}`);
 }
-console.log(`файлов: ${files.length} · routes: ${routes.length} · pages: ${pages.length} · модулей с экспортами: ${exportsIdx.length} (имён: ${exportsIdx.reduce((s, e) => s + e.items.length, 0)}) · миграций: ${migrations.length}`);
+console.log(`files: ${files.length} · routes: ${routes.length} · pages: ${pages.length} · modules with exports: ${exportsIdx.length} (names: ${exportsIdx.reduce((s, e) => s + e.items.length, 0)}) · migrations: ${migrations.length}`);

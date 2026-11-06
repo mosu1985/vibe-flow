@@ -1,68 +1,68 @@
 ---
 name: smoke-ui
-description: Smoke-проверка веб-приложения через Claude in Chrome — открыть разделы под живой сессией пользователя, собрать ошибки консоли и запросы с 4xx/5xx, вернуть отчёт. Использовать после деплоя, после правок UI/API, при жалобе «раздел не работает», или по команде «прогони смоук». Работает по localhost, превью-деплою и проду.
+description: Smoke check of a web app via Claude in Chrome — open sections under the user's live session, collect console errors and 4xx/5xx requests, return a report. Use after a deploy, after UI/API changes, on a complaint like "this section doesn't work", or on the command "run the smoke test". Works on localhost, a preview deploy and prod.
 user-invocable: true
 ---
 
-# Smoke-проверка UI (Claude in Chrome)
+# UI smoke check (Claude in Chrome)
 
-Прогон по разделам веб-приложения в **живом Chrome пользователя** с его сессией: страница открылась → консоль чистая → сеть без 4xx/5xx.
+A pass through the web app's sections in the user's **live Chrome** with their session: the page opened → the console is clean → the network has no 4xx/5xx.
 
-## ⚠️ Это скилл, а не скрипт
+## ⚠️ This is a skill, not a script
 
-Claude in Chrome — MCP-инструменты, не CLI. Запуск по cron и из CI невозможен: процедуру выполняет агент. Взамен — живая сессия пользователя (httpOnly-куки авторизации, которые не перенести в headless-браузер).
+Claude in Chrome is MCP tools, not a CLI. Running it from cron or CI is impossible: the agent performs the procedure. In exchange you get the user's live session (httpOnly auth cookies, which cannot be moved into a headless browser).
 
-Расширение **опционально**. Нет связи (`Browser extension is not connected`) или нет инструментов `mcp__claude-in-chrome__*` → честно верни «недоступно: расширение Claude in Chrome не подключено — установить/включить: https://claude.ai/chrome». Не подменяй смоук `curl`-ом и не выдавай его за прогон UI.
+The extension is **optional**. No connection (`Browser extension is not connected`) or no `mcp__claude-in-chrome__*` tools → honestly return "unavailable: the Claude in Chrome extension is not connected — install/enable: https://claude.ai/chrome". Do not substitute the smoke test with `curl` and do not pass it off as a UI run.
 
-## Параметры
+## Parameters
 
-| Что | Откуда |
+| What | Where from |
 |---|---|
-| Рабочее дерево | строка `Рабочее дерево: <абсолютный путь>` из задания; нет — `git worktree list`: одно дерево → текущий каталог, больше одного → не угадывай, спроси (или верни «⏸️ укажите рабочее дерево: <список>», если ты субагент). `cd` между вызовами Bash не сохраняется — команды как `cd "<дерево>" && …` |
-| База (URL) | от пользователя; иначе **dev того дерева, которое проверяем**: порт его dev-сервера — `cd "<дерево>" && lsof -nP -a -p "$(cat .wt-dev.pid)" -iTCP -sTCP:LISTEN` (слушать может дочерний процесс — проверь и `pgrep -P <pid>`; у каждого worktree свой dev на своём порту); нет `.wt-dev.pid` — dev-адрес из блока `## 🧩 Проект` в `CLAUDE.md` / `GG_DEV_CMD` в `.gitguards.conf` (порт — как в проекте, не угадывай `3000`). 🔴 Порт соседнего дерева = смоук чужого кода с ложным «чисто» |
-| Разделы | от пользователя; иначе **из проекта** (см. ниже); иначе главная страница + 3–5 ключевых экранов |
-| Префиксы | локаль/базовый путь — как принято в проекте |
+| Worktree | the line `Worktree: <absolute path>` from the assignment; none — `git worktree list`: one tree → the current directory, more than one → don't guess, ask (or return "⏸️ specify the worktree: <list>" if you are a subagent). `cd` does not persist between Bash calls — commands as `cd "<worktree>" && …` |
+| Base (URL) | from the user; otherwise **the dev of the tree being checked**: the port of its dev server — `cd "<worktree>" && lsof -nP -a -p "$(cat .wt-dev.pid)" -iTCP -sTCP:LISTEN` (a child process may be the one listening — check `pgrep -P <pid>` too; each worktree has its own dev on its own port); no `.wt-dev.pid` — the dev address from the `## 🧩 Project` section of `CLAUDE.md` (between the `<!-- vibe-flow:project:begin -->` / `<!-- vibe-flow:project:end -->` markers; older installs title it `## 🧩 Проект`) / `GG_DEV_CMD` in `.gitguards.conf` (the port as in the project, don't guess `3000`). 🔴 A neighbor tree's port = a smoke test of someone else's code with a false "clean" |
+| Sections | from the user; otherwise **from the project** (see below); otherwise the home page + 3–5 key screens |
+| Prefixes | locale/base path — as the project does it |
 
-**Где взять список разделов, если пользователь не назвал:**
-1. `docs/codemap/pages.md` (если есть индекс от `vibe-flow:architecture-map`) — маршруты страниц.
-2. Навигация приложения: компонент меню/сайдбара/хедера, роутер (`app/**/page.*`, `pages/`, `routes.*`, `urls.py`, шаблоны).
-3. Предложи пользователю короткий список (5–8 разделов: вход, главная, 2–3 самых важных, свежеизменённый) и **начни с изменённых в текущей ветке**: `cd "<дерево>" && git diff --name-only <прод-ветка>...HEAD`, где прод-ветка — `GG_PROTECTED` из `.gitguards.conf` (нет его — `main`).
+**Where to get the list of sections if the user didn't name any:**
+1. `docs/codemap/pages.md` (if there is an index from `vibe-flow:architecture-map`) — the page routes.
+2. The app's navigation: the menu/sidebar/header component, the router (`app/**/page.*`, `pages/`, `routes.*`, `urls.py`, templates).
+3. Propose a short list to the user (5–8 sections: login, home, the 2–3 most important, the recently changed one) and **start with those changed in the current branch**: `cd "<worktree>" && git diff --name-only <prod-branch>...HEAD`, where the prod branch is `GG_PROTECTED` from `.gitguards.conf` (if absent — `main`).
 
-Страницы с параметрами (`/orders/[id]`) пропускай или бери реальный id из данных — не выдумывай.
+Skip parameterized pages (`/orders/[id]`) or take a real id from the data — do not make one up.
 
 ---
 
-## Шаг 0. Подготовка Chrome
+## Step 0. Prepare Chrome
 
-1. Загрузи инструменты **одним** `ToolSearch`:
+1. Load the tools with **one** `ToolSearch`:
    ```
    select:mcp__claude-in-chrome__tabs_context_mcp,mcp__claude-in-chrome__navigate,mcp__claude-in-chrome__get_page_text,mcp__claude-in-chrome__read_console_messages,mcp__claude-in-chrome__read_network_requests,mcp__claude-in-chrome__browser_batch,mcp__claude-in-chrome__computer,mcp__claude-in-chrome__list_connected_browsers,mcp__claude-in-chrome__select_browser,mcp__claude-in-chrome__tabs_close_mcp
    ```
-2. `list_connected_browsers`. Браузеров **больше одного** → `AskUserQuestion` со ВСЕМИ вариантами (выбирать за пользователя нельзя), затем `select_browser` с выбранным `deviceId`. Один — используй его.
-3. `tabs_context_mcp{createIfEmpty:true}` → запомни `tabId`.
+2. `list_connected_browsers`. **More than one** browser → `AskUserQuestion` with ALL the options (you must not choose for the user), then `select_browser` with the chosen `deviceId`. Just one — use it.
+3. `tabs_context_mcp{createIfEmpty:true}` → remember the `tabId`.
 
-🔴 **Группа вкладок открывается в ОТДЕЛЬНОМ окне Chrome** — оно бывает позади текущего.
+🔴 **The tab group opens in a SEPARATE Chrome window** — it may be behind the current one.
 
-🔴 **Разные браузеры/профили Chrome — разные куки.** Подключишься не к тому — получишь 401 и редирект на логин, пока пользователь на том же URL видит свои данные. Перед прогоном открой целевой URL: выбросило на логин → ты в чужом профиле, переключайся (`AskUserQuestion` → `select_browser`), а НЕ проси войти заново. Любые 4xx/5xx из неавторизованного профиля **не считаются находками**: прежде чем сообщать о дефекте, убедись, что сессия была.
+🔴 **Different Chrome browsers/profiles — different cookies.** Connect to the wrong one and you get a 401 and a redirect to login while the user, on the same URL, sees their data. Before the run, open the target URL: thrown to login → you are in someone else's profile, switch (`AskUserQuestion` → `select_browser`), do NOT ask to sign in again. Any 4xx/5xx from an unauthenticated profile **does not count as a finding**: before reporting a defect, make sure the session existed.
 
-🔴 **Смена прав расширения перезагружает его и убивает группу вкладок** — `tabId` протухают (`Tab … no longer exists`), пересоздавай через `tabs_context_mcp{createIfEmpty:true}`.
+🔴 **Changing the extension's permissions reloads it and kills the tab group** — `tabId`s go stale (`Tab … no longer exists`), recreate via `tabs_context_mcp{createIfEmpty:true}`.
 
-🔴 **Расширению нужны права на сайт.** Без них страница встаёт как error page, а инструменты отвечают `Frame with ID 0 is showing error page` — при том что `curl` даёт 200. Лечится пользователем: `chrome://extensions` → Claude → Details → Site access → On all sites. Сам не обходи, верни инструкцию.
+🔴 **The extension needs site permissions.** Without them the page comes up as an error page and the tools answer `Frame with ID 0 is showing error page` — while `curl` returns 200. The user fixes it: `chrome://extensions` → Claude → Details → Site access → On all sites. Don't work around it yourself, return the instruction.
 
 ---
 
-## Шаг 1. Прайминг диагностики
+## Step 1. Prime the diagnostics
 
-🔴 **Главный гоча.** `read_console_messages` и `read_network_requests` начинают трекинг **с момента первого вызова**. Позовёшь их после загрузки страницы — вернут пусто, и ты отрапортуешь ложную «чистоту» при живых 500-ках.
+🔴 **The main gotcha.** `read_console_messages` and `read_network_requests` start tracking **from the moment of the first call**. Call them after the page has loaded and they return empty, and you report a false "clean" while 500s are live.
 
-Порядок всегда: **прайминг → навигация → чтение.** Прайминг не работает на `chrome://newtab` (`Can't interact with browser-internal or unparseable URLs`), а свежая вкладка всегда там, поэтому: `navigate` на целевой URL → прайминг → `navigate` тем же URL → `wait` → чтение.
+The order is always: **prime → navigate → read.** Priming does not work on `chrome://newtab` (`Can't interact with browser-internal or unparseable URLs`), and a fresh tab is always there, so: `navigate` to the target URL → prime → `navigate` to the same URL → `wait` → read.
 
 ```
 browser_batch([
-  navigate {tabId, url: <первый раздел>},                   // уйти с chrome://newtab
-  read_console_messages {tabId, clear:true, pattern:"."},   // прайминг
-  read_network_requests {tabId, clear:true},                // прайминг
-  navigate {tabId, url: <тот же URL>},                      // перезагрузка под записью
+  navigate {tabId, url: <first section>},                   // leave chrome://newtab
+  read_console_messages {tabId, clear:true, pattern:"."},   // priming
+  read_network_requests {tabId, clear:true},                // priming
+  navigate {tabId, url: <same URL>},                        // reload under recording
   computer {action:"wait", duration:5},
   get_page_text {tabId},
   read_console_messages {tabId, onlyErrors:true, clear:true},
@@ -70,74 +70,74 @@ browser_batch([
 ])
 ```
 
-`clear:true` на каждом чтении обязателен: буфер накопительный, иначе запросы первого раздела всплывут на всех следующих и посчитаются повторно. Фильтр сети (`urlPattern`) ставь по префиксу API этого проекта (`/api/`, `/graphql` …), если нужны только его запросы.
+`clear:true` on every read is mandatory: the buffer is cumulative, otherwise the first section's requests resurface in all the following ones and get counted again. Set the network filter (`urlPattern`) by this project's API prefix (`/api/`, `/graphql` …) if you only need its requests.
 
 ---
 
-## Шаг 2. Проверка авторизации
+## Step 2. Check authorization
 
-Открой главный защищённый раздел и посмотри итоговый URL:
+Open the main protected section and look at the final URL:
 
-- редирект на страницу входа:
-  - форма уже **заполнена менеджером паролей** → нажми «Войти» и продолжай;
-  - поля пустые → пароль **НЕ вводи** (кроме тестового аккаунта dev-окружения, если пользователь прямо его выдал). Верни: «войдите в `<база>` в обычном окне этого же профиля Chrome — куки общие, моя вкладка подхватит сессию»
-- остались в разделе → сессия есть, продолжай
+- redirect to the login page:
+  - the form is already **filled in by the password manager** → click "Sign in" and continue;
+  - the fields are empty → **do NOT type the password** (except a dev-environment test account, if the user explicitly gave it to you). Return: "sign in to `<base>` in a regular window of this same Chrome profile — cookies are shared, my tab will pick up the session"
+- stayed in the section → there is a session, continue
 
-Страница может показывать `Загрузка…` — подожди 4–5 с и перечитай.
-
----
-
-## Шаг 3. Обход разделов
-
-На каждый раздел одним `browser_batch`: `navigate` → `wait 5` → `get_page_text` (или первые строки) → `read_console_messages{onlyErrors:true, clear:true}` → `read_network_requests{clear:true}`. Два-три раздела можно слить в один батч — чтения между ними разделяют выборки.
-
-Раздел показал 4xx/5xx → сравни с `get_page_text`: **что видит пользователь при провалившемся запросе**. Расхождение между отказом API и нарисованным на экране («пусто» вместо «нет доступа/ошибка») — самостоятельный дефект.
+The page may show `Loading…` — wait 4–5 s and re-read.
 
 ---
 
-## Шаг 4. Фильтрация шума
+## Step 3. Walk the sections
 
-Не считать дефектом:
-- **Дубли запросов в dev** — режим разработки фреймворка рендерит дважды (React StrictMode и т.п.). На проде дубли — находка
-- **401 на проверке сессии (`/me`, `/session`) на странице входа** у неавторизованного — штатно
-- Сообщения консоли `log`/`info`/`debug` — в отчёт идут только `error` и необработанные исключения
-- `statusCode: pending` — запрос не успел завершиться
-- Запросы к сторонним трекерам/аналитике, заблокированные расширениями
+For each section, one `browser_batch`: `navigate` → `wait 5` → `get_page_text` (or the first lines) → `read_console_messages{onlyErrors:true, clear:true}` → `read_network_requests{clear:true}`. Two or three sections can be merged into one batch — the reads in between separate the samples.
 
-Дефект — всё остальное: 4xx, 5xx, ошибки консоли, таймауты, бесконечные спиннеры.
+A section showed 4xx/5xx → compare with `get_page_text`: **what the user sees when a request fails**. A mismatch between the API's refusal and what is drawn on screen ("empty" instead of "no access/error") is a defect in its own right.
 
 ---
 
-## Шаг 5. Уборка
+## Step 4. Filter the noise
 
-`tabs_close_mcp` — только по своей вкладке. Чужие не трогать.
+Do not count as a defect:
+- **Duplicate requests in dev** — the framework's development mode renders twice (React StrictMode etc.). On prod, duplicates are a finding
+- **A 401 on the session check (`/me`, `/session`) on the login page** for an unauthenticated user — normal
+- Console `log`/`info`/`debug` messages — only `error` and unhandled exceptions go into the report
+- `statusCode: pending` — the request had not finished
+- Requests to third-party trackers/analytics blocked by extensions
+
+A defect is everything else: 4xx, 5xx, console errors, timeouts, endless spinners.
 
 ---
 
-## Формат отчёта
+## Step 5. Clean up
+
+`tabs_close_mcp` — only your own tab. Don't touch others.
+
+---
+
+## Report format
 
 ```
-✅ / ⚠️ / ❌ <итог одной строкой>
-База: <URL> · профиль/браузер: <какой> · сессия: есть/нет
+✅ / ⚠️ / ❌ <one-line summary>
+Base: <URL> · profile/browser: <which> · session: yes/no
 
-🔎 Разделы
+🔎 Sections
 - /path — "<title>" · console N · network 4xx/5xx: M
 - ...
 
-🐞 Находки
-- <раздел>: <метод> <урл> → <код>, <сколько раз>, восстановился или нет
-  Что видит пользователь: <из get_page_text>
+🐞 Findings
+- <section>: <method> <url> → <code>, <how many times>, recovered or not
+  What the user sees: <from get_page_text>
 
-✔️ Чисто
-- <разделы без замечаний>
+✔️ Clean
+- <sections with no findings>
 
-📌 Вывод
-<1–3 предложения: что чинить и насколько срочно>
+📌 Conclusion
+<1–3 sentences: what to fix and how urgently>
 ```
 
-Секреты не печатать: токены, куки, пароли маскировать, даже если они попали в URL или тело запроса.
+Do not print secrets: mask tokens, cookies and passwords even if they ended up in a URL or a request body.
 
-## Связанное
+## Related
 
-- Одиночные браузерные задачи вне смоука — агент `vibe-flow:browser-operator`
-- Серверные логи при 5xx — логи хостинга проекта
+- Standalone browser tasks outside a smoke test — the `vibe-flow:browser-operator` agent
+- Server logs on a 5xx — the project's hosting logs

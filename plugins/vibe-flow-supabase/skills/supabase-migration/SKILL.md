@@ -1,72 +1,72 @@
 ---
 name: supabase-migration
-description: Применить SQL-миграцию к базе Supabase безопасно — файл, пробный прогон с ROLLBACK, применение после подтверждения, проверка RLS
+description: Apply a SQL migration to a Supabase database safely — file, trial run with ROLLBACK, applying after confirmation, RLS check
 disable-model-invocation: true
 ---
 
-Примени SQL-миграцию к базе Supabase. Это изменение боевых данных/схемы — действуй по шагам и не перескакивай.
+Apply a SQL migration to the Supabase database. This changes live data/schema — go step by step and do not skip ahead.
 
-## 🔴 Правила
+## 🔴 Rules
 
-- **Применение DDL — только после подтверждения пользователя.** Показать, что будет выполнено (файл + краткое резюме), и дождаться «да». Согласие нужно на сам факт применения; **доступ к БД** добывай сам, пользователя о нём не спрашивай
-- **Сначала пробный прогон с откатом**, потом настоящее применение
-- Секреты — только из окружения (`node --env-file=.env.local`), никаких токенов в argv, `curl`, `-e`-коде и в выводе
-- Не доверять формулировке «dry-run» у чужого runner-а: проверь, что он действительно ничего не выполняет, либо делай пробный прогон сам (ниже)
+- **Applying DDL — only after the user's confirmation.** Show what will be run (the file + a short summary) and wait for a "yes". Consent is needed for the fact of applying; **get DB access** yourself, do not ask the user about it
+- **A trial run with a rollback first**, then the real application
+- Secrets — only from the environment (`node --env-file=.env.local`), no tokens in argv, `curl`, `-e` code or output
+- Do not trust the wording "dry-run" in someone else's runner: check that it really executes nothing, or do the trial run yourself (below)
 
-## Шаги
+## Steps
 
-### 1. Подготовка
+### 1. Preparation
 
-- Определи, как в проекте принято: каталог (`supabase/migrations/`), схема именования/нумерации, есть ли штатный runner (`scripts/*migrat*`, `package.json` → scripts, `supabase` CLI). Нет явных данных — посмотри на существующие файлы и скажи, что определил
-- Имя — описательное, `snake_case`; SQL — идемпотентный там, где возможно (`IF NOT EXISTS`, `IF EXISTS`)
-- Оберни тело в `BEGIN; … COMMIT;`, если нет `CONCURRENTLY`/`ALTER TYPE … ADD VALUE` (эти команды в транзакции нельзя — выноси в отдельный файл)
-- **Не хардкодь сгенерированные id** (uuid, serial) в миграциях с данными
-- Сохрани файл миграции в каталог проекта — для истории и повторного применения
+- Find out how the project does it: the directory (`supabase/migrations/`), the naming/numbering scheme, whether there is a standard runner (`scripts/*migrat*`, `package.json` → scripts, the `supabase` CLI). No clear data — look at the existing files and say what you determined
+- A descriptive name, `snake_case`; idempotent SQL where possible (`IF NOT EXISTS`, `IF EXISTS`)
+- Wrap the body in `BEGIN; … COMMIT;` unless there is `CONCURRENTLY`/`ALTER TYPE … ADD VALUE` (these cannot go in a transaction — move them to a separate file)
+- **Do not hardcode generated ids** (uuid, serial) in migrations with data
+- Save the migration file in the project directory — for history and re-application
 
-### 2. Пробный прогон с откатом
+### 2. Trial run with a rollback
 
-Скопируй миграцию во временный файл (вне репозитория или `_tmp-*`), замени финальный `COMMIT;` на `SELECT 1 AS ok; ROLLBACK;` и выполни тем же способом, каким будешь применять. Убедись, что:
-- прогон дошёл до конца без ошибок;
-- после него новых колонок/таблиц **нет** (откат сработал) — проверь запросом или OpenAPI-схемой (`42703`/`PGRST205` = нет объекта).
+Copy the migration into a temporary file (outside the repository or `_tmp-*`), replace the final `COMMIT;` with `SELECT 1 AS ok; ROLLBACK;` and run it the same way you will apply it. Make sure that:
+- the run completed without errors;
+- afterwards there are **no** new columns/tables (the rollback worked) — check with a query or the OpenAPI schema (`42703`/`PGRST205` = no such object).
 
-Временный файл удали.
+Delete the temporary file.
 
-### 3. Применение (после «да» пользователя)
+### 3. Applying (after the user's "yes")
 
-В порядке предпочтения:
-1. Штатный runner проекта (токен он берёт из `.env.local` сам).
-2. Management API: `POST https://api.supabase.com/v1/projects/<ref>/database/query` с токеном из `process.env` внутри временного скрипта; `ref` — из URL проекта.
-3. Supabase CLI (`supabase db push`) — пароль только через окружение `SUPABASE_DB_PASSWORD`, не в `--db-url`.
+In order of preference:
+1. The project's standard runner (it takes the token from `.env.local` itself).
+2. The Management API: `POST https://api.supabase.com/v1/projects/<ref>/database/query` with the token from `process.env` inside a temporary script; `ref` from the project URL.
+3. The Supabase CLI (`supabase db push`) — the password only via the `SUPABASE_DB_PASSWORD` environment, not in `--db-url`.
 
-Не работает и не пробовать: пароль БД, найденный в старых заметках (обычно давно протух), и подстановка токена в командную строку.
-Нет токена/доступа — «недоступно: <что нужно> — <как получить>», а не тихий отказ.
+Does not work and do not try: a DB password found in old notes (usually long expired), and putting a token on the command line.
+No token/access — "unavailable: <what is needed> — <how to get it>", not a silent refusal.
 
-### 4. Проверка после применения
+### 4. Verification after applying
 
-- Структура: колонки/таблицы видны (service_role + OpenAPI-описание `/rest/v1/`)
-- Данные (DML): `SELECT` подтверждает результат **по значению**, а не по «строк затронуто: N» — бэкфилл мог записать не то
-- 🔴 **RLS новой таблицы — anon-ключом**, не service_role: ждать `401`/`42501`; `200 []` ничего не доказывает. Если есть проверка вроде `check:rls` в проекте — запусти
-- Для функций `SECURITY DEFINER` — права: `REVOKE ALL ON FUNCTION … FROM PUBLIC, anon, authenticated` (все три цели!) и `GRANT EXECUTE … TO service_role`; сверить `proacl` в `pg_proc`. `REVOKE … FROM PUBLIC` одного недостаточно: роли получают EXECUTE собственными грантами. `DROP FUNCTION` уносит ACL — после пересоздания права проверять заново
-- Для Storage-политик: запрещающие — `AS RESTRICTIVE` (PERMISSIVE «Deny» открывает доступ через OR); приватность бакета проверить anon-ключом (`list('')`, upload)
-- Если у Supabase доступны advisors (`get_advisors`, security) через MCP — запусти и разбери замечания по новым таблицам
+- Structure: columns/tables are visible (service_role + the OpenAPI description `/rest/v1/`)
+- Data (DML): a `SELECT` confirms the result **by value**, not by "rows affected: N" — the backfill might have written the wrong thing
+- 🔴 **RLS of a new table — with the anon key**, not service_role: expect `401`/`42501`; `200 []` proves nothing. If the project has a check like `check:rls` — run it
+- For `SECURITY DEFINER` functions — permissions: `REVOKE ALL ON FUNCTION … FROM PUBLIC, anon, authenticated` (all three targets!) and `GRANT EXECUTE … TO service_role`; compare `proacl` in `pg_proc`. `REVOKE … FROM PUBLIC` alone is not enough: roles get EXECUTE through their own grants. `DROP FUNCTION` takes the ACL with it — after recreating, check the permissions again
+- For Storage policies: the denying ones are `AS RESTRICTIVE` (a PERMISSIVE "Deny" opens access through OR); check the bucket's privacy with the anon key (`list('')`, upload)
+- If Supabase advisors (`get_advisors`, security) are available via MCP — run them and go through the findings for the new tables
 
-## Готчи SQL/PostgREST, которые ломают миграции и их проверку
+## SQL/PostgREST gotchas that break migrations and their verification
 
-- Миграция, отклонённая посередине без транзакции, оставляет частичное состояние — поэтому `BEGIN/COMMIT` и пробный прогон
-- Долгий `ALTER TABLE` берёт `ACCESS EXCLUSIVE` и встаёт в очередь за любым длинным запросом, блокируя все следующие — `SET lock_timeout`, при таймауте **повторить**, а не увеличивать
-- Индекс на большой таблице — `CREATE INDEX CONCURRENTLY` вне транзакции (сессионный pooler, порт `5432`)
-- Правка одного ключа JSONB — только `jsonb_set(value,'{ключ}',…)` с узким `WHERE`; `UPDATE … SET value = <целый объект>` или PATCH по колонке затирает остальные ключи
-- Бэкфилл проверять **по значению**, на живых строках, а не по коду ответа
-- Тип колонки смотреть в схеме до написания функции: параметр `uuid` вместо `text` роняет `CREATE FUNCTION` / ломает сравнение
-- Функции с `SET search_path`/`SECURITY DEFINER` не инлайнятся планировщиком — условные предикаты становятся пост-фильтрами; для функций, которые зовёт только `service_role`, часто достаточно `SECURITY INVOKER` + `SET search_path = public, pg_temp`
-- Предикат «тенант = параметр» в RPC — безусловный (`organization_id = p_org AND p_org IS NOT NULL`), а не `(p_org IS NULL OR …)`: иначе параметр перестаёт быть границей изоляции
-- `ORDER BY id LIMIT N` при наличии составного индекса может выбрать скан первичного ключа (лотерея по кешу); для сортировки пагинации используй поля индекса (`created_at DESC, id DESC`)
+- A migration rejected midway without a transaction leaves a partial state — hence `BEGIN/COMMIT` and the trial run
+- A long `ALTER TABLE` takes `ACCESS EXCLUSIVE` and queues behind any long query, blocking all the following ones — `SET lock_timeout`, on a timeout **retry**, do not increase
+- An index on a big table — `CREATE INDEX CONCURRENTLY` outside a transaction (the session pooler, port `5432`)
+- Editing one JSONB key — only `jsonb_set(value,'{key}',…)` with a narrow `WHERE`; `UPDATE … SET value = <whole object>` or a PATCH on the column wipes the other keys
+- Verify a backfill **by value**, on live rows, not by the response code
+- Look at the column type in the schema before writing a function: a `uuid` parameter instead of `text` fails `CREATE FUNCTION` / breaks the comparison
+- Functions with `SET search_path`/`SECURITY DEFINER` are not inlined by the planner — conditional predicates become post-filters; for functions called only by `service_role`, `SECURITY INVOKER` + `SET search_path = public, pg_temp` is often enough
+- The "tenant = parameter" predicate in an RPC is unconditional (`organization_id = p_org AND p_org IS NOT NULL`), not `(p_org IS NULL OR …)`: otherwise the parameter stops being an isolation boundary
+- `ORDER BY id LIMIT N` when a composite index exists may choose a primary-key scan (a cache lottery); for pagination sorting use the index fields (`created_at DESC, id DESC`)
 
-## Формат ответа
+## Response format
 
 ```
-✅ Миграция применена: <имя>
-📋 Изменения: <что создано/изменено>
-🧪 Пробный прогон: ROLLBACK без ошибок
-🔒 RLS: <статус по anon-ключу>
+✅ Migration applied: <name>
+📋 Changes: <what was created/changed>
+🧪 Trial run: ROLLBACK without errors
+🔒 RLS: <status by the anon key>
 ```

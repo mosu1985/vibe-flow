@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# install.sh [путь-к-проекту] — развернуть git-guards в проекте.
+# install.sh [path-to-project] — deploy git-guards into a project.
 #
-# Копирует канонические файлы, определяет стек, пишет .gitguards.conf,
-# ставит хуки вне рабочего дерева и прогоняет приёмку.
-# Идемпотентен: повторный запуск обновляет файлы и НЕ трогает существующий
-# .gitguards.conf (его правит человек).
+# Copies the canonical files, detects the stack, writes .gitguards.conf,
+# installs the hooks outside the working tree and runs the acceptance tests.
+# Idempotent: a rerun updates the files and does NOT touch an existing
+# .gitguards.conf (a human edits it).
 set -eu
 
 GG="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,23 +15,23 @@ say()  { printf '  %s\n' "$*"; }
 head_() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 die()  { printf '\n🔴 %s\n' "$*" >&2; exit 1; }
 
-# ── 0. Проверки цели ─────────────────────────────────────────────────────────
-git -C "$TARGET" rev-parse --git-dir >/dev/null 2>&1 || die "$TARGET — не git-репозиторий"
-# Оба пути — физические и от TARGET: --git-common-dir бывает относительным
-# (".git"), и `cd` от каталога вызывающего уводил в чужой репозиторий.
+# ── 0. Target checks ─────────────────────────────────────────────────────────
+git -C "$TARGET" rev-parse --git-dir >/dev/null 2>&1 || die "$TARGET is not a git repository"
+# Both paths are physical and resolved from TARGET: --git-common-dir can be relative
+# (".git"), and a `cd` from the caller's directory used to land in a different repository.
 GITDIR=$(cd "$(git -C "$TARGET" rev-parse --absolute-git-dir)" && pwd -P)
 COMMON=$(cd "$TARGET" && cd "$(git rev-parse --git-common-dir)" && pwd -P)
-[ "$GITDIR" = "$COMMON" ] || die "это linked worktree. Ставить надо в основном дереве: $COMMON/.."
+[ "$GITDIR" = "$COMMON" ] || die "this is a linked worktree. Install into the main working tree: $COMMON/.."
 TOP=$(git -C "$TARGET" rev-parse --show-toplevel)
-[ "$TOP" = "$TARGET" ] || die "запускайте из корня репозитория ($TOP)"
+[ "$TOP" = "$TARGET" ] || die "run from the repository root ($TOP)"
 
-head_ "Цель: $TARGET"
+head_ "Target: $TARGET"
 
-# ── 1. Копирование файлов ────────────────────────────────────────────────────
-head_ "1. Файлы"
+# ── 1. Copy files ────────────────────────────────────────────────────────────
+head_ "1. Files"
 mkdir -p "$TARGET/scripts" "$TARGET/githooks" "$TARGET/.claude/hooks"
 for f in "$GG"/files/scripts/*; do
-    [ -f "$f" ] || continue                      # подкаталог git-guards идёт отдельно
+    [ -f "$f" ] || continue                      # the git-guards subdirectory is handled separately
     n=$(basename "$f")
     if [ -f "$TARGET/scripts/$n" ] && cmp -s "$f" "$TARGET/scripts/$n"; then
         say "= scripts/$n"
@@ -40,10 +40,10 @@ for f in "$GG"/files/scripts/*; do
     fi
 done
 
-# 🔴 scripts/git-guards/ — не «дополнительные утилиты», а зависимость:
-# git-safe-commit.sh зовёт verify_staged.py и consumer-warn.sh, а харнесс-хук
-# импортирует shell_segments.py. Копирование одних только *.sh давало бы набор,
-# который устанавливается без ошибок и падает на первом же коммите.
+# 🔴 scripts/git-guards/ is not "extra utilities", it is a dependency:
+# git-safe-commit.sh calls verify_staged.py and consumer-warn.sh, and the harness hook
+# imports shell_segments.py. Copying only the *.sh files would produce a kit
+# that installs without errors and fails on the very first commit.
 mkdir -p "$TARGET/scripts/git-guards"
 for f in "$GG"/files/scripts/git-guards/*; do
     n=$(basename "$f"); cp "$f" "$TARGET/scripts/git-guards/$n"
@@ -59,44 +59,44 @@ for f in "$GG"/files/claude/hooks/*; do
     say "+ .claude/hooks/$n"
 done
 
-# ── 2. Конфигурация ──────────────────────────────────────────────────────────
-head_ "2. Конфигурация"
+# ── 2. Configuration ─────────────────────────────────────────────────────────
+head_ "2. Configuration"
 if [ -f "$TARGET/.gitguards.conf" ]; then
-    say "= .gitguards.conf уже есть — не трогаю"
+    say "= .gitguards.conf already exists — leaving it alone"
 else
     python3 "$GG/detect.py" "$TARGET" > "$TARGET/.gitguards.conf"
-    say "+ .gitguards.conf создан по автодетекту стека:"
+    say "+ .gitguards.conf created from stack auto-detection:"
     grep -E '^GG_' "$TARGET/.gitguards.conf" | sed 's/^/      /'
 fi
 
-# ── 3. Харнесс-хук Claude Code ───────────────────────────────────────────────
-head_ "3. Хук Claude Code (запрет git add)"
+# ── 3. Claude Code harness hook ──────────────────────────────────────────────
+head_ "3. Claude Code hook (blocks git add)"
 python3 "$GG/settings-merge.py" "$TARGET" | sed 's/^/  /'
 
-# ── 4. Установка git-хуков вне рабочего дерева ───────────────────────────────
-head_ "4. git-хуки"
+# ── 4. Install git hooks outside the working tree ────────────────────────────
+head_ "4. git hooks"
 bash "$TARGET/scripts/install-git-guards.sh" | sed 's/^/  /'
 
-# ── 5. Приёмка ───────────────────────────────────────────────────────────────
-head_ "5. Приёмка"
+# ── 5. Acceptance ────────────────────────────────────────────────────────────
+head_ "5. Acceptance"
 if bash "$TARGET/scripts/test-git-guards.sh" > /tmp/gg-accept.log 2>&1; then
     tail -3 /tmp/gg-accept.log | sed 's/^/  /'
-    say "✅ приёмка пройдена"
+    say "✅ acceptance passed"
 else
     tail -25 /tmp/gg-accept.log | sed 's/^/  /'
-    die "приёмка НЕ пройдена — развёртывание считается неуспешным. Лог: /tmp/gg-accept.log"
+    die "acceptance FAILED — the deployment counts as unsuccessful. Log: /tmp/gg-accept.log"
 fi
 
-# Встроенный запуск (vibe-flow init) сам пишет CLAUDE.md и сам говорит про
-# коммит — свои «ручные шаги» здесь только запутали бы.
+# An embedded run (vibe-flow init) writes CLAUDE.md and handles the commit
+# message itself — our own "manual steps" here would only confuse.
 if [ "${GG_EMBEDDED:-0}" != 1 ]; then
-head_ "Готово"
+head_ "Done"
 cat <<'TXT'
-  Осталось два ручных шага:
-    1. Дописать в CLAUDE.md проекта раздел про коммиты — образец в
+  Two manual steps remain:
+    1. Add the commit section to the project's CLAUDE.md — template in
        git-guards/CLAUDE-snippet.md
-    2. Закоммитить новые файлы — из основного дерева, изолированным индексом
-       (worktree от HEAD их не увидит: они ещё не в истории):
-       scripts/git-safe-commit.sh --message-file <файл> -- <пути>
+    2. Commit the new files — from the main working tree, with an isolated index
+       (a worktree from HEAD will not see them: they are not in history yet):
+       scripts/git-safe-commit.sh --message-file <file> -- <paths>
 TXT
 fi

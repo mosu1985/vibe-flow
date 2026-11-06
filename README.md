@@ -91,7 +91,7 @@ Re-running `init` updates the scripts and the rules block without touching your 
 **`vibe-flow-vercel`**: vercel-deploy-monitor, vercel-logs-reader and log skills.
 **`vibe-flow-supabase`**: supabase-admin and a safe migrations skill.
 
-The agents, skills and rules themselves are written in Russian.
+Everything is written in English; agents talk to you in your own language.
 
 How it works inside and how to modify it: [CONTRIBUTING.md](CONTRIBUTING.md).
 

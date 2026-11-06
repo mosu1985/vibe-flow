@@ -1,31 +1,32 @@
 #!/usr/bin/env bash
-# git-allow-delete.sh — разрешить push, удаляющий файлы из защищённой ветки.
+# git-allow-delete.sh — allow a push that deletes files from the protected branch.
 #
-# ЗАЧЕМ. pre-push отказывает, если отправка удаляет из main хоть один файл.
-# Причина верная: ветка, отставшая от базы, сносит чужую работу ТИХО —
-# fast-forward при этом проходит штатно, и в диффе пропажа не бросается в глаза.
+# WHY. pre-push refuses if the push deletes even one file from main.
+# The reason is sound: a branch that fell behind its base wipes out other people's
+# work SILENTLY — the fast-forward goes through normally, and the loss does not
+# stand out in the diff.
 #
-# Но удаление бывает и намеренным (выпилили мёртвый каталог, снесли модуль), а
-# совета «перебазируйтесь» в этом случае недостаточно: база уже свежая, а гард
-# всё равно не пускает. До 10.09.2026 обхода не было вовсе — единственным
-# выходом оставался --no-verify, который выключает ЗАОДНО проверку типов и
-# проверку авторства коммитов. Обход, который снимает все барьеры разом, — это
-# приглашение пользоваться им по любому поводу.
+# But a deletion can be intentional (a dead directory removed, a module dropped),
+# and the advice "rebase" is not enough then: the base is already fresh, yet the
+# guard still refuses. Until 10.09.2026 there was no bypass at all — the only way
+# out was --no-verify, which ALSO turns off type checking and the commit-authorship
+# check. A bypass that drops every barrier at once is an invitation to use it for
+# any reason.
 #
-# Поэтому здесь тот же приём, что в git-allow-push.sh: не флаг, а ПОИМЁННЫЙ
-# список. Человек видит, что именно исчезнет, и подтверждает; отметка живёт
-# 15 минут и гасится хуком после первого применения.
+# So this uses the same trick as git-allow-push.sh: not a flag but a list BY NAME.
+# The human sees exactly what will disappear and confirms; the mark lives for
+# 15 minutes and is consumed by the hook after the first use.
 #
-#   scripts/git-allow-delete.sh add <путь…>   — разрешить (с подтверждением)
-#   scripts/git-allow-delete.sh add --yes <путь…> — то же, ответ «да» флагом
-#   scripts/git-allow-delete.sh list          — что разрешено сейчас
-#   scripts/git-allow-delete.sh clear         — снять
+#   scripts/git-allow-delete.sh add <path…>   — allow (with confirmation)
+#   scripts/git-allow-delete.sh add --yes <path…> — same, answer "yes" via a flag
+#   scripts/git-allow-delete.sh list          — what is allowed right now
+#   scripts/git-allow-delete.sh clear         — remove
 set -eu
 
-# --yes — ответ «да» для запуска через `!` в строке ввода Claude Code: stdin
-# там не интерактивный, `read` получал EOF, и скрипт молча выходил, ничего не
-# разрешив. Агенту флаг не открывает обход: PreToolUse-хук отклоняет режим add
-# из Bash-инструмента модели, а команды через `!` набирает только человек.
+# --yes answers "yes" when run via `!` in the Claude Code input line: stdin there
+# is not interactive, `read` got EOF, and the script silently exited without
+# allowing anything. The flag opens no bypass for the agent: the PreToolUse hook
+# rejects add mode from the model's Bash tool, and only a human types `!` commands.
 YES=0; ARGS=()
 for a in "$@"; do case "$a" in --yes) YES=1 ;; *) ARGS+=("$a") ;; esac; done
 set -- ${ARGS[@]+"${ARGS[@]}"}
@@ -43,41 +44,41 @@ case "${1:-list}" in
     if [ -f "$ALLOW" ]; then
         AGE=$(age_of "$ALLOW")
         if [ "$AGE" -lt "$TTL" ]; then
-            echo "разрешено к удалению (возраст ${AGE}с, живёт ${TTL}с):"
+            echo "allowed for deletion (age ${AGE}s, lives ${TTL}s):"
             sed 's/^/  /' "$ALLOW"
         else
-            echo "отметка протухла (${AGE}с) — считается отсутствующей"
+            echo "mark expired (${AGE}s) — treated as absent"
         fi
     else
-        echo "отметки нет"
+        echo "no mark"
     fi ;;
 
-  clear) rm -f "$ALLOW"; echo "снято" ;;
+  clear) rm -f "$ALLOW"; echo "removed" ;;
 
   add)
     shift
-    [ $# -gt 0 ] || { echo "нужен хотя бы один путь"; exit 2; }
-    echo "Из защищённой ветки исчезнут:"
+    [ $# -gt 0 ] || { echo "at least one path is required"; exit 2; }
+    echo "These will disappear from the protected branch:"
     for p in "$@"; do
-        # Показываем, существует ли файл на remote: путь с опечаткой не защитит
-        # ничего и создаст ложное ощущение, что удаление подтверждено.
+        # Show whether the file exists on the remote: a mistyped path protects
+        # nothing and creates a false sense that the deletion was confirmed.
         if git cat-file -e "origin/main:$p" 2>/dev/null; then
-            printf '  %s  (%s строк на origin/main)\n' "$p" \
+            printf '  %s  (%s lines on origin/main)\n' "$p" \
                 "$(git show "origin/main:$p" | wc -l | tr -d ' ')"
         else
-            printf '  %s  ⚠️ на origin/main такого пути нет — проверьте опечатку\n' "$p"
+            printf '  %s  ⚠️ no such path on origin/main — check for a typo\n' "$p"
         fi
     done
-    printf '\nЭто удаление намеренное? [да/нет] '
-    if [ "$YES" = 1 ]; then echo "да (--yes)"
+    printf '\nIs this deletion intentional? [yes/no] '
+    if [ "$YES" = 1 ]; then echo "yes (--yes)"
     else
-        read -r a || { echo; echo "🔴 ответить нечем: ввод не с клавиатуры. Добавьте --yes к той же команде."; exit 1; }
-        [ "$a" = "да" ] || { echo "отменено"; exit 1; }
+        read -r a || { echo; echo "🔴 no way to answer: input is not from a keyboard. Add --yes to the same command."; exit 1; }
+        { [ "$a" = "yes" ] || [ "$a" = "да" ]; } || { echo "cancelled"; exit 1; }  # "да" kept for existing Russian-speaking users
     fi
     : > "$ALLOW"
     for p in "$@"; do printf '%s\n' "$p" >> "$ALLOW"; done
-    echo "разрешено; отметка одноразовая и живёт $((TTL/60)) минут"
-    echo "🔴 Разрешены РОВНО эти пути: удаление любого другого файла хук всё равно отклонит." ;;
+    echo "allowed; the mark is single-use and lives $((TTL/60)) minutes"
+    echo "🔴 EXACTLY these paths are allowed: the hook will still reject deleting any other file." ;;
 
-  *) echo "использование: git-allow-delete.sh [add <путь…>|list|clear]"; exit 2 ;;
+  *) echo "usage: git-allow-delete.sh [add <path…>|list|clear]"; exit 2 ;;
 esac
