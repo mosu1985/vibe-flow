@@ -22,8 +22,12 @@ tools/sync-git-guards.sh            update the vendored git-guards copy
 
 ## Rules for agents and skills
 
-1. **Language: Russian**, with the same tone and structure as the sources
+1. **Language: English**, with the same tone and structure as the sources
    (emoji markers on headings, 🔴 for hard rules, short bullet points).
+   Agents talk to the user in the user's language, and a confirmation
+   ("yes", "push", "deploy") counts in any language. Section headings that
+   other agents look for (`## 🧩 Project`, `## 🔬 Verify live`,
+   `## 🧪 Test impact`…) are a contract: rename them only in every file at once.
 2. **No specifics of any particular project.** Forbidden: names of projects,
    clients and their integrations; names of the author's machines and
    personal tools; cloud project ids, team names, tokens; paths and functions
@@ -37,8 +41,9 @@ tools/sync-git-guards.sh            update the vendored git-guards copy
 4. **Don't assume a stack.** Not "Next.js + Supabase", but "if the project
    has a database with RLS…", "API routes (in Next.js `app/api/**/route.ts`,
    in Express routers…)". Where project specifics are needed, take them from:
-   - the `## 🧩 Проект` block in `CLAUDE.md` (stack, commands, where things
-     live), written by `/vibe-flow:init`;
+   - the `## 🧩 Project` block in `CLAUDE.md` (stack, commands, where things
+     live), written by `/vibe-flow:init` (older installs title it
+     `## 🧩 Проект`);
    - `.gitguards.conf` in the root: `GG_TEST_CMD`, `GG_TYPECHECK_CMD`,
      `GG_DEV_CMD`, `GG_PROTECTED` (protected branch), `GG_WT_DIR`.
    No data → the agent detects it from project files (package.json,

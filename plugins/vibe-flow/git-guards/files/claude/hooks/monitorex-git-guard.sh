@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
-# monitorex-git-guard.sh — PreToolUse (Bash): запрет `git add` и `git commit`
-# в ОБЩЕМ рабочем дереве.
+# monitorex-git-guard.sh — PreToolUse (Bash): blocks `git add` and `git commit`
+# in the SHARED working tree.
 #
-# ЗАЧЕМ ОТДЕЛЬНО ОТ GIT-ХУКОВ. У git нет хука на `git add` — именно поэтому
-# первая редакция схемы не работала: сосед успевал застейджить файл, пока шёл
-# чужой коммит. Хук Claude Code видит команду ДО запуска и может её отклонить.
-# Git-хуки остаются backstop-ом для человека в терминале, Codex и IDE, которые
-# этот слой не проходят вовсе.
+# WHY SEPARATE FROM GIT HOOKS. git has no hook for `git add` — that is exactly why
+# the first version of the scheme did not work: a neighbor managed to stage a file
+# while someone else's commit was in progress. A Claude Code hook sees the command
+# BEFORE it runs and can reject it. Git hooks remain the backstop for a human in a
+# terminal, Codex and IDEs, which never pass through this layer at all.
 #
-# Разбор сегментов команды — библиотека из session-coordination-kit
-# (автор Pavlo Rudomotov): умеет `cd` по цепочке, `bash -c`, subshell, `||`,
-# пайпы. Своя реализация была бы заведомо хуже.
+# Command segment parsing comes from a vendored library (shell_segments.py): it
+# follows `cd` along the chain, `bash -c`, subshells, `||` and pipes. A homegrown
+# parser would have been strictly worse.
 #
-# FAIL-OPEN на любой поломке инфраструктуры (нет python3, битый ввод, не
-# git-каталог): предохранитель не должен ломать работу, когда сам не уверен.
+# FAIL-OPEN on any infrastructure breakage (no python3, broken input, not a
+# git directory): a safety catch must not break work when it is unsure itself.
 set -u
 command -v python3 >/dev/null 2>&1 || exit 0
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 [ -f "$DIR/monitorex_git_guard.py" ] || exit 0
-exec python3 -B "$DIR/monitorex_git_guard.py"   # -B: без __pycache__ в проекте
+exec python3 -B "$DIR/monitorex_git_guard.py"   # -B: no __pycache__ in the project

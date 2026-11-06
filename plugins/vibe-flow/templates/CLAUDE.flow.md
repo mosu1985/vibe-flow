@@ -1,113 +1,116 @@
-# ⚙️ vibe-flow — правила работы
+# ⚙️ vibe-flow — working rules
 
-> Этот блок ставит и обновляет `/vibe-flow:init`. Правки внутри меток
-> `vibe-flow:begin/end` перезапишутся при обновлении — свои правила пишите
-> ниже или выше блока.
+> This block is installed and updated by `/vibe-flow:init`. Edits inside the
+> `vibe-flow:begin/end` markers are overwritten on update — write your own rules
+> below or above the block.
 
-## 🚨 Критические правила
+## 🌍 Language
+- Talk to the user in their language. A confirmation ("yes", "push", "deploy") counts in any language.
 
-### 🚫 Деплой — только с ведома пользователя
-- **НИКОГДА** не деплоить и не пушить в защищённую ветку без явного «да» пользователя в текущем разговоре
-- **ВСЕГДА** сообщать о готовности к деплою и спрашивать «пушим?»
-- **ПЕРЕД** вопросом «пушим?» — вердикт ✅ от `vibe-flow:release-gate` (см. «Финальный гейт»)
-- Необратимое (миграции БД, удаление данных, рассылки, запись во внешние сервисы) — тоже только по явному «да»
+## 🚨 Critical rules
 
-### 🔥 Доводить до конца
-- Не останавливаться на полпути: итерировать, пока проблема не решена
-- Не сообщать «готово», не проверив результат (тест, запрос, браузер)
+### 🚫 Deploy — only with the user's knowledge
+- **NEVER** deploy or push to the protected branch without the user's explicit "yes" in the current conversation
+- **ALWAYS** report that the work is ready to deploy and ask "Push?"
+- **BEFORE** asking "Push?" — get a ✅ verdict from `vibe-flow:release-gate` (see "Final gate")
+- Irreversible actions (DB migrations, deleting data, mass mailings, writing to external services) also need the user's explicit "yes"
 
-### 🚨 Архитектура — решение пользователя
-- Не менять и не отключать согласованные решения (безопасность, деплой, CI, права) без одобрения
-- Есть несколько подходов → предложить **ТОП-3 варианта** (Суть, ✅ плюсы, ❌ минусы, реализация) и **ждать выбора**. Ничего не начинать, пока пользователь не выбрал
-- Задача простая и решение очевидно → делать сразу
+### 🔥 See it through
+- Do not stop halfway: iterate until the problem is solved
+- Do not report "done" without verifying the result (a test, a query, the browser)
 
-### 🚨 Никаких временных решений
-- Без заглушек, моков и хардкода в продовом коде. Нет данных или таблицы → правильная схема и реальный поток данных
-- Не уверен в подходе → спросить, а не «пока так»
+### 🚨 Architecture is the user's decision
+- Do not change or disable agreed decisions (security, deploy, CI, permissions) without approval
+- If there are several approaches → propose the **TOP-3 options** (Essence, ✅ pros, ❌ cons, implementation) and **wait for the choice**. Start nothing until the user has chosen
+- The task is simple and the solution is obvious → just do it
 
-### 📄 Без лишних файлов
-- Не создавать отчёты, инструкции, аудиты в репозитории без просьбы пользователя
+### 🚨 No temporary solutions
+- No stubs, mocks or hardcoded values in production code. No data or table → a proper schema and a real data flow
+- Not sure about the approach → ask, don't settle for "for now"
 
-### 🔐 Секреты
-- Секреты — только в переменных окружения (`.env*` в `.gitignore`)
-- **Никогда** не светить токены в командной строке, коде, логах, коммитах: читать из окружения (`node --env-file=.env.local …`, `python -m dotenv …`)
+### 📄 No extra files
+- Do not create reports, instructions or audits in the repository unless the user asks
 
-## 💬 Общение
-- Кратко и по делу; детали — когда попросят
-- Итог задачи — в формате release-note: ✅ что сделано · 🎯 что изменилось · 🧪 что попробовать
-- Коммиты: `[тип]: описание`, типы `feat`, `fix`, `docs`, `refactor`, `style`, `test`
+### 🔐 Secrets
+- Secrets live only in environment variables (`.env*` is in `.gitignore`)
+- **Never** expose tokens in the command line, code, logs or commits: read them from the environment (`node --env-file=.env.local …`, `python -m dotenv …`)
 
-## 🗺️ Навигация по коду
-В начале планирования любой задачи — скилл `/vibe-flow:architecture-map`: обновить индекс кода, грепнуть его, и только потом точечно читать файлы. Слепой обход большого репозитория дорог. Нет `node` — пропустить индекс и читать `docs/codemap/ARCHITECTURE.md`.
+## 💬 Communication
+- Short and to the point; details when asked
+- Task summary in release-note format: ✅ what was done · 🎯 what changed · 🧪 what to try
+- Commits: `[type]: description`, types `feat`, `fix`, `docs`, `refactor`, `style`, `test`
 
-## 🌳 Работа в своём рабочем дереве — CRITICAL
-Задача, которая что-то меняет, делается в отдельном рабочем дереве git (worktree), а не в главной папке проекта: так параллельные сессии и агенты не смешивают свои правки.
-1. **Начало задачи:** сначала `scripts/wt-status.sh` — не начата ли она уже (тогда `scripts/wt-new.sh --resume <ветка>`). Иначе `scripts/wt-new.sh <имя-задачи>` → ветка `wt/<имя>`, каталог `<проект>-wt/<имя>`, свой порт dev
-2. **Где работать — выбрать один способ и сказать пользователю:**
-   - 💡 **Новая сессия в дереве (проще всего):** попросить пользователя открыть новый терминал и запустить `cd <путь-к-дереву> && claude` — там всё работает как в обычном проекте
-   - **В текущей сессии:** каталог дерева лежит вне проекта, и `cd` между командами не сохраняется. Поэтому КАЖДАЯ команда — `cd "<дерево>" && …`, файлы — по абсолютным путям в дереве, и **каждому агенту** в промпт строка `Рабочее дерево: <абсолютный путь>`. Агент без этой строки при нескольких деревьях остановится и спросит
-3. **Конец задачи:** после мержа — `scripts/wt-done.sh <имя>` (гасит dev, освобождает порт, не удалит несохранённую работу)
+## 🗺️ Code navigation
+At the start of planning any task — use the `/vibe-flow:architecture-map` skill: refresh the code index, grep it, and only then read specific files. Blindly walking a large repository is expensive. No `node` → skip the index and read `docs/codemap/ARCHITECTURE.md`.
+
+## 🌳 Work in your own worktree — CRITICAL
+A task that changes anything is done in a separate git worktree, not in the project's main folder: that way parallel sessions and agents do not mix their edits.
+1. **Start of the task:** first `scripts/wt-status.sh` — check whether it has already been started (then `scripts/wt-new.sh --resume <branch>`). Otherwise `scripts/wt-new.sh <task-name>` → branch `wt/<name>`, directory `<project>-wt/<name>`, its own dev port
+2. **Where to work — pick one way and tell the user:**
+   - 💡 **A new session in the worktree (simplest):** ask the user to open a new terminal and run `cd <path-to-worktree> && claude` — everything there works like in a normal project
+   - **In the current session:** the worktree directory lies outside the project, and `cd` does not persist between commands. So EVERY command is `cd "<worktree>" && …`, files are addressed by absolute paths inside the worktree, and **every agent** gets the line `Worktree: <absolute path>` in its prompt. An agent without that line will stop and ask when there are several worktrees
+3. **End of the task:** after the merge — `scripts/wt-done.sh <name>` (stops dev, frees the port, will not delete unsaved work)
 
 ## 📋 Plan Mode — CRITICAL
-**Сразу после того, как план записан в файл, и ДО `ExitPlanMode`** — загрузить скилл `/vibe-flow:plan-mode-review` и выполнить целиком: живая проверка допущений о внешних системах → пачка ревьюеров параллельно → вопросы пользователю → внешний критик (Codex, если установлен) → гейт.
+**Right after the plan is written to a file, and BEFORE `ExitPlanMode`** — load the `/vibe-flow:plan-mode-review` skill and run it in full: live check of assumptions about external systems → the batch of reviewers in parallel → questions to the user → external critic (Codex, if installed) → gate.
 
-🔴 Запреты, действующие всегда:
-- **НЕ вызывать `ExitPlanMode`**, пока не отработали ревьюеры и пользователь не прочитал упрощённый план от `vibe-flow:plan-reviewer`
-- **Вопросы ревьюеров** (`🔴 ТРЕБУЕТСЯ ВОПРОС ПОЛЬЗОВАТЕЛЮ`, «что делать с тестами») — задавать через `AskUserQuestion` ДО `ExitPlanMode` и не решать за пользователя
-- **Допущения о внешних системах проверять живьём** (запрос, скрипт) и вписывать факт в план, а не «проверим при реализации»
-- **Гейт по классу дефекта:** план уходит в реализацию, когда не осталось открытых замечаний `critical`/`high`. Замечание без сценария отказа — `medium`. Максимум 3 раунда автоправки, дальше — разбор с пользователем
+🔴 Prohibitions that always apply:
+- **DO NOT call `ExitPlanMode`** until the reviewers have finished and the user has read the simplified plan from `vibe-flow:plan-reviewer`
+- **Reviewer questions** (`🔴 USER QUESTION REQUIRED`, "what to do about tests") — ask via `AskUserQuestion` BEFORE `ExitPlanMode` and do not decide for the user
+- **Verify assumptions about external systems live** (a query, a script) and write the fact into the plan, not "we'll check during implementation"
+- **Gate by defect class:** the plan goes to implementation when no `critical`/`high` findings remain open. A finding without a failure scenario is `medium`. At most 3 rounds of auto-fixing, then sort it out with the user
 
-## 🔀 Реализация — по вердикту `vibe-flow:orchestration-router`
-- ▶️ **Прямое выполнение** → основная сессия делает сама
-- 🔀 **Бригада агентов** → `vibe-flow:team-planner` расписывает её в секции `## 👥 Команда агентов`: каждому агенту **модель и effort**. Права доступа, деньги, внешние интеграции, миграции — **всегда Opus**; Sonnet — работа по готовому образцу. Запуск: каждая группа — одним сообщением с параллельными вызовами Agent (параметры `model` и `effort` из секции, `Рабочее дерево: <путь>` в промпте), следующая группа — после результатов предыдущей. Если доступен инструмент `TeamCreate` — можно через него
-- ⚙️ **Workflow** → только по явному «да» пользователя; нет инструмента `Workflow` — бригадой или напрямую
+## 🔀 Implementation — by the verdict of `vibe-flow:orchestration-router`
+- ▶️ **Direct execution** → the main session does it itself
+- 🔀 **Agent crew** → `vibe-flow:team-planner` lays it out in the `## 👥 Agent crew` section: for each agent a **model and effort**. Access control, money, external integrations, migrations — **always Opus**; Sonnet — work from a ready pattern. Launch: each group in one message with parallel Agent calls (`model` and `effort` parameters from the section, `Worktree: <path>` in the prompt), the next group after the results of the previous one. If the `TeamCreate` tool is available, you may use it
+- ⚙️ **Workflow** → only on the user's explicit "yes"; no `Workflow` tool → use a crew or do it directly
 
-## 🤖 Агенты — запускать без отдельного разрешения
-Пользователь заранее разрешает автозапуск агентов vibe-flow по этим правилам. Исключения: `Workflow` — только по «да» в текущем сообщении; пуш/деплой — только по «да».
+## 🤖 Agents — launch without separate permission
+The user grants in advance automatic launch of vibe-flow agents under these rules. Exceptions: `Workflow` — only on a "yes" in the current message; push/deploy — only on a "yes".
 
-## 🔁 После реализации — порядок
-1. `vibe-flow:test-runner` — если менялся код
-2. Коммит — только `scripts/git-safe-commit.sh` (см. «Git»)
-3. **`vibe-flow:release-gate`** — финальное ревью всего диффа ветки
-4. `vibe-flow:dev-server-restart` — если в проекте есть dev-сервер и менялся код
-5. Отчёт пользователю + вопрос **«пушим ветку?»**
-6. После «да»: `git push -u origin <ветка>` (агент `vibe-flow:push-to-production` или сама сессия)
-7. **Отдельный вопрос: «вливаем в `<прод-ветка>`? Это деплой в прод»**. После «да»: `gh pr create --fill` → `gh pr merge <N> --merge`; нет `gh` — дать пользователю ссылку на создание PR на GitHub
-8. После мержа — монитор деплоя, если он есть (например `vibe-flow-vercel:vercel-deploy-monitor`), затем `scripts/wt-done.sh <имя>`
+## 🔁 After implementation — the order
+1. `vibe-flow:test-runner` — if code changed
+2. Commit — only via `scripts/git-safe-commit.sh` (see "Git")
+3. **`vibe-flow:release-gate`** — final review of the whole branch diff
+4. `vibe-flow:dev-server-restart` — if the project has a dev server and code changed
+5. Report to the user + the question **"Push the branch?"**
+6. After a "yes": `git push -u origin <branch>` (the `vibe-flow:push-to-production` agent or the session itself)
+7. **A separate question: "Merge into `<prod-branch>`? This is a deploy to prod"**. After a "yes": `gh pr create --fill` → `gh pr merge <N> --merge`; no `gh` — give the user a link to create the PR on GitHub
+8. After the merge — the deploy monitor, if there is one (for example `vibe-flow-vercel:vercel-deploy-monitor`), then `scripts/wt-done.sh <name>`
 
-**Первый push в новый репозиторий** (на remote ещё нет прод-ветки) делает человек: `! git push -u origin <прод-ветка> --no-verify`. Гейту и барьерам не с чем сравнивать, пока на remote пусто, — сказать это пользователю прямо.
+**The first push to a new repository** (the remote has no prod branch yet) is done by a human: `! git push -u origin <prod-branch> --no-verify`. The gate and the barriers have nothing to compare against while the remote is empty — tell the user this plainly.
 
-## 🚦 Финальный гейт — CRITICAL
-**Код уходит в push только после вердикта `vibe-flow:release-gate`** (Opus, effort `xhigh`) — ревью ВСЕГО диффа ветки от защищённой ветки, кто бы код ни писал.
-- **Когда:** после коммита, ДО вопроса «пушим?». В промпт: путь к рабочему дереву, путь к файлу плана, кто писал код, номер круга
-- 🔴 **Жёстко, хуком:** `pre-push` откажет без вердикта для дерева HEAD (`GG_RELEASE_GATE=1` в `.gitguards.conf`). Вердикт привязан к **содержимому**: после любой правки — ревью заново. Только `*.md` в диффе — гейт не нужен
-- **❌ fail** → исправить, закоммитить, запустить снова. **Максимум 3 круга**, дальше — стоп и разбор с пользователем
-- 🔴 **Вердикт ставит только сам агент.** Основная сессия не может одобрить свой код — хук это блокирует
-- **Обход — только человеком**, в том дереве, которое пушится: `! cd "<дерево>" && scripts/release-gate.sh override --yes`. Предлагать вслух и с причиной
-- **Нет прод-ветки на remote** (новый репозиторий) — гейту не с чем сравнить; сначала первый push человеком (см. «После реализации»)
-- Проверить: `scripts/release-gate.sh status` · что ревьюится: `scripts/release-gate.sh scope`
+## 🚦 Final gate — CRITICAL
+**Code goes to push only after the verdict of `vibe-flow:release-gate`** (Opus, effort `xhigh`) — a review of the WHOLE branch diff against the protected branch, no matter who wrote the code.
+- **When:** after the commit, BEFORE asking "Push?". In the prompt: the path to the worktree, the path to the plan file, who wrote the code, the round number
+- 🔴 **Enforced by a hook:** `pre-push` refuses without a verdict for the HEAD tree (`GG_RELEASE_GATE=1` in `.gitguards.conf`). The verdict is bound to the **content**: after any edit — review again. If the diff has only `*.md`, no gate is needed
+- **❌ fail** → fix, commit, run again. **At most 3 rounds**, then stop and sort it out with the user
+- 🔴 **Only the agent itself sets the verdict.** The main session cannot approve its own code — the hook blocks it
+- **Bypass — only by a human**, in the tree being pushed: `! cd "<worktree>" && scripts/release-gate.sh override --yes`. Offer it aloud and with a reason
+- **No prod branch on the remote** (new repository) — the gate has nothing to compare against; first the human's first push (see "After implementation")
+- Check: `scripts/release-gate.sh status` · what is reviewed: `scripts/release-gate.sh scope`
 
-## 🌿 Git — параллельные сессии — CRITICAL
-**Обычные `git add` / `git commit` в главном рабочем дереве запрещены и отклоняются хуком.** Несколько сессий Claude делят один индекс git: застейдженные файлы одной сессии уезжают в чужой коммит за секунды.
-- 🔴 **Коммит — ВЕЗДЕ только так**, и в главном дереве, и в своём:
-  `scripts/git-safe-commit.sh --message-file <файл> -- <пути>` — изолированный индекс, атомарный сдвиг ветки, прогон связанных тестов
-- 🔴 **Почему не обычный `git commit` даже в своём дереве:** `pre-push` считает своими только коммиты с меткой `Session-Id` текущей сессии, а ставит её только этот скрипт. Голый коммит push отклонит как «не созданный этой сессией»
-- **Коммиты прошлой сессии или сделанные вами в терминале** push тоже назовёт «не созданными этой сессией» — это нормально после перезапуска Claude. Разрешает человек, посмотрев список: `! scripts/git-allow-push.sh add <sha…> --yes`
-- **Рабочее дерево** — см. «Работа в своём рабочем дереве»; снимать только `scripts/wt-done.sh <имя>`
-- **Залип лок:** `scripts/git-lock.sh release` · потерянные коммиты: `scripts/git-recovery.sh list`
-- 🔴 **Отметки обхода ставит человек, не агент** (`git-confirm.sh`, `git-allow-push.sh add`, `git-allow-delete.sh add`, `release-gate.sh override`) — хук отклоняет их из Bash модели. Показать, что будет разрешено, и дать пользователю готовую команду: `! cd "<дерево>" && scripts/<скрипт> … --yes`
-- 🔴 **`git push --no-verify` модели запрещён хуком** — он выключает проверку типов, барьеры и гейт разом. Человеку — через `!`
-- 🔴 **Чужое не прятать:** `git stash` чужой работы запрещён. Грязное дерево соседа мешает push → пушить из своего worktree
-- **Удалить ветку на remote:** `gh api -X DELETE repos/<owner>/<repo>/git/refs/heads/<ветка>` (через `git push --delete` хук откажет)
-- **Настройки** (команды тестов/типов/dev, защищённая ветка, каталог деревьев) — в `.gitguards.conf`
-- Прогон защиты: `bash scripts/test-git-guards.sh`
+## 🌿 Git — parallel sessions — CRITICAL
+**Plain `git add` / `git commit` in the main working tree are forbidden and rejected by a hook.** Several Claude sessions share one git index: files staged by one session end up in another's commit within seconds.
+- 🔴 **Commit — EVERYWHERE only this way**, both in the main tree and in your own:
+  `scripts/git-safe-commit.sh --message-file <file> -- <paths>` — isolated index, atomic branch move, run of related tests
+- 🔴 **Why not a plain `git commit` even in your own tree:** `pre-push` treats as its own only commits carrying the current session's `Session-Id` mark, and only this script sets it. A bare commit will be rejected by push as "not created by this session"
+- **Commits from a previous session, or ones you made in the terminal,** push will also call "not created by this session" — this is normal after restarting Claude. A human allows them after looking at the list: `! scripts/git-allow-push.sh add <sha…> --yes`
+- **Worktree** — see "Work in your own worktree"; remove only with `scripts/wt-done.sh <name>`
+- **Stuck lock:** `scripts/git-lock.sh release` · lost commits: `scripts/git-recovery.sh list`
+- 🔴 **Bypass marks are set by a human, not an agent** (`git-confirm.sh`, `git-allow-push.sh add`, `git-allow-delete.sh add`, `release-gate.sh override`) — the hook rejects them from the model's Bash. Show what will be allowed and give the user a ready command: `! cd "<worktree>" && scripts/<script> … --yes`
+- 🔴 **`git push --no-verify` is forbidden to the model by a hook** — it switches off the type check, the barriers and the gate all at once. For a human — via `!`
+- 🔴 **Do not hide other people's work:** `git stash` of someone else's work is forbidden. A neighbor's dirty tree blocks the push → push from your own worktree
+- **Delete a branch on the remote:** `gh api -X DELETE repos/<owner>/<repo>/git/refs/heads/<branch>` (the hook refuses `git push --delete`)
+- **Settings** (test/type/dev commands, protected branch, worktrees directory) — in `.gitguards.conf`
+- Run the protection tests: `bash scripts/test-git-guards.sh`
 
-## 🧪 Проверка типов и тесты
-- Если в проекте есть проверка типов (`GG_TYPECHECK_CMD`), она идёт на `pre-push`. Зелёный деплой не означает, что типы в порядке, если сборка их не проверяет
-- `vibe-flow:test-runner` — после каждой реализации кода; падения он отчитывает, чинит основная сессия
+## 🧪 Type check and tests
+- If the project has a type check (`GG_TYPECHECK_CMD`), it runs on `pre-push`. A green deploy does not mean the types are fine if the build does not check them
+- `vibe-flow:test-runner` — after every code implementation; it reports failures, the main session fixes them
 
-## 🌐 Браузер
-- UI-проверки и работа с веб-кабинетами — агент `vibe-flow:browser-operator` (расширение Claude in Chrome)
-- Подключено несколько браузеров → спросить пользователя, какой, и передать агенту `deviceId`
-- Смоук приложения — скилл `/vibe-flow:smoke-ui`
-- Пароли агент не вводит; форма уже заполнена менеджером паролей → можно нажать «Войти»
+## 🌐 Browser
+- UI checks and work in web consoles — the `vibe-flow:browser-operator` agent (Claude in Chrome extension)
+- Several browsers connected → ask the user which one, and pass the agent the `deviceId`
+- App smoke test — the `/vibe-flow:smoke-ui` skill
+- The agent does not type passwords; if the form is already filled in by the password manager, it may click "Sign in"

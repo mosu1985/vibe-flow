@@ -1,139 +1,140 @@
-# ВЕНДОРЕНО из session-coordination-kit v1.0 (автор: Pavlo Rudomotov),
-# получено 2026-09-02. Модель «множества возможных cwd» переписывалась
-# четыре раза по итогам независимого аудита — не переписывать своё,
-# при обновлении набора сверять с оригиналом.
+# VENDORED code (upstream v1.0), obtained 2026-09-02. The "set of possible
+# cwds" model was rewritten four times after an independent audit: do not
+# rewrite it on your own, and when updating the kit, diff against the original.
 #!/usr/bin/env python3
 """
-shell_segments.py — общий quote-aware сегментатор Bash-команд.
+shell_segments.py — shared quote-aware segmenter for Bash commands.
 
-Задача: НЕ полноценный shell-парсер (это невозможно надёжно без исполнения),
-а practical best-effort ответ на вопрос «из каких top-level команд состоит
-эта строка, и в каком/каких каталогах каждая из них может выполниться»,
-нужный ОБОИМ хукам набора (resource-lock.sh и push-content-guard.sh), чтобы
-не дублировать логику дважды.
+Goal: NOT a full shell parser (that cannot be done reliably without
+executing), but a practical best-effort answer to "which top-level commands
+make up this string, and in which directory (or directories) can each of them
+run", needed by BOTH hooks that consume this module, so the logic is not
+duplicated.
 
-Что умеет:
-  - разбивать команду на "item"-ы (см. split_top_level_items) по ; && || |
-    (одиночный) & и переносу строки — уважая кавычки ('...' и "...");
-  - НЕ разрывать fd-редиректы (`2>&1`, `1>&2`, `&>file`) на мусорные
-    сегменты — они НЕ являются background-оператором `&`;
-  - пропускать ТЕЛО heredoc (`cmd <<EOF\n...\nEOF`) целиком — это
-    ЛИТЕРАЛЬНЫЕ ДАННЫЕ команды-хозяина, а не отдельные top-level команды;
-  - раскрывать subshell-группы `( ... )` КАК ИЗОЛИРОВАННЫЙ подпроход —
-    команды внутри исполняются, но `cd` внутри `( ... )` НЕ меняет каталог
-    вызывающей оболочки ПОСЛЕ закрывающей скобки (родной синтаксис bash,
-    раскрывается на ЛЮБУЮ глубину вложенности — не требует повторного
-    вызова внешнего интерпретатора);
-  - раскрывать `{ ... }` (группа команд) КАК ЧАСТЬ ТОЙ ЖЕ ОБОЛОЧКИ — В
-    ОТЛИЧИЕ от `( ... )`, фигурные скобки НЕ форкают подпроцесс: `cd`
-    внутри `{ ... }` ДЕЙСТВУЕТ на всё, что идёт после (см. Д9 ниже —
-    группу и подоболочку легко перепутать, они разведены сознательно);
-  - раскрывать ОДИН уровень `bash -c '...'` / `sh -c "..."` — типовая
-    обёртка (требует доверия к содержимому внешнего вызова интерпретатора,
-    поэтому ограничена одним уровнем — в отличие от `( ... )`/`{ ... }`);
-  - ИЗОЛИРОВАТЬ каждую стадию пайплайна `a | b | c` и каждую фоновую задачу
-    `cmd &` ДРУГ ОТ ДРУГА и от того, что снаружи (см. Д9 ниже) — та же
-    природа изоляции, что у `( ... )`, только без явных скобок;
-  - ОТСЛЕЖИВАТЬ МНОЖЕСТВО ВОЗМОЖНЫХ cwd (не одно достоверное значение) по
-    всей цепочке — см. блок «МОДЕЛЬ КАНДИДАТОВ cwd» ниже.
+What it does:
+  - splits the command into "items" (see split_top_level_items) on ; && || |
+    (single) & and newline, respecting quotes ('...' and "...");
+  - does NOT break fd redirects (`2>&1`, `1>&2`, `&>file`) into garbage
+    segments: they are NOT the background operator `&`;
+  - skips a heredoc BODY (`cmd <<EOF\n...\nEOF`) entirely: it is LITERAL
+    DATA of the owning command, not separate top-level commands;
+  - expands subshell groups `( ... )` AS AN ISOLATED sub-pass: the commands
+    inside do run, but a `cd` inside `( ... )` does NOT change the calling
+    shell's directory AFTER the closing paren (native bash syntax, expanded
+    to ANY nesting depth, no repeated call to an external interpreter
+    needed);
+  - expands `{ ... }` (command group) AS PART OF THE SAME SHELL: UNLIKE
+    `( ... )`, braces do NOT fork a subprocess, so a `cd` inside `{ ... }`
+    DOES apply to everything after it (see D9 below: group and subshell are
+    easy to confuse, and they are kept apart on purpose);
+  - expands ONE level of `bash -c '...'` / `sh -c "..."`, the typical
+    wrapper (this requires trusting the content of an external interpreter
+    call, so it is limited to one level, unlike `( ... )`/`{ ... }`);
+  - ISOLATES each pipeline stage `a | b | c` and each background job
+    `cmd &` FROM EACH OTHER and from the outside (see D9 below): the same
+    kind of isolation as `( ... )`, just without explicit parens;
+  - TRACKS A SET OF POSSIBLE cwds (not one definite value) along the whole
+    chain; see the "cwd CANDIDATE MODEL" section below.
 
-## МОДЕЛЬ КАНДИДАТОВ cwd (cybersec, независимая проверка — три захода)
+## cwd CANDIDATE MODEL (cybersec, independent review, three rounds)
 
-Первые два захода (Д1/Д2, затем Д6) моделировали cwd как ОДНО достоверное
-значение — сперва "ведущий cd", потом "cd, накопленный последовательно по
-цепочке". Оба раза модель была НЕВЕРНА в одну и ту же сторону дважды: сперва
-пропускала реальный риск (тихий allow — Д1/Д2/Д6), затем — после того как
-cwd стал накапливаться безусловно по ЛЮБОМУ синтаксически найденному `cd` —
-стала ЛОЖНО СРАБАТЫВАТЬ на законной работе (Д7/Д8/Д9): `cd` внутри `( ... )`
-ошибочно "протекал" наружу (Д7), `cd` в ветке `||`, которая физически могла
-не исполниться, безусловно считался исполнившимся (Д8), и `cd` СЛЕВА от
-пайпа `|` (Д9) ошибочно считался действующим для того, что СПРАВА от `|` и
-для того, что идёт ПОСЛЕ всего пайплайна — хотя КАЖДАЯ стадия пайплайна
-исполняется в СВОЁМ форке (bash не даёт `lastpipe` по умолчанию), и то же
-самое верно для одиночной фоновой задачи `cmd &` (тоже форк).
+The first two rounds (D1/D2, then D6) modeled cwd as ONE definite value:
+first "the leading cd", then "cd accumulated sequentially along the chain".
+Both times the model was WRONG in the same direction twice: first it missed
+a real risk (silent allow: D1/D2/D6), then, once cwd started accumulating
+unconditionally from ANY syntactically found `cd`, it started FALSE-FIRING on
+legitimate work (D7/D8/D9): a `cd` inside `( ... )` wrongly "leaked" outside
+(D7), a `cd` in an `||` branch that might physically never run was
+unconditionally treated as executed (D8), and a `cd` to the LEFT of a pipe
+`|` (D9) was wrongly treated as in effect for what is to the RIGHT of `|` and
+for what comes AFTER the whole pipeline, even though EACH pipeline stage runs
+in ITS OWN fork (bash has no `lastpipe` by default), and the same holds for a
+lone background job `cmd &` (also a fork).
 
-Корень: статический разбор ПРИНЦИПИАЛЬНО не может знать, исполнится ли
-условная ветка (`cmd1 || cmd2` — cmd2 исполняется, ТОЛЬКО ЕСЛИ cmd1 упал;
-это известно лишь в момент запуска). Значит модель обязана быть не «какой
-каталог», а **«какие каталоги ВОЗМОЖНЫ»** — множество кандидатов, каждый из
-которых — либо конкретный путь, либо явная неизвестность.
+Root cause: static analysis FUNDAMENTALLY cannot know whether a conditional
+branch will run (`cmd1 || cmd2`: cmd2 runs ONLY IF cmd1 failed, which is
+known only at run time). So the model must answer not "which directory" but
+**"which directories are POSSIBLE"**: a set of candidates, each of which is
+either a concrete path or an explicit unknown.
 
-Правила по каждому оператору/конструкции:
-  - `;`, `&&`, перенос строки — ДЕТЕРМИНИРОВАННОЕ продолжение В ПРЕДЕЛАХ
-    ОДНОГО AND-OR-списка (см. `_group_units`): множество кандидатов
-    заменяется на "все кандидаты, к которым применён эффект этого item".
-    Для `&&` это оправдано семантикой bash (правая часть исполняется,
-    ТОЛЬКО если левая успешна — значит, если сегмент ПОСЛЕ `cd X &&` вообще
-    найден, `cd X` либо успел выполниться, либо цепочка не дошла до этого
-    сегмента); тот же довод неявно принят и для `;`.
-  - `||` — УСЛОВНОЕ ветвление ВНУТРИ списка: правая часть МОЖЕТ не
-    исполниться (если левая была успешна). Новое множество кандидатов =
-    ОБЪЕДИНЕНИЕ {кандидаты, как будто правая часть НЕ исполнилась} ∪
-    {кандидаты, как будто исполнилась} — безопасная переоценка сверху.
-  - `( ... )` (subshell) — ДЕТЕРМИНИРОВАННО ИЗОЛИРОВАНА: `cd` внутри
-    вообще НЕ меняет кандидатов СНАРУЖИ. Содержимое разбирается РЕКУРСИВНО
-    (поиск push/resource-сегментов) со своим ЛОКАЛЬНЫМ проходом, начинающимся
-    с кандидатов, накопленных СНАРУЖИ на момент этой группы.
-  - `{ ... }` (группа) — НЕ изолирована (та же оболочка, НЕ форк): её
-    содержимое СПЛАЙСИТСЯ прямо в окружающую последовательность item-ов,
-    как если бы фигурных скобок не было вовсе — `cd` внутри действует на
-    всё, что после (Д9: не перепутать с `( ... )`, иначе вернётся дыра
-    ПРОПУСКА push/resource-риска внутри `{ ... }`).
-  - `a | b | c` (пайплайн, Д9) — КАЖДАЯ стадия — СВОЙ независимый форк.
-    Ни одна стадия не видит `cd`-эффект другой (даже соседней), и ВЕСЬ
-    пайплайн целиком НЕ меняет кандидатов снаружи. Каждая стадия
-    разбирается РЕКУРСИВНО (поиск push/resource-сегментов), НЕЗАВИСИМО от
-    остальных, начиная с кандидатов, накопленных ДО пайплайна.
-  - `cmd &` (одиночная фоновая задача, Д9) — тоже форк: `cmd`, а если это
-    целый AND/OR-список (`a && b &`) — ВЕСЬ список целиком (bash фонит
-    список, не последнюю команду поодиночке) — исполняется изолированно
-    от того, что стоит ПОСЛЕ `&`. Внутри самого списка `cd` продолжает
-    действовать как обычно (Д9-тест "cd && push &" — push обязан увидеть
-    cd из ТОГО ЖЕ списка); наружу, после `&`, эффект не просачивается.
+Rules per operator/construct:
+  - `;`, `&&`, newline: DETERMINISTIC continuation WITHIN ONE AND-OR list
+    (see `_group_units`): the candidate set is replaced with "all candidates
+    with this item's effect applied". For `&&` this is justified by bash
+    semantics (the right side runs ONLY if the left side succeeded, so if a
+    segment AFTER `cd X &&` is found at all, either `cd X` has run or the
+    chain never reached that segment); the same argument is implicitly
+    accepted for `;`.
+  - `||`: CONDITIONAL branching INSIDE a list: the right side MAY not run
+    (if the left side succeeded). New candidate set = UNION of {candidates
+    as if the right side did NOT run} ∪ {candidates as if it did}, a safe
+    over-approximation.
+  - `( ... )` (subshell): DETERMINISTICALLY ISOLATED: a `cd` inside does not
+    change the candidates OUTSIDE at all. The content is parsed RECURSIVELY
+    (looking for push/resource segments) in its own LOCAL pass, starting
+    from the candidates accumulated OUTSIDE at the point of this group.
+  - `{ ... }` (group): NOT isolated (same shell, NOT a fork): its content is
+    SPLICED directly into the surrounding item sequence, as if the braces
+    were not there at all, so a `cd` inside applies to everything after it
+    (D9: do not confuse with `( ... )`, or the hole that MISSES a
+    push/resource risk inside `{ ... }` comes back).
+  - `a | b | c` (pipeline, D9): EACH stage is its own independent fork.
+    No stage sees another stage's `cd` effect (not even its neighbor's), and
+    the WHOLE pipeline does NOT change the candidates outside. Each stage is
+    parsed RECURSIVELY (looking for push/resource segments), INDEPENDENTLY of
+    the others, starting from the candidates accumulated BEFORE the pipeline.
+  - `cmd &` (lone background job, D9): also a fork: `cmd`, or if it is a
+    whole AND/OR list (`a && b &`), the WHOLE list (bash backgrounds the
+    list, not just the last command) runs isolated from what comes AFTER
+    `&`. Inside the list itself `cd` keeps working as usual (D9 test
+    "cd && push &": push must see the cd from the SAME list); the effect does
+    not leak out past `&`.
 
-Неразрешимый `cd` (`cd $VAR`, `cd -`, `cd` без аргумента, относительный путь
-поверх уже неизвестной точки) — по-прежнему даёт кандидата «НЕИЗВЕСТНО»
-(cd_dir=None, cd_ambiguous=True), эта ветка НЕ ослаблена: хук-потребитель
-обязан трактовать присутствие такого кандидата в множестве как отказ
-(нельзя исключить, что именно в НЕИЗВЕСТНОМ каталоге и есть реальный риск).
+An unresolvable `cd` (`cd $VAR`, `cd -`, `cd` with no argument, a relative
+path on top of an already unknown point) still yields an "UNKNOWN" candidate
+(cd_dir=None, cd_ambiguous=True), and this branch is NOT weakened: the
+consuming hook must treat the presence of such a candidate in the set as a
+deny (it cannot rule out that the real risk is in exactly that UNKNOWN
+directory).
 
-⚠️ ОСТАТОЧНЫЙ УГОЛ (сознательно, не спрятано — см. README «Ограничения»):
-`true || cd $X` — УСЛОВНАЯ ветка (`||`) вдобавок НЕРАЗРЕШИМАЯ (`cd $X`).
-Множество кандидатов получает «НЕИЗВЕСТНО» (по правилу выше) → отказ, ХОТЯ
-сама команда может быть полностью законной (RHS вообще не исполнится).
-Цена признана приемлемой (форма редкая, ошибка в БЕЗОПАСНУЮ сторону —
-лишний отказ, не лишний пропуск), но должна быть прочитана заранее, а не
-обнаружена получателем на своей работе.
+⚠️ RESIDUAL CORNER (deliberate, not hidden; see README "Limitations"):
+`true || cd $X` is a CONDITIONAL branch (`||`) that is also UNRESOLVABLE
+(`cd $X`). The candidate set gets "UNKNOWN" (by the rule above), so the
+result is a deny, EVEN THOUGH the command itself may be perfectly legitimate
+(the RHS never runs). The cost was judged acceptable (the form is rare, and
+the error is on the SAFE side: an extra deny, not an extra allow), but it
+must be read up front rather than discovered by a recipient in their own
+work.
 
-Границы (сознательно, не дыры): `eval '...'`, значение внутри `$VAR`,
-интерпретируемый код (`python3 -c '...'`) — статически не раскрываются
-(это требует исполнения). Символические ссылки — состояние файловой
-системы, тоже не резолвятся здесь (TOCTOU). Второй уровень вложенности
-`bash -c 'bash -c "..."'` не раскрывается (тот же исторический предел, что
-у extract_bash_c_inner) — `( ... )`/`{ ... }` этого предела НЕ имеют, они
-раскрываются на любую глубину. Эти пределы — общий предел любой статики без
-исполнения, не только этого модуля (см. README «Ограничения» — полный
-список форм, которые парсер по-прежнему не видит).
+Boundaries (deliberate, not holes): `eval '...'`, a value inside `$VAR`,
+interpreted code (`python3 -c '...'`) are not expanded statically (that would
+require execution). Symlinks are filesystem state and are not resolved here
+either (TOCTOU). A second nesting level `bash -c 'bash -c "..."'` is not
+expanded (the same historical limit as extract_bash_c_inner); `( ... )`/
+`{ ... }` do NOT have this limit and are expanded to any depth. These limits
+are the general limit of any static analysis without execution, not just of
+this module (see README "Limitations" for the full list of forms the parser
+still cannot see).
 
-ЛИМИТ РАЗМЕРА: очень длинная команда (> SIZE_CAP символов) не парсится
-полноценно (защита от O(n²)-скана на гигантском адверсариальном входе) —
-возвращается пустой безопасный результат (fail-open: вызывающий хук
-увидит «сегментов нет» и не станет ничего блокировать).
+SIZE LIMIT: a very long command (> SIZE_CAP characters) is not fully parsed
+(protection against an O(n²) scan on a huge adversarial input): a safe empty
+result is returned (fail-open: the calling hook sees "no segments" and blocks
+nothing).
 
-ЛИМИТ ЧИСЛА КАНДИДАТОВ: MAX_CANDIDATES (см. ниже) — защита от
-комбинаторного взрыва на адверсариальной команде с множеством `||`.
-Превышение схлопывает множество в единственного кандидата «НЕИЗВЕСТНО»
-(безопасная сторона — это ведёт к отказу, не к пропуску).
+CANDIDATE COUNT LIMIT: MAX_CANDIDATES (see below) protects against a
+combinatorial explosion on an adversarial command with many `||`. Exceeding
+it collapses the set into a single "UNKNOWN" candidate (the safe side: it
+leads to a deny, not an allow).
 
-Вызов как модуль (import) — так его используют resource-lock.sh (через
-свой CLI-обвязчик) и git_push_parse.py. Есть и собственный CLI:
+Called as a module (import): that is how the consuming hooks use it (via
+their own CLI wrapper) and git_push_parse.py. There is also a standalone CLI:
   printf '%s' "$CMD" | python3 shell_segments.py
-выводит JSON: {"cd_dir":..., "cd_ambiguous":..., "segments":[...],
+prints JSON: {"cd_dir":..., "cd_ambiguous":..., "segments":[...],
 "segments_detail":[{"segment":..., "cwd_candidates":[{"cd_dir":...,
 "cd_ambiguous":...}, ...]}, ...]}
 
-Любая внутренняя ошибка → безопасный пустой результат, никогда traceback
-наружу (вызывающий хук — предохранитель, обязан fail-open).
+Any internal error → a safe empty result, never a traceback to the caller
+(the calling hook is a safety net and must fail open).
 """
 import json
 import re
@@ -151,35 +152,35 @@ def _empty_result():
 
 
 def split_top_level_items(s, heredocs=None):
-    """Разбить `s` на ПОСЛЕДОВАТЕЛЬНОСТЬ верхнеуровневых item-ов — обычных
-    команд, subshell-групп `( ... )`, или содержимого `{ ... }` (сплайснутого
-    прямо в поток, см. ниже) — уважая кавычки/heredoc/fd-редиректы.
+    """Split `s` into a SEQUENCE of top-level items (plain commands, subshell
+    groups `( ... )`, or the content of `{ ... }` spliced directly into the
+    stream, see below), respecting quotes/heredocs/fd redirects.
 
-    Возвращает список [op, kind, text, bg]:
-      op   — оператор, СТОЯЩИЙ ПЕРЕД этим item (None для самого первого):
+    Returns a list of [op, kind, text, bg]:
+      op   — the operator that PRECEDES this item (None for the very first):
              ';' '&&' '||' '&' '|' '\\n'
-      kind — 'cmd' (text — обычный текст команды) или 'subshell' (text —
-             СОДЕРЖИМОЕ МЕЖДУ внешними скобками `( ... )`, БЕЗ самих скобок;
-             может рекурсивно содержать вложенные скобки — произвольная
-             глубина, разбирается тем же вызовом рекурсивно потребителем).
-      bg   — True, если этот КОНКРЕТНЫЙ item был непосредственно завершён
-             одиночным `&` (background-оператором), т.е. этот item — ПОСЛЕДНИЙ
-             в фоновом job'е (Д9, см. модуль docstring — используется
-             `_group_units` для изоляции ВСЕГО фонового AND-OR-списка).
+      kind — 'cmd' (text is plain command text) or 'subshell' (text is the
+             CONTENT BETWEEN the outer parens `( ... )`, WITHOUT the parens;
+             may recursively contain nested parens of any depth, which the
+             consumer parses recursively with the same call).
+      bg   — True if this PARTICULAR item was directly terminated by a single
+             `&` (the background operator), i.e. this item is the LAST one in
+             a background job (D9, see the module docstring; `_group_units`
+             uses it to isolate the WHOLE background AND-OR list).
 
-    Subshell `( ... )` распознаётся ТОЛЬКО когда `(` встречается в позиции,
-    где ожидается НАЧАЛО новой команды (буфер пуст/пробелы) — отличает
-    `( cmd )` от `$(...)` (буфер непуст, содержит `$`) и от `foo(...)`
-    (буфер содержит "foo").
+    A subshell `( ... )` is recognized ONLY when `(` appears where the START
+    of a new command is expected (buffer empty/whitespace); this tells
+    `( cmd )` apart from `$(...)` (buffer non-empty, contains `$`) and from
+    `foo(...)` (buffer contains "foo").
 
-    `{ ... }` (группа команд, Д9) распознаётся АНАЛОГИЧНО (буфер пуст,
-    следующий символ после `{` — пробел/таб/перевод строки, что отличает
-    реальную группу от brace-expansion `{a,b,c}`, у которой пробела после
-    `{` не бывает), НО, В ОТЛИЧИЕ от `( ... )`, её содержимое НЕ становится
-    отдельным изолированным подпроходом — оно рекурсивно разбирается ЭТОЙ
-    ЖЕ функцией и СПЛАЙСИТСЯ (splice) прямо в общий поток item-ов, как если
-    бы фигурных скобок не было вовсе (та же оболочка, НЕ форк — `cd`
-    внутри `{ ... }` обязан действовать на то, что после неё).
+    A `{ ... }` command group (D9) is recognized THE SAME WAY (buffer empty,
+    and the character after `{` is a space/tab/newline, which tells a real
+    group apart from brace expansion `{a,b,c}`, where there is never a space
+    after `{`), BUT, UNLIKE `( ... )`, its content does NOT become a separate
+    isolated sub-pass: it is parsed recursively by THIS SAME function and
+    SPLICED directly into the shared item stream, as if the braces were not
+    there at all (same shell, NOT a fork: a `cd` inside `{ ... }` must apply
+    to what comes after it).
     """
     items = []
     buf = []
@@ -187,7 +188,7 @@ def split_top_level_items(s, heredocs=None):
     n = len(s)
     quote = None
     pending_heredocs = []
-    pending_op = [None]  # изменяемая "ячейка" для вложенной функции
+    pending_op = [None]  # mutable "cell" for the nested function
 
     def flush_cmd():
         text = ''.join(buf).strip()
@@ -197,9 +198,9 @@ def split_top_level_items(s, heredocs=None):
             pending_op[0] = None
 
     def scan_balanced(open_ch, close_ch, start):
-        """От индекса `start` (сразу после открывающего символа) найти
-        индекс ПОСЛЕ соответствующего закрывающего символа той же
-        глубины, уважая кавычки. Возвращает (inner_text, index_after_close)."""
+        """From index `start` (right after the opening character) find the
+        index AFTER the matching closing character at the same depth,
+        respecting quotes. Returns (inner_text, index_after_close)."""
         depth = 1
         j = start
         inner_quote = None
@@ -249,8 +250,8 @@ def split_top_level_items(s, heredocs=None):
         if c == '{' and not ''.join(buf).strip() and i + 1 < n and s[i + 1] in (' ', '\t', '\n'):
             del buf[:]
             inner_text, j = scan_balanced('{', '}', i + 1)
-            # НЕ subshell — сплайсим содержимое ПРЯМО в поток (та же
-            # оболочка, cd внутри должен продолжать действовать наружу).
+            # NOT a subshell: splice the content DIRECTLY into the stream (same
+            # shell, a cd inside must keep applying outside).
             inner_items = split_top_level_items(inner_text, heredocs=heredocs)
             for k, it in enumerate(inner_items):
                 if k == 0:
@@ -307,7 +308,7 @@ def split_top_level_items(s, heredocs=None):
         if c == '|':
             if i + 1 < n and s[i + 1] == '|':
                 flush_cmd(); pending_op[0] = '||'; i += 2; continue
-            # `>|` noclobber-override — часть редиректа, не разделитель пайпа
+            # `>|` noclobber override is part of a redirect, not a pipe separator
             k = len(buf) - 1
             while k >= 0 and buf[k] in (' ', '\t'):
                 k -= 1
@@ -323,11 +324,11 @@ def split_top_level_items(s, heredocs=None):
                 buf.append(c); i += 1; continue
             if i + 1 < n and s[i + 1] == '>':
                 buf.append(c); i += 1; continue
-            # Одиночный `&` — фоновый оператор (Д9): помечаем ТОЛЬКО ЧТО
-            # завершённый item как bg=True (это последний member фонового
-            # AND-OR-списка — см. _group_units). Следующий item НЕ несёт
-            # "ведущего" оператора в обычном смысле — bash исполняет его
-            # синхронно сразу после запуска фона, эквивалент ';'.
+            # A single `&` is the background operator (D9): mark the item that
+            # JUST ended as bg=True (it is the last member of a background
+            # AND-OR list, see _group_units). The next item carries no
+            # "leading" operator in the usual sense: bash runs it
+            # synchronously right after launching the background job, same as ';'.
             flush_cmd()
             if items:
                 items[-1][3] = True
@@ -341,7 +342,7 @@ def split_top_level_items(s, heredocs=None):
 
 
 def strip_env_prefix(seg):
-    """Убрать ведущие FOO=bar присвоения перед реальной командой."""
+    """Drop leading FOO=bar assignments before the real command."""
     parts = seg.split()
     while parts and re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', parts[0]):
         parts.pop(0)
@@ -365,7 +366,7 @@ def basename_matches(word, name):
 
 
 def extract_bash_c_inner(seg):
-    """`bash -c '...'` / `sh -c "..."` → внутренняя строка (один уровень)."""
+    """`bash -c '...'` / `sh -c "..."` → the inner string (one level)."""
     toks = safe_split(strip_env_prefix(seg))
     if len(toks) >= 3 and (basename_matches(toks[0], 'bash') or basename_matches(toks[0], 'sh')):
         if toks[1] == '-c':
@@ -374,23 +375,23 @@ def extract_bash_c_inner(seg):
 
 
 def _resolve_cd_arg(state, arg):
-    """Применить ОДИН `cd arg` к ОДНОМУ кандидату состояния cwd. state —
-    (cd_dir, cd_ambiguous) ДО этого cd. Возвращает НОВОЕ состояние.
+    """Apply ONE `cd arg` to ONE cwd candidate state. state is
+    (cd_dir, cd_ambiguous) BEFORE this cd. Returns the NEW state.
 
-    Модель одного кандидата — три исхода: (а) резолвлено — известен путь;
-    (б) cd в цепочке не было (cd_dir=None, cd_ambiguous=False); (в) cd
-    есть, но не резолвится (cd_dir=None, cd_ambiguous=True). Ветвление
-    между "исполнится/не исполнится" (`||`) и изоляция (`( )`/`|`/`&`) —
-    забота ВЫЗЫВАЮЩЕГО кода (см. _advance_candidates/_group_units), эта
-    функция работает с ОДНИМ конкретным кандидатом-состоянием.
+    A single candidate has three outcomes: (a) resolved, the path is known;
+    (b) there was no cd in the chain (cd_dir=None, cd_ambiguous=False); (c) a
+    cd exists but does not resolve (cd_dir=None, cd_ambiguous=True).
+    Branching between "will run / will not run" (`||`) and isolation
+    (`( )`/`|`/`&`) are the CALLER's job (see _advance_candidates/
+    _group_units); this function works on ONE concrete candidate state.
     """
     if arg is None or arg == '-' or '$' in arg or '`' in arg:
-        # `cd` без аргумента / `cd -` / переменная или подстановка команды —
-        # статически не резолвится → случай (в).
+        # `cd` with no argument / `cd -` / a variable or command substitution
+        # does not resolve statically → case (c).
         return (None, True)
     if arg.startswith('/') or arg.startswith('~'):
-        # Абсолютный (или домашний `~`) путь НЕ зависит от предыдущего
-        # состояния — полностью его сбрасывает, снимая неоднозначность.
+        # An absolute (or home `~`) path does NOT depend on the previous
+        # state: it resets it completely, clearing the ambiguity.
         return (arg, False)
     cur_dir, cur_amb = state
     if cur_amb:
@@ -409,20 +410,20 @@ def _dedup_candidates(candidates):
 
 
 def _cap_candidates(candidates):
-    """Комбинаторный взрыв кандидатов (много `||` подряд) → безопасно
-    схлопнуть в единственного «НЕИЗВЕСТНО» (fail-safe в сторону отказа,
-    не пропуска — см. докстринг модуля)."""
+    """A combinatorial explosion of candidates (many `||` in a row) → safely
+    collapse into a single "UNKNOWN" (fail-safe toward deny, not allow; see
+    the module docstring)."""
     if len(candidates) > MAX_CANDIDATES:
         return [(None, True)]
     return candidates
 
 
 def _collapse_candidates(candidates):
-    """Схлопнуть множество кандидатов в ОДНО (cd_dir, cd_ambiguous) — для
-    информационных полей верхнего уровня (final_top_level_cwd/parse()),
-    которым не нужен полный per-сегмент разбор. Единственный кандидат —
-    как есть (в т.ч. легитимное (None, False), "cd не было"); несколько —
-    неоднозначность."""
+    """Collapse the candidate set into ONE (cd_dir, cd_ambiguous), for the
+    informational top-level fields (final_top_level_cwd/parse()) that do not
+    need the full per-segment analysis. A single candidate is returned as is
+    (including the legitimate (None, False), "there was no cd"); several mean
+    ambiguity."""
     uniq = _dedup_candidates(candidates)
     if len(uniq) == 1:
         return uniq[0]
@@ -430,11 +431,11 @@ def _collapse_candidates(candidates):
 
 
 def _advance_candidates(candidates, op, kind, text):
-    """Применить ОДИН cmd-item (op, kind, text) ко МНОЖЕСТВУ кандидатов
-    cwd, вернуть НОВОЕ множество (см. блок «МОДЕЛЬ КАНДИДАТОВ cwd» в
-    докстринге модуля). Вызывается ТОЛЬКО для kind == 'cmd' внутри ОДНОГО
-    AND-OR-списка (см. `_group_units`/`_advance_group`) — изоляция
-    subshell/pipeline/background — забота вызывающего, не эта функция."""
+    """Apply ONE cmd item (op, kind, text) to the SET of cwd candidates and
+    return the NEW set (see the "cwd CANDIDATE MODEL" section in the module
+    docstring). Called ONLY for kind == 'cmd' inside ONE AND-OR list (see
+    `_group_units`/`_advance_group`); subshell/pipeline/background isolation
+    is the caller's job, not this function's."""
     stripped = strip_env_prefix(text)
     if not stripped:
         return candidates
@@ -444,36 +445,37 @@ def _advance_candidates(candidates, op, kind, text):
     arg = toks[1] if len(toks) >= 2 else None
     advanced = _dedup_candidates([_resolve_cd_arg(c, arg) for c in candidates])
     if op == '||':
-        # правая часть || МОЖЕТ не исполниться (Д8) — объединяем "как было"
-        # (RHS не исполнилась) с "как если бы исполнилась" (безопасная
-        # переоценка сверху, см. докстринг модуля).
+        # the right side of || MAY not run (D8): union "as it was" (the RHS
+        # did not run) with "as if it ran" (a safe over-approximation, see
+        # the module docstring).
         return _cap_candidates(_dedup_candidates(candidates + advanced))
     return _cap_candidates(advanced)
 
 
 def _group_units(items):
-    """Сгруппировать плоский список item-ов (см. split_top_level_items) в
-    ЮНИТЫ с явной ИЗОЛЯЦИЕЙ (Д9 — каждая стадия пайплайна `|` и каждая
-    фоновая задача `&` исполняются в СВОЁМ форке, их `cd` не может
-    поменять cwd того, что происходит СНАРУЖИ).
+    """Group a flat list of items (see split_top_level_items) into UNITS with
+    explicit ISOLATION (D9: each pipeline stage `|` and each background job
+    `&` runs in ITS OWN fork, so its `cd` cannot change the cwd of what
+    happens OUTSIDE).
 
-    Возвращает список (group, group_bg):
-      group     — список logical item-ов [op, kind, payload, bg] ОДНОГО
-                  AND-OR-списка (item-ы, связанные && / ||; новый список
-                  начинается там, где ведущий item НЕ связан &&/|| с
-                  предыдущим — т.е. на ';', переносе строки, начале строки,
-                  или сразу после фонового '&' предыдущего списка).
-                  kind внутри group — 'cmd', 'subshell' или 'pipeline'
-                  (payload для pipeline — список стадий [(kind, text), ...],
-                  КАЖДАЯ стадия — независимый форк, см. модуль docstring).
-      group_bg  — True, если ВЕСЬ этот AND-OR-список завершается одиночным
-                  `&` (взято с bg последнего logical item-а в группе) —
-                  тогда список исполняется как ОДИН фоновый job, изолированный
-                  от того, что идёт после `&` (но НЕ от самого себя —
-                  внутри списка `cd` продолжает действовать как обычно).
+    Returns a list of (group, group_bg):
+      group     — a list of logical items [op, kind, payload, bg] of ONE
+                  AND-OR list (items joined by && / ||; a new list starts
+                  where the leading item is NOT joined by &&/|| to the
+                  previous one, i.e. at ';', a newline, the start of the
+                  string, or right after the background '&' of the previous
+                  list). kind inside a group is 'cmd', 'subshell' or
+                  'pipeline' (the payload of a pipeline is a list of stages
+                  [(kind, text), ...], EACH stage an independent fork, see
+                  the module docstring).
+      group_bg  — True if this WHOLE AND-OR list ends with a single `&`
+                  (taken from the bg of the last logical item in the group);
+                  then the list runs as ONE background job, isolated from
+                  what comes after `&` (but NOT from itself: inside the list
+                  `cd` keeps working as usual).
     """
-    # Шаг 1: схлопнуть pipeline-стадии (последовательные item-ы, связанные
-    # '|') в один logical item kind='pipeline'.
+    # Step 1: collapse pipeline stages (consecutive items joined by '|') into
+    # one logical item with kind='pipeline'.
     logical = []
     i = 0
     n = len(items)
@@ -491,7 +493,7 @@ def _group_units(items):
             logical.append([op, kind, text, bg])
         i = j
 
-    # Шаг 2: сгруппировать logical item-ы в AND-OR-списки.
+    # Step 2: group logical items into AND-OR lists.
     units = []
     idx = 0
     m = len(logical)
@@ -507,19 +509,19 @@ def _group_units(items):
 
 
 def _process_group(candidates, group, heredocs, bash_c_depth):
-    """Обработать ОДИН AND-OR-список (см. _group_units), начиная с
-    candidates. Возвращает (segments_out, final_candidates) — segments_out
-    включает сегменты, найденные ВНУТРИ pipeline-стадий и subshell-групп
-    этого списка (рекурсивно); final_candidates — состояние ПОСЛЕ обработки
-    всего списка (используется вызывающим ТОЛЬКО если список НЕ фоновый —
-    см. group_bg в _group_units)."""
+    """Process ONE AND-OR list (see _group_units), starting from candidates.
+    Returns (segments_out, final_candidates): segments_out includes the
+    segments found INSIDE this list's pipeline stages and subshell groups
+    (recursively); final_candidates is the state AFTER processing the whole
+    list (the caller uses it ONLY if the list is NOT a background one, see
+    group_bg in _group_units)."""
     out = []
     cur = list(candidates)
     for op, kind, payload, _bg in group:
         if kind == 'pipeline':
-            # КАЖДАЯ стадия пайплайна — свой независимый форк (Д9): все
-            # стартуют с ОДНОГО и того же cur (состояние ДО пайплайна),
-            # ни одна не видит эффект другой, пайплайн целиком не меняет cur.
+            # EACH pipeline stage is its own independent fork (D9): all of
+            # them start from the SAME cur (the state BEFORE the pipeline),
+            # none sees another's effect, and the pipeline as a whole does not change cur.
             for skind, stext in payload:
                 if skind == 'subshell':
                     out.extend(collect_segments_with_candidates(
@@ -553,10 +555,10 @@ def _process_group(candidates, group, heredocs, bash_c_depth):
 
 
 def _advance_group(candidates, group):
-    """Как _process_group, но БЕЗ сбора сегментов — только продвижение
-    candidates по ОДНОМУ AND-OR-списку (используется final_top_level_cwd,
-    которому не нужен разбор вложенных сегментов; pipeline/subshell не
-    меняют candidates по определению — пропускаются)."""
+    """Like _process_group, but WITHOUT collecting segments: it only advances
+    candidates through ONE AND-OR list (used by final_top_level_cwd, which
+    does not need nested segments; pipeline/subshell do not change
+    candidates by definition and are skipped)."""
     cur = list(candidates)
     for op, kind, payload, _bg in group:
         if kind in ('pipeline', 'subshell'):
@@ -566,27 +568,27 @@ def _advance_group(candidates, group):
 
 
 def collect_segments_with_candidates(cmd, heredocs=None, initial_candidates=None, bash_c_depth=0):
-    """Вернуть список (segment_text, candidates) — candidates — СПИСОК
-    ВОЗМОЖНЫХ (cd_dir, cd_ambiguous) для этого сегмента (см. блок «МОДЕЛЬ
-    КАНДИДАТОВ cwd» в докстринге модуля), а НЕ единственное значение.
+    """Return a list of (segment_text, candidates), where candidates is a LIST
+    of POSSIBLE (cd_dir, cd_ambiguous) for that segment (see the "cwd
+    CANDIDATE MODEL" section in the module docstring), NOT a single value.
 
-    Правило раскрытия:
-      - `( ... )` (subshell) — раскрывается ВСЕГДА (любая глубина
-        вложенности), локальный проход стартует с ТЕКУЩИХ candidates,
-        результат ВЫБРАСЫВАЕТСЯ для внешнего множества (Д7);
-      - `{ ... }` (группа) — НЕ отдельный проход вовсе: её содержимое уже
-        СПЛАЙСНУТО в плоский список item-ов на уровне split_top_level_items
-        (та же оболочка — Д9);
-      - `a | b | c` (пайплайн) — КАЖДАЯ стадия раскрывается независимо,
-        стартуя с candidates ДО пайплайна; пайплайн целиком не меняет
-        candidates снаружи (Д9);
-      - фоновый AND-OR-список (`... &`) — обрабатывается как обычно
-        ВНУТРИ себя, но его итоговый эффект НЕ коммитится в candidates,
-        видимые ПОСЛЕ него (Д9);
-      - `bash -c '...'` — раскрывается ОДИН уровень (bash_c_depth<1, тот же
-        исторический предел, что у extract_bash_c_inner), стартует с
-        candidates НА МОМЕНТ этой обёртки, изменения внутри НЕ
-        просачиваются наружу (дочерний процесс).
+    Expansion rules:
+      - `( ... )` (subshell) is ALWAYS expanded (any nesting depth); the
+        local pass starts from the CURRENT candidates, and its result is
+        DISCARDED for the outer set (D7);
+      - `{ ... }` (group) is not a separate pass at all: its content is
+        already SPLICED into the flat item list by split_top_level_items
+        (same shell, D9);
+      - `a | b | c` (pipeline): EACH stage is expanded independently,
+        starting from the candidates BEFORE the pipeline; the pipeline as a
+        whole does not change the candidates outside (D9);
+      - a background AND-OR list (`... &`) is processed as usual INSIDE
+        itself, but its final effect is NOT committed to the candidates
+        visible AFTER it (D9);
+      - `bash -c '...'` is expanded ONE level (bash_c_depth<1, the same
+        historical limit as extract_bash_c_inner), starts from the
+        candidates AT THE POINT of this wrapper, and changes inside do NOT
+        leak outside (child process).
     """
     if initial_candidates is None:
         initial_candidates = [(None, False)]
@@ -598,27 +600,27 @@ def collect_segments_with_candidates(cmd, heredocs=None, initial_candidates=None
         out.extend(seg_out)
         if not group_bg:
             candidates = final_cur
-        # group_bg=True — весь список форкнулся в фон (Д9): candidates
-        # снаружи НЕ меняем, даже если внутри списка были свои cd.
+        # group_bg=True: the whole list forked into the background (D9), so
+        # the outer candidates do NOT change even if the list had its own cds.
     return out
 
 
 def collect_segments(cmd, heredocs=None):
-    """Плоский список ВСЕХ leaf-текстов команд (обратная совместимость —
-    без cwd-контекста), включая найденные внутри subshell `( ... )`,
-    `{ ... }`, стадий пайплайна и раскрытого `bash -c '...'`."""
+    """Flat list of ALL leaf command texts (backward compatibility, no cwd
+    context), including those found inside a subshell `( ... )`, `{ ... }`,
+    pipeline stages and an expanded `bash -c '...'`."""
     return [text for text, _candidates in collect_segments_with_candidates(cmd, heredocs=heredocs)]
 
 
 def final_top_level_cwd(cmd):
-    """Итоговое состояние cwd (cd_dir, cd_ambiguous), СХЛОПНУТОЕ в одно
-    значение (см. _collapse_candidates), ПОСЛЕ обработки ВСЕЙ цепочки
-    top-level item-ов команды — информационное поле верхнего уровня для
-    parse()/git_push_parse.py, обратная совместимость для простых
-    потребителей, которым не нужен полный per-сегмент разбор кандидатов.
-    Subshell/pipeline-группы и фоновые списки НЕ учитываются (не меняют
-    внешний cwd по определению — см. блок «МОДЕЛЬ КАНДИДАТОВ cwd»), их
-    содержимое здесь не разбирается.
+    """The final cwd state (cd_dir, cd_ambiguous), COLLAPSED into one value
+    (see _collapse_candidates), AFTER processing the WHOLE chain of the
+    command's top-level items: an informational top-level field for
+    parse()/git_push_parse.py, kept for backward compatibility with simple
+    consumers that do not need the full per-segment candidate analysis.
+    Subshell/pipeline groups and background lists are NOT taken into account
+    (by definition they do not change the outer cwd, see the "cwd CANDIDATE
+    MODEL" section); their content is not parsed here.
     """
     candidates = [(None, False)]
     for group, group_bg in _group_units(split_top_level_items(cmd)):
@@ -629,9 +631,9 @@ def final_top_level_cwd(cmd):
 
 
 def normalize_command(raw):
-    """Нормализация переноса строк ДО сегментации:
-      - `\\<newline>` (line continuation) схлопывается в НИЧЕГО (не в
-        пробел — bash тоже так делает; пробел уже стоит перед `\\`);
+    """Normalize line breaks BEFORE segmentation:
+      - `\\<newline>` (line continuation) collapses to NOTHING (not to a
+        space: bash does the same; the space is already before the `\\`);
       - CRLF/CR → LF.
     """
     cmd = raw.replace('\r\n', '\n').replace('\r', '\n')
@@ -640,21 +642,21 @@ def normalize_command(raw):
 
 
 def parse(raw):
-    """Полный разбор: {"cd_dir":..., "cd_ambiguous":..., "segments":[...],
+    """Full parse: {"cd_dir":..., "cd_ambiguous":..., "segments":[...],
     "segments_detail":[{"segment":...,
     "cwd_candidates":[{"cd_dir":...,"cd_ambiguous":...}, ...]}, ...]}.
 
-    "cd_dir"/"cd_ambiguous" (верхнего уровня) — СХЛОПНУТЫЙ итоговый cwd
-    после ВСЕЙ цепочки (см. final_top_level_cwd) — обратная совместимость
-    для простых потребителей, которым не нужен разбор кандидатов.
-    "segments_detail[].cwd_candidates" — МНОЖЕСТВО возможных cwd для
-    КАЖДОГО конкретного сегмента (см. collect_segments_with_candidates) —
-    то, что реально нужно security-критичному потребителю
-    (push-content-guard.sh): проверить КАЖДОГО кандидата, отказ — если хоть
-    один показывает риск (удаления в защищённой ветке) или неразрешим.
+    Top-level "cd_dir"/"cd_ambiguous" is the COLLAPSED final cwd after the
+    WHOLE chain (see final_top_level_cwd), kept for backward compatibility
+    with simple consumers that do not need candidate analysis.
+    "segments_detail[].cwd_candidates" is the SET of possible cwds for EACH
+    individual segment (see collect_segments_with_candidates), which is what
+    a security-critical consumer (a push content guard) actually needs:
+    check EVERY candidate and deny if even one shows a risk (deletions in a
+    protected branch) or is unresolvable.
 
-    Вход длиннее SIZE_CAP символов → безопасный пустой результат (см.
-    докстринг модуля, раздел «ЛИМИТ РАЗМЕРА»).
+    Input longer than SIZE_CAP characters → a safe empty result (see the
+    "SIZE LIMIT" section of the module docstring).
     """
     if raw is None or len(raw) > SIZE_CAP:
         return _empty_result()

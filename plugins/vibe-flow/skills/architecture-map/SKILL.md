@@ -1,92 +1,92 @@
 ---
 name: architecture-map
-description: Карта кода проекта для быстрой навигации при планировании. Используй в НАЧАЛЕ планирования любой задачи и когда нужно понять «где лежит X», «куда добавить фичу», архитектуру, домены, точки входа (API-роуты, страницы, миграции), хаб-файлы. Заменяет слепой обход репозитория на «обнови индекс → грепни docs/codemap → точечный Explore».
+description: A map of the project code for fast navigation while planning. Use at the START of planning any task and whenever you need to understand "where does X live", "where do I add a feature", the architecture, domains, entry points (API routes, pages, migrations), hub files. Replaces blindly walking the repository with "refresh the index → grep docs/codemap → targeted Explore".
 user-invocable: true
 ---
 
-# Карта кода — навигация по проекту при планировании
+# Code map — navigating the project while planning
 
-Слепой обход большого репозитория дорог по времени и токенам. Этот скилл даёт два слоя:
+Blindly walking a large repository is expensive in time and tokens. This skill provides two layers:
 
-1. **Авто-индекс** `docs/codemap/*.md` — точный, не устаревает: его перегенерирует скрипт.
-2. **Нарратив** `docs/codemap/ARCHITECTURE.md` — домены, хабы, точки входа словами. Пишет и поддерживает Claude (см. ниже).
+1. **Auto-index** `docs/codemap/*.md` — exact and never stale: a script regenerates it.
+2. **Narrative** `docs/codemap/ARCHITECTURE.md` — domains, hubs and entry points in words. Written and maintained by Claude (see below).
 
-> Индекс отвечает на «какой точно файл/маршрут/экспорт», нарратив — на «как это устроено и куда класть новое». Точные пути всегда бери из индекса: нарратив может отставать.
+> The index answers "which exact file/route/export", the narrative answers "how is it built and where does new code go". Always take exact paths from the index: the narrative may lag behind.
 
-## 🧭 Порядок работы
+## 🧭 Workflow
 
-0. **Где писать индекс.** По умолчанию — `docs/codemap/` в корне проекта. Писать во временный каталог, если:
-   - ты в **Plan Mode** — харнесс может заблокировать запись в репозиторий;
-   - ты в **главном дереве**, а работа идёт в отдельном worktree, или `docs/codemap/` отслеживается git — генерация в репозиторий пачкает дерево чужими для задачи изменениями.
+0. **Where to write the index.** By default — `docs/codemap/` in the project root. Write to a temporary directory if:
+   - you are in **Plan Mode** — the harness may block writes to the repository;
+   - you are in the **main tree** while the work is going on in a separate worktree, or `docs/codemap/` is tracked by git — generating into the repository dirties the tree with changes unrelated to the task.
 
-   Тогда:
+   Then:
    ```bash
-   node "${CLAUDE_SKILL_DIR}/gen-codemap.mjs" --root "<корень проекта или дерева>" --out "${TMPDIR:-/tmp}/codemap-<имя-проекта>"
+   node "${CLAUDE_SKILL_DIR}/gen-codemap.mjs" --root "<project or worktree root>" --out "${TMPDIR:-/tmp}/codemap-<project-name>"
    ```
-   и грепай уже там. Нарратив `ARCHITECTURE.md` всё равно читай из `docs/codemap/` проекта — генератор его не пишет.
-1. **Обнови индекс** из корня проекта:
+   and grep there. Still read the `ARCHITECTURE.md` narrative from the project's `docs/codemap/` — the generator does not write it.
+1. **Refresh the index** from the project root:
    ```bash
    node "${CLAUDE_SKILL_DIR}/gen-codemap.mjs"
    ```
-   Быстро (fs + regex, без зависимостей, Node ≥ 18). Пишет в `docs/codemap/`. Флаги: `--root <dir>` (корень проекта), `--out <dir>` (куда писать). Вывод детерминирован — без меток времени: повторная генерация без изменений кода диффа не даёт.
+   Fast (fs + regex, no dependencies, Node ≥ 18). Writes to `docs/codemap/`. Flags: `--root <dir>` (project root), `--out <dir>` (where to write). The output is deterministic — no timestamps: regenerating without code changes produces no diff.
 
-   **Нет `node`** (`command -v node` пусто) → индекс пропусти: читай `docs/codemap/ARCHITECTURE.md` (если есть) и дальше точечный Explore по нему и по `CLAUDE.md`. Скажи одной строкой, что индекс не строился.
-2. **Грепни точный файл** в каталоге индекса (`docs/codemap/` или временном):
-   - маршрут/эндпоинт → `routes.md` (URL, HTTP-методы, тип, файл)
-   - страница → `pages.md`
-   - функция/класс/тип → `exports.md`
-   - миграция/таблица → `migrations.md`
-   - общий вид, размеры каталогов → `INDEX.md`
-   - «как устроено», домены, хабы → `ARCHITECTURE.md` (всегда из `docs/codemap/` проекта)
-3. **Точечный Explore** — только по найденным путям, не по всему репозиторию.
+   **No `node`** (`command -v node` is empty) → skip the index: read `docs/codemap/ARCHITECTURE.md` (if present), then do a targeted Explore based on it and on `CLAUDE.md`. Say in one line that the index was not built.
+2. **Grep the exact file** in the index directory (`docs/codemap/` or the temporary one):
+   - route/endpoint → `routes.md` (URL, HTTP methods, kind, file)
+   - page → `pages.md`
+   - function/class/type → `exports.md`
+   - migration/table → `migrations.md`
+   - overview, directory sizes → `INDEX.md`
+   - "how it's built", domains, hubs → `ARCHITECTURE.md` (always from the project's `docs/codemap/`)
+3. **Targeted Explore** — only on the paths you found, not over the whole repository.
 
-Сгенерированный индекс — справочник для работы, а не результат задачи: **не коммить его** и не предлагай коммитить. Класть ли `docs/codemap/*.md` (кроме `ARCHITECTURE.md`) в git — решает пользователь; если не кладёт, их стоит добавить в `.gitignore`. `ARCHITECTURE.md` — рукописный текст, его обычно держат в git (коммит — по общим правилам проекта).
+The generated index is a working reference, not a task result: **do not commit it** and do not suggest committing it. Whether to keep `docs/codemap/*.md` (except `ARCHITECTURE.md`) in git is the user's call; if they don't, add them to `.gitignore`. `ARCHITECTURE.md` is hand-written text and is usually kept in git (committed under the project's general rules).
 
-## 🔎 Что находит генератор
+## 🔎 What the generator finds
 
-| Что | Как |
+| What | How |
 |---|---|
-| Next.js app router | `app/**/route.*` (методы из `export GET/POST…`), `app/**/page.*`; группы `(x)` и слоты `@x` в URL убираются |
+| Next.js app router | `app/**/route.*` (methods from `export GET/POST…`), `app/**/page.*`; `(x)` groups and `@x` slots are removed from the URL |
 | Next.js pages router | `pages/**`, `pages/api/**` |
-| Express / Fastify / Hono | грубый regex `router.get('/path'`, `app.post(…`, `fastify.…` |
-| Python | FastAPI/Flask декораторы `@app.get("/x")`, `@bp.route("/x", methods=[…])`, Django `urls.py` (`path(...)`) |
-| Миграции | любые файлы в каталогах `migrations/` (`supabase/migrations`, `prisma/migrations`, alembic, …) + первая `--`-строка SQL |
-| Экспорты TS/JS | `export function/const/class/type/interface/enum`, `export { … }`, `module.exports` |
-| Экспорты Python | top-level `def` / `class` (без `_приватных`) |
+| Express / Fastify / Hono | rough regex `router.get('/path'`, `app.post(…`, `fastify.…` |
+| Python | FastAPI/Flask decorators `@app.get("/x")`, `@bp.route("/x", methods=[…])`, Django `urls.py` (`path(...)`) |
+| Migrations | any files in `migrations/` directories (`supabase/migrations`, `prisma/migrations`, alembic, …) + the first `--` line of the SQL |
+| TS/JS exports | `export function/const/class/type/interface/enum`, `export { … }`, `module.exports` |
+| Python exports | top-level `def` / `class` (excluding `_private` names) |
 
-Пропускает: `node_modules`, `.git`, `dist`, `build`, `.next`, `venv`, `.venv`, `__pycache__`, `coverage`, `target`, скрытые каталоги и файлы больше 512 КБ.
+It skips: `node_modules`, `.git`, `dist`, `build`, `.next`, `venv`, `.venv`, `__pycache__`, `coverage`, `target`, hidden directories and files larger than 512 KB.
 
-🔴 **Ограничения — это регэкспы, не парсер.** Динамически собранные маршруты, роуты, зарегистрированные через конфиг/декораторы-обёртки, экспорты через `export *` индекс не увидит. Нашёл расхождение с кодом — верь коду, а в нарративе отметь слепое пятно. Незнакомый фреймворк → индекс выдаст 0 маршрутов; это не значит, что их нет.
+🔴 **Limitations — these are regexes, not a parser.** The index will not see dynamically built routes, routes registered through config or wrapper decorators, or exports via `export *`. If you find a discrepancy with the code, trust the code and note the blind spot in the narrative. An unfamiliar framework → the index yields 0 routes; that does not mean there are none.
 
-## 🗺️ Карта доменов (`docs/codemap/ARCHITECTURE.md`)
+## 🗺️ Domain map (`docs/codemap/ARCHITECTURE.md`)
 
-Нарратив пишет **Claude**, не генератор — генератор не знает бизнес-смысла.
+The narrative is written by **Claude**, not the generator — the generator knows no business meaning.
 
-**Первое использование** (файла `docs/codemap/ARCHITECTURE.md` нет). В Plan Mode запись может быть заблокирована — тогда напиши файл после `ExitPlanMode`, в рабочем дереве задачи:
-1. Сгенерируй индекс (шаг 1; нет `node` — пропусти) и прочитай `INDEX.md`.
-2. Прочитай `CLAUDE.md` проекта (блок `## 🧩 Проект`), README, манифест (`package.json`/`pyproject.toml`/`go.mod`), корневые конфиги.
-3. Посмотри по индексу и точечно (2–5 файлов, не весь репозиторий): точки входа, самые «набитые» каталоги, самые часто импортируемые модули (хабы — найди через `grep -r "from '.*<имя>'"`).
-4. Напиши **краткий** (одна-две страницы) `docs/codemap/ARCHITECTURE.md`:
-   - **Что за проект** — одно предложение, стек
-   - **Структура верхнего уровня** — что в каждом каталоге
-   - **Домены** — таблица: домен → где логика / где API / где UI
-   - **Точки входа** — откуда приходит работа: HTTP-роуты, cron/джобы, вебхуки, CLI, очереди (и где их регистрация)
-   - **Хаб-файлы** — модули, которые читаются и правятся чаще всего, и за что они отвечают
-   - **Сквозные паттерны** — авторизация, обработка ошибок, доступ к БД, конфигурация, i18n — как это принято в проекте
-   - **Рецепты «куда добавить»** — новый эндпоинт, новая страница, новая миграция, новый тест: какие файлы создать и где зарегистрировать
-5. Скажи пользователю, что файл создан, и в одну строку — что в нём.
+**First use** (the file `docs/codemap/ARCHITECTURE.md` does not exist). In Plan Mode the write may be blocked — then write the file after `ExitPlanMode`, in the task's worktree:
+1. Generate the index (step 1; no `node` — skip) and read `INDEX.md`.
+2. Read the project's `CLAUDE.md` (the `## 🧩 Project` section, between the `<!-- vibe-flow:project:begin -->` / `<!-- vibe-flow:project:end -->` markers; older installs title it `## 🧩 Проект`), the README, the manifest (`package.json`/`pyproject.toml`/`go.mod`), root configs.
+3. Look through the index and then targeted (2–5 files, not the whole repository): entry points, the most crowded directories, the most frequently imported modules (hubs — find them via `grep -r "from '.*<name>'"`).
+4. Write a **short** (one or two pages) `docs/codemap/ARCHITECTURE.md`:
+   - **What the project is** — one sentence, the stack
+   - **Top-level structure** — what is in each directory
+   - **Domains** — a table: domain → where the logic / where the API / where the UI
+   - **Entry points** — where work comes from: HTTP routes, cron/jobs, webhooks, CLI, queues (and where they are registered)
+   - **Hub files** — modules that are read and edited most often, and what they are responsible for
+   - **Cross-cutting patterns** — authorization, error handling, DB access, configuration, i18n — how it is done in the project
+   - **"Where to add" recipes** — a new endpoint, a new page, a new migration, a new test: which files to create and where to register them
+5. Tell the user the file was created, and in one line what is in it.
 
-**Дальше — поддерживай.** Работая над задачей, ты читаешь карту рядом с кодом. Нашёл устаревшее (файл переехал, домена больше нет, хаб поменялся, рецепт не работает) — поправь `ARCHITECTURE.md` точечно в той же сессии и сообщи одной строкой. Не переписывай целиком, не раздувай: карта нужна короткой.
+**After that — maintain it.** While working on a task you read the map alongside the code. If you find something stale (a file moved, a domain is gone, a hub changed, a recipe doesn't work) — fix `ARCHITECTURE.md` surgically in the same session and report it in one line. Don't rewrite it whole, don't bloat it: the map must stay short.
 
-🔴 **Не выдумывай.** В нарратив идёт только то, что ты видел в коде или индексе. Не уверен в назначении модуля — пометь «(назначение не подтверждено)» или не включай.
+🔴 **Don't invent.** Only what you saw in the code or the index goes into the narrative. Not sure what a module is for — mark it "(purpose not confirmed)" or leave it out.
 
-## 💡 Когда использовать
+## 💡 When to use
 
-- Начало планирования любой нетривиальной задачи (Plan Mode)
-- «Где лежит X?», «куда добавить фичу?», «как тут устроена авторизация?»
-- Онбординг в чужой проект
-- Перед массовыми правками — найти все места по индексу, а не по памяти
+- The start of planning any non-trivial task (Plan Mode)
+- "Where does X live?", "where do I add a feature?", "how is authorization built here?"
+- Onboarding to someone else's project
+- Before mass edits — find all the places from the index, not from memory
 
-## Связанное
+## Related
 
-- Смоук-прогон найденных страниц — скилл `/vibe-flow:smoke-ui` (берёт список разделов из `pages.md`)
+- Smoke run of the found pages — the `/vibe-flow:smoke-ui` skill (takes the list of sections from `pages.md`)

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""PreToolUse-guard: запрет стейджинга и коммита в общем рабочем дереве.
+"""PreToolUse guard: blocks staging and committing in the shared working tree.
 
-Отдельный файл, а не heredoc внутри shell: при `python3 - <<EOF` heredoc
-занимает stdin, и полезный ввод хука до скрипта не доходит.
+A separate file, not a heredoc inside the shell script: with `python3 - <<EOF`
+the heredoc takes over stdin, and the hook's actual input never reaches the script.
 
-Полное обоснование — в monitorex-git-guard.sh рядом.
+Full rationale: monitorex-git-guard.sh next to this file.
 """
 
 import json
@@ -44,27 +44,27 @@ except Exception:
     allow()
 
 GUARDED = ("add", "commit")
-# Флаги git, забирающие следующее слово как значение.
+# git flags that take the next word as their value.
 TAKES_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"}
 
 
 def guarded_target(seg: str):
-    """(хит 'git add'/'git commit', [значения -C по порядку], есть ли
-    --git-dir/--work-tree) — если сегмент ЭТО И ЕСТЬ, иначе None.
+    """(hit 'git add'/'git commit', [-C values in order], whether
+    --git-dir/--work-tree is present) — if the segment IS that command, else None.
 
-    🔴 Первая версия искала слово "git" где угодно в сегменте — и хук
-    отклонял `echo "git commit"`, где эти слова просто текст. Он заблокировал
-    собственную диагностику, а потом и попытку себя починить. Ложный отказ на
-    законной работе опаснее пропуска: от него защиту сносят целиком.
+    🔴 The first version looked for the word "git" anywhere in the segment, and the
+    hook rejected `echo "git commit"`, where those words are just text. It blocked
+    its own diagnostics, and then the attempt to fix itself. A false rejection of
+    legitimate work is worse than a miss: people rip out the whole guard over it.
 
-    Поэтому `git` обязан стоять В ПОЗИЦИИ КОМАНДЫ (после возможного префикса
-    `VAR=1`), а флаги со значениями пропускаются, чтобы `git -C dir add`
-    распознавался как `add`, а не как путь `dir`.
+    So `git` must be IN COMMAND POSITION (after an optional `VAR=1` prefix), and
+    flags with values are skipped so that `git -C dir add` is recognized as `add`
+    rather than as the path `dir`.
 
-    Значения `-C` возвращаются, чтобы решать по дереву, где git РЕАЛЬНО
-    выполнится, а не по cwd сессии (25.10.2026): `git -C <worktree> add` из
-    основного дерева — работа в своём worktree, а не в общем индексе, и
-    раньше она ложно отклонялась.
+    The `-C` values are returned so the decision is made by the tree where git
+    ACTUALLY runs, not by the session cwd (25.10.2026): `git -C <worktree> add`
+    from the main working tree is work in your own worktree, not in the shared
+    index, and it used to be falsely rejected.
     """
     body = strip_env_prefix(seg)
     head = first_word(body)
@@ -91,26 +91,26 @@ def guarded_target(seg: str):
     return None
 
 
-# Скрипты осознанных обходов. Отметку ставит ЧЕЛОВЕК — ради этого у них вопрос
-# «да/нет». Но вопрос от агента не защищает: `echo да | git-allow-delete.sh add`
-# проходит молча. Поэтому режимы, СТАВЯЩИЕ отметку, модели запрещены в любом
-# дереве (отметки лежат в общем $GIT_COMMON_DIR). Чтение и снятие — можно.
-# Человеку хук не мешает: команды, набранные через `!`, идут мимо PreToolUse.
+# Deliberate-bypass scripts. A HUMAN sets the mark — that is why they ask
+# "yes/no". But the question does not stop an agent: `echo yes | git-allow-delete.sh add`
+# goes through silently. So the modes that SET a mark are forbidden to the model in any
+# tree (marks live in the shared $GIT_COMMON_DIR). Reading and clearing are allowed.
+# The hook does not get in a human's way: commands typed via `!` bypass PreToolUse.
 OWNER_MARK_SAFE_MODES = {
     "git-confirm.sh": {"status", "clear"},
     "git-allow-push.sh": {"list", "clear"},
     "git-allow-delete.sh": {"list", "clear"},
-    # pass разрешён здесь, но отдельно проверяется ниже: только агент release-gate
+    # pass is allowed here but checked separately below: release-gate agent only
     "release-gate.sh": {"scope", "status", "pass"},
 }
 SHELLS = {"bash", "sh", "zsh"}
-# Флаги скриптов отметок, забирающие следующее слово как значение.
+# Mark-script flags that take the next word as their value.
 MARK_VALUE_FLAGS = {"--report", "--head"}
 MARK_VALUE_SAFE = re.compile(r"[A-Za-z0-9._/@:+%=-]+")
-# Обёртки, после которых идёт настоящая команда: `env X=1 cmd`, `nohup cmd`.
-# Без их снятия `nohup scripts/git-confirm.sh commit` проходил мимо проверки.
+# Wrappers followed by the real command: `env X=1 cmd`, `nohup cmd`.
+# Without stripping them, `nohup scripts/git-confirm.sh commit` slipped past the check.
 WRAPPERS = {"env", "command", "nohup", "time", "exec", "builtin", "xargs"}
-# Флаги обёрток, забирающие следующее слово: `env -u VAR cmd`, `exec -a имя cmd`.
+# Wrapper flags that take the next word: `env -u VAR cmd`, `exec -a name cmd`.
 WRAPPER_VALUE_FLAGS = {"-u", "--unset", "-C", "--chdir", "-S", "-a", "-I", "-n", "-L", "-P"}
 
 
@@ -119,7 +119,7 @@ def basename(word: str) -> str:
 
 
 def command_words(seg: str) -> list[str]:
-    """Слова сегмента, начиная с настоящей команды — без VAR=, shell и обёрток."""
+    """Segment words starting from the real command — without VAR=, shells and wrappers."""
     words = safe_split(strip_env_prefix(seg))
     while words:
         head = basename(words[0])
@@ -134,20 +134,20 @@ def command_words(seg: str) -> list[str]:
 
 
 def is_owner_mark(seg: str) -> str | None:
-    """Вернуть имя скрипта, если сегмент ставит owner-отметку."""
+    """Return the script name if the segment sets an owner mark."""
     words = command_words(seg)
     if not words:
         return None
     name = words[0].rstrip("/").split("/")[-1]
     if name not in OWNER_MARK_SAFE_MODES:
         return None
-    # Значения флагов (`--report r.md`) — не режим: иначе `r.md` в позиции
-    # режима давал ложный отказ на законном `status`.
+    # Flag values (`--report r.md`) are not a mode: otherwise `r.md` in the mode
+    # position caused a false rejection of a legitimate `status`.
     args, rest = [], words[1:]
     while rest:
-        # Значение пропускаем, только если оболочка его не развернёт в
-        # несколько слов: `--head $X scope`, `--head {a,override} scope` bash
-        # превращает в режим override. Белый список, а не перечень опасного.
+        # Skip the value only if the shell will not expand it into several
+        # words: bash turns `--head $X scope` or `--head {a,override} scope`
+        # into override mode. An allowlist, not a list of dangerous forms.
         if (name == "release-gate.sh" and rest[0] in MARK_VALUE_FLAGS
                 and len(rest) > 1 and MARK_VALUE_SAFE.fullmatch(rest[1])):
             rest = rest[2:]
@@ -156,7 +156,7 @@ def is_owner_mark(seg: str) -> str | None:
             args.append(rest[0])
         rest = rest[1:]
     if not args:
-        return None                  # без аргументов скрипт только показывает
+        return None                  # with no arguments the script only displays
     return None if args[0] in OWNER_MARK_SAFE_MODES[name] else name
 
 
@@ -165,31 +165,31 @@ if mark:
     print(json.dumps({"hookSpecificOutput": {
         "hookEventName": "PreToolUse",
         "permissionDecision": "deny",
-        "permissionDecisionReason": f"""🔴 `{mark}` ставит отметку обхода защиты — это решение человека, не агента.
+        "permissionDecisionReason": f"""🔴 `{mark}` sets a guard bypass mark — that is a human decision, not an agent's.
 
-Покажите пользователю, что именно будет разрешено и зачем, и попросите
-запустить команду самому — в строке ввода Claude Code через `!` с флагом
---yes (там на вопрос ответить нечем) или в обычном терминале без флага.
-Хук этого не заметит: команды через `!` идут мимо PreToolUse.
+Show the user exactly what will be allowed and why, and ask them to run the
+command themselves — in the Claude Code input line via `!` with the --yes flag
+(there is no way to answer the prompt there), or in a regular terminal without the flag.
+The hook will not see it: commands run via `!` bypass PreToolUse.
 
-Смотреть и снимать отметки агенту можно: list / status / clear.""",
+The agent may view and clear marks: list / status / clear.""",
     }}, ensure_ascii=False))
     sys.exit(0)
 
 
-# Вердикт release-gate ставит только сам ревьюер. Иначе основная сессия,
-# которой гейт мешает запушить, «одобрила» бы собственный код одной строкой.
-# Внутри субагента хук получает agent_type — по нему и отличаем.
-# Имя агента: свой файл в .claude/agents → `release-gate`; из плагина
-# vibe-flow → `vibe-flow:release-gate` (плагинные агенты получают префикс).
+# Only the reviewer itself sets the release-gate verdict. Otherwise the main session,
+# which the gate is stopping from pushing, would "approve" its own code in one line.
+# Inside a subagent the hook receives agent_type — that is how we tell them apart.
+# Agent name: own file in .claude/agents → `release-gate`; from the vibe-flow
+# plugin → `vibe-flow:release-gate` (plugin agents get a prefix).
 GATE_AGENTS = {"release-gate", "vibe-flow:release-gate"}
 GATE_PATH = "monitorex-locks/release-gate"
-# Команды, которые пишут в файлы-аргументы. echo/printf сюда не входят: они
-# пишут в stdout, а их запись в файл — это перенаправление, оно ловится ниже.
+# Commands that write to their file arguments. echo/printf are not here: they
+# write to stdout, and writing that to a file is a redirect, which is caught below.
 WRITERS = {"cp", "mv", "tee", "touch", "ln", "install", "rsync", "dd"}
-# Перенаправление ИМЕННО в каталог вердиктов (`>`, `>>`, `>|`). Любой `>`
-# (2>/dev/null, 2>&1) давал ложный отказ на чтении — а от ложных отказов
-# защиту сносят целиком.
+# A redirect specifically INTO the verdict directory (`>`, `>>`, `>|`). Matching any `>`
+# (2>/dev/null, 2>&1) caused false rejections on reads — and false rejections
+# get the whole guard ripped out.
 GATE_REDIRECT = re.compile(r">[>|]?\s*['\"]?[^\s;|&'\"]*" + re.escape(GATE_PATH))
 
 
@@ -199,23 +199,23 @@ def gate_violation(seg: str) -> str | None:
         return None
     name = basename(words[0])
     if name == "release-gate.sh":
-        # Режим ищем среди ВСЕХ слов, а не первым аргументом: скрипт забирает
-        # слово после --report/--head как значение, и `--report scope pass …`
-        # для него — режим pass, а для «первого слова без -» — безобидный scope.
+        # Look for the mode among ALL words, not just the first argument: the script
+        # takes the word after --report/--head as a value, so `--report scope pass …`
+        # is pass mode to it, while "first word without -" would see a harmless scope.
         rest = set(words[1:])
-        # Обход — решение человека даже для самого ревьюера.
+        # Bypass is a human decision, even for the reviewer itself.
         if "override" in rest:
             return "pass"
         if "pass" in rest and payload.get("agent_type") not in GATE_AGENTS:
             return "pass"
-    # Запись в каталог вердиктов мимо скрипта — при любом первом слове, даже
-    # `release-gate.sh status > …/<tree>`. Чтение (ls, cat, grep) — можно.
+    # Writing to the verdict directory bypassing the script — whatever the first word,
+    # even `release-gate.sh status > …/<tree>`. Reading (ls, cat, grep) is allowed.
     if GATE_REDIRECT.search(seg):
         return "write"
-    # Любой аргумент с путём каталога — даже если это источник (`cp gate/x /tmp`).
-    # Различать источник и получателя пробовали (28.10): хвостовой `2>/dev/null`
-    # становился «последним аргументом», и `cp /tmp/v gate/<tree> 2>/dev/null`
-    # проходил. Ложный отказ на копировании вердикта наружу дешевле.
+    # Any argument containing the directory path — even as a source (`cp gate/x /tmp`).
+    # Telling source from destination was tried (28.10): a trailing `2>/dev/null`
+    # became "the last argument", and `cp /tmp/v gate/<tree> 2>/dev/null`
+    # got through. A false rejection when copying a verdict out is cheaper.
     if name in WRITERS and any(GATE_PATH in w for w in words[1:]):
         return "write"
     return None
@@ -226,23 +226,23 @@ if gate:
     print(json.dumps({"hookSpecificOutput": {
         "hookEventName": "PreToolUse",
         "permissionDecision": "deny",
-        "permissionDecisionReason": """🔴 Вердикт release-gate ставит только агент `release-gate` — ревьюер на Opus.
+        "permissionDecisionReason": """🔴 Only the `release-gate` agent (an Opus reviewer) sets the release-gate verdict.
 
-Основная сессия не может одобрить собственный код: в этом весь смысл гейта.
-Запустите агента release-gate на текущем дереве. Если он вернул замечания —
-исправьте их, закоммитьте и запустите его снова.
+The main session cannot approve its own code: that is the whole point of the gate.
+Run the release-gate agent on the current tree. If it returns findings,
+fix them, commit, and run it again.
 
-Обход без ревью — решение человека: попросите пользователя запустить
+Bypassing review is a human decision: ask the user to run
 `! scripts/release-gate.sh override --yes`.""",
     }}, ensure_ascii=False))
     sys.exit(0)
 
-# `git push --no-verify` выключает pre-push целиком: typecheck, барьеры
-# параллельных сессий и release-gate разом. Человеку можно (через `!` хук не
-# срабатывает), модели — нет. Тот же обход — подмена core.hooksPath: через
-# `-c`, `--config-env`, переменные GIT_CONFIG_* или `git config` заранее.
-# Закрыты прямые формы; косвенные (include.path, --remove-section core,
-# правка .git/config руками) PreToolUse не поймать — их видно в ревью.
+# `git push --no-verify` turns off pre-push entirely: typecheck, the parallel-session
+# barriers and release-gate all at once. A human may (the hook does not fire for `!`),
+# the model may not. Same bypass: swapping core.hooksPath via `-c`, `--config-env`,
+# GIT_CONFIG_* variables, or `git config` beforehand.
+# The direct forms are closed; indirect ones (include.path, --remove-section core,
+# hand-editing .git/config) cannot be caught by PreToolUse — they show up in review.
 HOOKS_PATH = re.compile(r"hooks?path", re.I)
 GIT_CONFIG_ENV = re.compile(r"GIT_CONFIG_(COUNT|KEY_\w*|VALUE_\w*|PARAMETERS|GLOBAL|SYSTEM)=")
 CONFIG_WRITE_FLAGS = {"--unset", "--unset-all", "--add", "--replace-all", "--edit", "-e"}
@@ -252,7 +252,7 @@ ENV_SETTERS = {"export", "declare", "typeset", "env"}
 
 
 def git_config_env(seg_text: str) -> bool:
-    """GIT_CONFIG_* задан как окружение: префиксом `X=… git` или export/env."""
+    """GIT_CONFIG_* set as environment: via an `X=… git` prefix or export/env."""
     toks = safe_split(seg_text)
     head = []
     for t in toks:
@@ -268,7 +268,7 @@ def push_bypass(seg: str) -> bool:
     words = command_words(seg)
     if not words or basename(words[0]) != "git":
         return False
-    rest, conf = words[1:], []     # conf — только значения -c/--config-env, не путь -C
+    rest, conf = words[1:], []     # conf holds only -c/--config-env values, not the -C path
     while rest and rest[0].startswith("-"):
         w = rest[0]
         if w in ("-c", "--config-env"):
@@ -283,7 +283,7 @@ def push_bypass(seg: str) -> bool:
         return False
     sub, args = rest[0], rest[1:]
     if sub == "config":
-        # Чтение (`git config --get core.hooksPath`, `git config get …`) — можно.
+        # Reading (`git config --get core.hooksPath`, `git config get …`) is allowed.
         if not any(HOOKS_PATH.search(a) for a in args):
             return False
         pos, i = [], 0
@@ -304,7 +304,7 @@ def push_bypass(seg: str) -> bool:
         return True
     if git_config_env(seg) or any(git_config_env(s) for s in segments):
         return True
-    # git принимает сокращения длинных опций: `--no-verif` = `--no-verify`.
+    # git accepts abbreviated long options: `--no-verif` = `--no-verify`.
     return any(len(w) >= 6 and "--no-verify".startswith(w) for w in args)
 
 
@@ -312,15 +312,15 @@ if any(push_bypass(s) for s in segments):
     print(json.dumps({"hookSpecificOutput": {
         "hookEventName": "PreToolUse",
         "permissionDecision": "deny",
-        "permissionDecisionReason": """🔴 `git push` в обход pre-push (--no-verify / подмена core.hooksPath) модели запрещён.
+        "permissionDecisionReason": """🔴 `git push` bypassing pre-push (--no-verify / swapped core.hooksPath) is forbidden to the model.
 
-Он выключает разом проверку типов, барьеры параллельных сессий и release-gate —
-код уйдёт непроверенным. Пусть хук отработает; отказ означает, что есть что
-чинить (или запустить агента release-gate).
+It turns off type checking, the parallel-session barriers and release-gate at once —
+the code would ship unchecked. Let the hook run; a rejection means there is something
+to fix (or the release-gate agent to run).
 
-Удаление ветки на remote — через `gh api -X DELETE …/git/refs/heads/<ветка>`.
-Осознанный обход — решение человека: попросите пользователя выполнить push
-сам через `! git push --no-verify …` и объясните, что именно пропускается.""",
+To delete a remote branch use `gh api -X DELETE …/git/refs/heads/<branch>`.
+A deliberate bypass is a human decision: ask the user to push themselves
+via `! git push --no-verify …` and explain exactly what gets skipped.""",
     }}, ensure_ascii=False))
     sys.exit(0)
 
@@ -331,10 +331,10 @@ def git(where: str, *args) -> str:
 
 
 def is_linked_worktree(where: str) -> bool | None:
-    """True — linked worktree (свой индекс), False — общее дерево,
-    None — не репозиторий (такой git сам упадёт, блокировать нечего)."""
+    """True — linked worktree (own index), False — shared tree,
+    None — not a repository (git will fail by itself, nothing to block)."""
     if not os.path.isdir(where):
-        return False                 # каталога нет — безопасная сторона
+        return False                 # no such directory — err on the safe side
     gd = git(where, "rev-parse", "--git-dir")
     if not gd:
         return None
@@ -347,15 +347,15 @@ def resolve(base: str, path: str) -> str:
 
 
 def target_dirs(candidates, c_dirs):
-    """Все каталоги, где может выполниться git этого сегмента.
-    None в списке — каталог не вычислить (cd $VAR и т.п.)."""
+    """All directories where this segment's git may run.
+    None in the list — the directory cannot be resolved (cd $VAR etc.)."""
     out = []
     for cand in candidates or [{"cd_dir": None, "cd_ambiguous": False}]:
         if cand.get("cd_ambiguous"):
             out.append(None)
             continue
         where = resolve(cwd, cand["cd_dir"]) if cand.get("cd_dir") else cwd
-        for c in c_dirs:            # `-C a -C b` — относительные складываются
+        for c in c_dirs:            # `-C a -C b` — relative paths stack
             where = resolve(where, c)
         out.append(where)
     return out
@@ -367,13 +367,13 @@ for d in detail:
     if not g:
         continue
     name, c_dirs, explicit = g
-    if explicit:                     # --git-dir/--work-tree: не гадаем
+    if explicit:                     # --git-dir/--work-tree: do not guess
         hit = name
         break
     for where in target_dirs(d.get("cwd_candidates"), c_dirs):
         state = None if where is None else is_linked_worktree(where)
-        # Разрешено, только если КАЖДЫЙ возможный каталог — linked worktree
-        # (или вовсе не репозиторий). Неизвестный каталог → общее дерево.
+        # Allowed only if EVERY possible directory is a linked worktree
+        # (or not a repository at all). An unknown directory → shared tree.
         if where is None or state is False:
             hit = name
             break
@@ -383,20 +383,20 @@ for d in detail:
 if not hit:
     allow()
 
-reason = f"""🔴 `{hit}` в общем рабочем дереве запрещён.
+reason = f"""🔴 `{hit}` is forbidden in the shared working tree.
 
-Индекс git здесь ОБЩИЙ для всех параллельных сессий: застейдженные файлы
-уезжают в чужой коммит за секунды (так уже было 2026-08-06 — 7 файлов
-security-фикса ушли в коммит про вёрстку фильтров).
+The git index here is SHARED by all parallel sessions: staged files end up in
+someone else's commit within seconds (it already happened on 2026-08-06 — 7 files
+of a security fix went into a commit about filter layout).
 
-Коммитить так:
-  scripts/git-safe-commit.sh --message-file <файл> -- <пути>
+Commit like this:
+  scripts/git-safe-commit.sh --message-file <file> -- <paths>
 
-Он собирает коммит в изолированном индексе и двигает ветку атомарно.
-Нужен частичный стейджинг — работайте в отдельном worktree:
-  scripts/wt-new.sh <имя>
+It builds the commit in an isolated index and moves the branch atomically.
+Need partial staging? Work in a separate worktree:
+  scripts/wt-new.sh <name>
 
-Разовый осознанный обход (человеком, с подтверждением):
+One-off deliberate bypass (by a human, with confirmation):
   scripts/git-confirm.sh commit"""
 
 print(json.dumps({"hookSpecificOutput": {

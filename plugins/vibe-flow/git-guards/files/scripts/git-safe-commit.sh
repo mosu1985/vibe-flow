@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
-# git-safe-commit.sh — единственный разрешённый способ коммитить в общем дереве.
+# git-safe-commit.sh — the only allowed way to commit in the shared working tree.
 #
-# ЗАЧЕМ. В репозитории одновременно работают несколько сессий Claude, агент
-# Codex и человек — все в одном рабочем каталоге. Индекс git при этом ОБЩИЙ:
-# аккуратный `git add <пути>` от гонки не спасает (проверено 2026-08-06 —
-# 7 застейдженных файлов уехали в чужой коммит за секунды).
+# WHY. Several Claude sessions, a Codex agent and a human all work in the
+# repository at once — in the same working directory. The git index is SHARED:
+# a careful `git add <paths>` does not protect against the race (verified 2026-08-06 —
+# 7 staged files ended up in someone else's commit within seconds).
 #
-# КАК. Коммит собирается в ИЗОЛИРОВАННОМ индексе (GIT_INDEX_FILE), общий не
-# читается для сборки вообще. Ветка двигается через `update-ref <ref> <new>
-# <old>` — атомарный compare-and-swap: если сосед сдвинул ветку, наш перевод
-# отвергается (rc=128), объект коммита остаётся достижимым.
+# HOW. The commit is built in an ISOLATED index (GIT_INDEX_FILE); the shared one is
+# not read for the build at all. The branch moves via `update-ref <ref> <new>
+# <old>` — an atomic compare-and-swap: if a neighbor moved the branch, our update
+# is rejected (rc=128), and the commit object stays reachable.
 #
-# ПОРЯДОК ЛОКОВ (инвариант, не менять): сначала monitorex-locks/commit,
-# потом index.lock. Так два safe-commit никогда не конкурируют за index.lock —
-# их сериализует уже первый лок.
+# LOCK ORDER (invariant, do not change): monitorex-locks/commit first,
+# then index.lock. That way two safe-commits never compete for index.lock —
+# the first lock already serializes them.
 #
-# Формат: git-safe-commit.sh --message-file <файл> -- <путь…>
+# Format: git-safe-commit.sh --message-file <file> -- <path…>
 #
-# План и разбор шести раундов ревью: docs/plans/2026-09-01-parallel-session-guardrails.md
+# Plan and analysis of six review rounds: docs/plans/2026-09-01-parallel-session-guardrails.md
 
 set -eu
 
@@ -27,68 +27,68 @@ die() { printf '\n🔴 %s\n\n' "$*" >&2; exit 1; }
 warn() { printf '⚠️  %s\n' "$*" >&2; }
 info() { printf '   %s\n' "$*" >&2; }
 
-# ─── 0. Разбор CLI ДО всего остального ──────────────────────────────────────
-# Иначе `--message-file` уезжает в pathspec, а MSGFILE остаётся неприсвоенным.
+# ─── 0. Parse the CLI BEFORE anything else ──────────────────────────────────
+# Otherwise `--message-file` ends up in the pathspec and MSGFILE stays unset.
 MSGFILE=""
 while [ $# -gt 0 ]; do
     case "$1" in
-        --message-file) [ $# -ge 2 ] || die "--message-file без значения"; MSGFILE="$2"; shift 2 ;;
+        --message-file) [ $# -ge 2 ] || die "--message-file has no value"; MSGFILE="$2"; shift 2 ;;
         --) shift; break ;;
-        -*) die "неизвестный флаг: $1 (формат: --message-file <файл> -- <пути>)" ;;
-        *) die "путь до --: $1 (формат: --message-file <файл> -- <пути>)" ;;
+        -*) die "unknown flag: $1 (format: --message-file <file> -- <paths>)" ;;
+        *) die "path before --: $1 (format: --message-file <file> -- <paths>)" ;;
     esac
 done
-[ -n "$MSGFILE" ] || die "нужен --message-file <файл>"
-[ -f "$MSGFILE" ] || die "файл сообщения не найден: $MSGFILE"
-[ $# -gt 0 ] || die "нужен хотя бы один путь после --"
-# дальше в "$@" ТОЛЬКО pathspec
+[ -n "$MSGFILE" ] || die "--message-file <file> is required"
+[ -f "$MSGFILE" ] || die "message file not found: $MSGFILE"
+[ $# -gt 0 ] || die "at least one path after -- is required"
+# from here on "$@" holds ONLY the pathspec
 
-# ─── 0. Конфигурация проекта ────────────────────────────────────────────────
-# Тестраннер зависит от стека, поэтому приходит из .gitguards.conf. Пусто —
-# тесты не гоняются, и об этом говорится вслух: молчаливый пропуск неотличим
-# от зелёного прогона.
+# ─── 0. Project configuration ───────────────────────────────────────────────
+# The test runner depends on the stack, so it comes from .gitguards.conf. Empty
+# means tests are not run, and that is said out loud: a silent skip is
+# indistinguishable from a green run.
 GG_TEST_CMD=""
 GG_PLAN_GATE=""
 GG_TOP=$(git rev-parse --show-toplevel 2>/dev/null || echo .)
 if [ -f "$GG_TOP/.gitguards.conf" ]; then . "$GG_TOP/.gitguards.conf"; fi
 
-# ─── 0б. Гейт проекта — проверка ДО тестов и локов ──────────────────────────
-# Скрипт из .gitguards.conf решает, можно ли коммитить с этим сообщением и
-# этими путями (например: фича — только с пройденным планом). Получает файл
-# сообщения и пути; ненулевой код — отказ. Пусто — гейта нет.
+# ─── 0b. Project gate — checked BEFORE tests and locks ──────────────────────
+# A script from .gitguards.conf decides whether this message and these paths may
+# be committed (for example: a feature only with an approved plan). It receives
+# the message file and the paths; a non-zero exit code means rejection. Empty — no gate.
 if [ -n "$GG_PLAN_GATE" ]; then
-    [ -f "$GG_TOP/$GG_PLAN_GATE" ] || die "GG_PLAN_GATE указывает на несуществующий файл: $GG_PLAN_GATE"
+    [ -f "$GG_TOP/$GG_PLAN_GATE" ] || die "GG_PLAN_GATE points to a nonexistent file: $GG_PLAN_GATE"
     bash "$GG_TOP/$GG_PLAN_GATE" "$MSGFILE" "$@" || exit 1
 fi
 
-# ─── 1. Тесты — ДО любых локов ──────────────────────────────────────────────
-# Держать лок минуты нельзя: пока идут тесты, соседи стоят.
+# ─── 1. Tests — BEFORE any locks ────────────────────────────────────────────
+# Holding a lock for minutes is not an option: while tests run, neighbors wait.
 if [ "${MONITOREX_SKIP_TESTS:-0}" = "1" ]; then
-    warn "тесты пропущены (MONITOREX_SKIP_TESTS=1)"
+    warn "tests skipped (MONITOREX_SKIP_TESTS=1)"
 elif [ -z "$GG_TEST_CMD" ]; then
-    warn "тестраннер не настроен (GG_TEST_CMD в .gitguards.conf) — тесты НЕ гонялись"
+    warn "test runner not configured (GG_TEST_CMD in .gitguards.conf) — tests were NOT run"
 else
-    info "тесты по изменённым путям…"
-    # Пути передаются позиционно, а не подстановкой в строку: иначе имя файла
-    # с пробелом развалит команду, а имя с ; — выполнит постороннее.
+    info "tests for the changed paths…"
+    # Paths are passed positionally, not substituted into the string: otherwise a
+    # file name with a space breaks the command, and a name with ; runs something else.
     if ! sh -c "$GG_TEST_CMD \"\$@\"" gg-test "$@" >/dev/null 2>&1; then
-        die "тесты не прошли. Прогнать вручную: $GG_TEST_CMD $*
-   Пропустить осознанно: MONITOREX_SKIP_TESTS=1"
+        die "tests failed. Run manually: $GG_TEST_CMD $*
+   Skip deliberately: MONITOREX_SKIP_TESTS=1"
     fi
 fi
 
-# ─── 2. Идентичность ────────────────────────────────────────────────────────
-# Пустой ACTOR делал бы проверку владельца fail-open (пустая подстрока
-# совпадает с любым владельцем), поэтому — отказ.
+# ─── 2. Identity ────────────────────────────────────────────────────────────
+# An empty ACTOR would make the owner check fail-open (an empty substring
+# matches any owner), so it is a rejection.
 ACTOR="${CLAUDE_CODE_SESSION_ID:-${MONITOREX_ACTOR:-}}"
-[ -n "$ACTOR" ] || die "нет идентичности: задайте MONITOREX_ACTOR=<кто вы>"
+[ -n "$ACTOR" ] || die "no identity: set MONITOREX_ACTOR=<who you are>"
 
 COMMON=$(git rev-parse --git-common-dir)
 case "$COMMON" in /*) ;; *) COMMON="$(cd "$COMMON" && pwd -P)" ;; esac
 LOCKDIR="$COMMON/monitorex-locks"
 LOCK="$LOCKDIR/commit"
 JOURNAL="$LOCKDIR/journal"
-IDXPATH=$(git rev-parse --git-path index)          # per-worktree, НЕ $COMMON/index
+IDXPATH=$(git rev-parse --git-path index)          # per-worktree, NOT $COMMON/index
 case "$IDXPATH" in /*) ;; *) IDXPATH="$(pwd -P)/$IDXPATH" ;; esac
 IDXLOCK="$IDXPATH.lock"
 TOKEN=$(uuidgen)
@@ -96,7 +96,7 @@ mkdir -p "$LOCKDIR"
 
 IDX=""; T=""; OWN_IDXLOCK=0; OWN_COMMIT_LOCK=0; PHASE=""; NEW=""
 
-sync_index_to() {   # $1 = commit-ish, чьё дерево кладём в общий индекс
+sync_index_to() {   # $1 = commit-ish whose tree goes into the shared index
     local tmp
     tmp=$(mktemp -t monitorex-idxcopy) || return 1
     if GIT_INDEX_FILE="$tmp" git read-tree "$1" 2>/dev/null && mv "$tmp" "$IDXPATH"; then
@@ -105,24 +105,24 @@ sync_index_to() {   # $1 = commit-ish, чьё дерево кладём в об�
     rm -f "$tmp"; return 1
 }
 
-# ─── ЕДИНЫЙ обработчик выхода ───────────────────────────────────────────────
-# Второй `trap ... EXIT` в POSIX shell ЗАМЕНЯЕТ первый, поэтому здесь всё
-# сразу. Забытый index.lock парализует репозиторий — снимать обязательно.
+# ─── A SINGLE exit handler ──────────────────────────────────────────────────
+# A second `trap ... EXIT` in POSIX shell REPLACES the first, so everything is
+# here at once. A forgotten index.lock paralyzes the repository — always remove it.
 cleanup() {
     local rc=$?
     [ -n "$IDX" ] && rm -f "$IDX"
     [ -n "$T" ] && rm -f "$T"
 
-    # Фаза post-cas: ветка уже на NEW, а общий индекс ещё на старом дереве.
-    # Отпустить лок в таком виде = оставить разъехавшееся состояние, в котором
-    # `git checkout` уносит файлы, а `git stash` молча забирает разницу.
+    # post-cas phase: the branch is already at NEW, but the shared index is still on
+    # the old tree. Releasing the lock like this = leaving a diverged state in which
+    # `git checkout` carries files away and `git stash` silently takes the difference.
     if [ "$PHASE" = "post-cas" ]; then
         if sync_index_to "$NEW"; then
             rm -f "$JOURNAL"
         else
-            warn "индекс НЕ синхронизирован. Лок и журнал ОСТАВЛЕНЫ для починки:"
-            warn "    scripts/git-lock.sh release   (увидит фазу post-cas и предложит repair)"
-            exit "$rc"          # index.lock намеренно НЕ снимаем
+            warn "index NOT in sync. Lock and journal LEFT in place for repair:"
+            warn "    scripts/git-lock.sh release   (will see the post-cas phase and offer repair)"
+            exit "$rc"          # index.lock is deliberately NOT removed
         fi
     fi
 
@@ -137,50 +137,51 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-# ─── 3. Лок сериализации ────────────────────────────────────────────────────
+# ─── 3. Serialization lock ──────────────────────────────────────────────────
 if ! mkdir "$LOCK" 2>/dev/null; then
-    die "коммит уже идёт: $(cat "$LOCK/owner" 2>/dev/null | tr '\n' ' ')
-   Посмотреть/снять: scripts/git-lock.sh status"
+    die "a commit is already in progress: $(cat "$LOCK/owner" 2>/dev/null | tr '\n' ' ')
+   View/release: scripts/git-lock.sh status"
 fi
 OWN_COMMIT_LOCK=1
 printf 'actor=%s\ntoken=%s\npid=%s\nts=%s\n' \
     "$ACTOR" "$TOKEN" "$$" "$(date -u +%FT%TZ)" > "$LOCK/owner"
 
-# ─── 4. index.lock — ДО сборки коммита, сразу с владельцем внутри ───────────
-# Проверено: удержание index.lock не мешает нашим операциям с изолированным
-# индексом, commit-tree и update-ref, но соседский `git add` громко отказывает.
+# ─── 4. index.lock — BEFORE building the commit, with the owner inside ──────
+# Verified: holding index.lock does not interfere with our operations on the isolated
+# index, commit-tree and update-ref, but a neighbor's `git add` fails loudly.
 attempts=0
 until ( set -C; printf 'actor=%s\ntoken=%s\npid=%s\nts=%s\n' \
         "$ACTOR" "$TOKEN" "$$" "$(date -u +%FT%TZ)" > "$IDXLOCK" ) 2>/dev/null; do
     attempts=$((attempts + 1))
-    [ "$attempts" -ge 30 ] && die "index.lock занят 30с: $(cat "$IDXLOCK" 2>/dev/null | tr '\n' ' ')
-   Если держатель мёртв: scripts/git-lock.sh status"
+    [ "$attempts" -ge 30 ] && die "index.lock held for 30s: $(cat "$IDXLOCK" 2>/dev/null | tr '\n' ' ')
+   If the holder is dead: scripts/git-lock.sh status"
     sleep 1
 done
 OWN_IDXLOCK=1
 
-BR=$(git symbolic-ref --quiet HEAD) || die "detached HEAD — коммитить нельзя"
+BR=$(git symbolic-ref --quiet HEAD) || die "detached HEAD — cannot commit"
 HEAD_START=$(git rev-parse HEAD)
 
-# ─── 5. ПРЕДусловие: общий индекс чист относительно HEAD_START ──────────────
-# Именно предусловие, а не постусловие: отказ обязан случиться ДО того, как
-# мы двинем ветку, иначе HEAD и индекс разъедутся.
+# ─── 5. PREcondition: the shared index is clean relative to HEAD_START ──────
+# A precondition, not a postcondition: the rejection must happen BEFORE we move
+# the branch, otherwise HEAD and the index diverge.
 if ! git diff-index --quiet --cached "$HEAD_START"; then
-    die "в общем индексе есть застейдженное — коммит невозможен:
+    die "the shared index has staged changes — cannot commit:
 $(git diff --cached --name-only | sed 's/^/     /')
-   Это аномалия: коммитить из общего индекса запрещено (см. хук pre-commit).
-   Снять: git reset   (файлы на диске не пострадают)"
+   This is an anomaly: committing from the shared index is forbidden (see the pre-commit hook).
+   Clear: git reset   (files on disk are not affected)"
 fi
 
-# ─── 6. Сборка коммита в СВОЁМ индексе ──────────────────────────────────────
-# 🔴 Файл, который УЖЕ есть в дереве коммита, добавляется с --force: .gitignore решает,
-# что впервые брать в репозиторий, а не запрещает править отслеживаемое. Без этого
-# правка отслеживаемого файла из игнорируемого каталога не коммитилась вовсе (так
-# лежит .claude/agents/ в Bomond — 16.09.2026 починка агента встала на этом).
-# --force точечный: только отдельный файл из HEAD_START; новые игнорируемые файлы и
-# каталоги по-прежнему отклоняются. Сравнение через -z — пути с кириллицей git
-# иначе кавычит, и файл не узнавался бы.
-stage_paths() {      # IDX/HEAD_START — переменные; $@ — пути
+# ─── 6. Build the commit in OUR OWN index ───────────────────────────────────
+# 🔴 A file that ALREADY exists in the commit's tree is added with --force: .gitignore
+# decides what gets into the repository for the first time; it does not forbid editing
+# tracked files. Without this, a change to a tracked file inside an ignored directory
+# could not be committed at all (that is how .claude/agents/ is laid out in one project —
+# on 16.09.2026 an agent fix got stuck on exactly this).
+# --force is targeted: only an individual file from HEAD_START; new ignored files and
+# directories are still rejected. The comparison uses -z — otherwise git quotes
+# non-ASCII paths and the file would not be recognized.
+stage_paths() {      # IDX/HEAD_START are variables; $@ — paths
     local p
     for p in "$@"; do
         if [ ! -d "$p" ] && \
@@ -196,26 +197,26 @@ IDX=$(mktemp -t monitorex-idx)
 GIT_INDEX_FILE="$IDX" git read-tree "$HEAD_START"
 stage_paths "$@"
 
-# ─── 7. Сверка состава: в коммите ровно то, что просили ─────────────────────
+# ─── 7. Verify contents: the commit has exactly what was requested ──────────
 if ! GIT_INDEX_FILE="$IDX" git -c core.quotePath=false diff --cached -z --name-only "$HEAD_START" \
      | python3 -B "$SCRIPT_DIR/git-guards/verify_staged.py" --expect "$@"; then
-    die "состав коммита не совпал с запрошенными путями (см. выше)"
+    die "commit contents do not match the requested paths (see above)"
 fi
 
 if GIT_INDEX_FILE="$IDX" git diff-index --quiet --cached "$HEAD_START"; then
-    die "нечего коммитить: указанные пути не отличаются от HEAD"
+    die "nothing to commit: the given paths do not differ from HEAD"
 fi
 
-info "состав коммита:"
+info "commit contents:"
 GIT_INDEX_FILE="$IDX" git diff --cached --stat "$HEAD_START" | sed 's/^/     /' >&2
 
-# ─── 8. Коммит + журнал транзакции ──────────────────────────────────────────
+# ─── 8. Commit + transaction journal ────────────────────────────────────────
 TREE=$(GIT_INDEX_FILE="$IDX" git write-tree)
 NEW=$(git interpret-trailers --trailer "Session-Id: $ACTOR" < "$MSGFILE" \
       | git commit-tree "$TREE" -p "$HEAD_START")
 
-# Объект commit-tree недостижим — закрепляем ref-ом ДО CAS, иначе соседский
-# `git gc --prune=now` его сотрёт.
+# The commit-tree object is unreachable — pin it with a ref BEFORE the CAS, otherwise
+# a neighbor's `git gc --prune=now` would erase it.
 git update-ref "refs/monitorex/recovery/$TOKEN" "$NEW"
 
 write_journal() {
@@ -225,19 +226,19 @@ write_journal() {
 write_journal pre-cas
 
 # ─── 9. CAS ─────────────────────────────────────────────────────────────────
-retry_or_die() {      # $@ — pathspec; NEW/HEAD_START/BR/TREE — переменные
+retry_or_die() {      # $@ — pathspec; NEW/HEAD_START/BR/TREE are variables
     local attempt=1 new_head changed
     while [ "$attempt" -le 3 ]; do
         new_head=$(git rev-parse "$BR")
 
-        # Пересечение путей — ОТКАЗ, а не пересборка: иначе мы пересоберём от
-        # чужого коммита и затрём его правку своим содержимым с диска.
+        # Overlapping paths mean REJECTION, not a rebuild: otherwise we would rebuild
+        # on top of someone else's commit and overwrite their change with our disk content.
         changed=$(git diff --name-only -z "$HEAD_START" "$new_head" || true)
         if printf '%s' "$changed" \
            | python3 -B "$SCRIPT_DIR/git-guards/verify_staged.py" --intersects "$@"; then
-            die "сосед изменил те же файлы (попытка $attempt).
-   Ваш коммит сохранён: refs/monitorex/recovery/$TOKEN
-   Посмотреть: scripts/git-recovery.sh show $TOKEN"
+            die "a neighbor changed the same files (attempt $attempt).
+   Your commit is saved: refs/monitorex/recovery/$TOKEN
+   View: scripts/git-recovery.sh show $TOKEN"
         fi
 
         HEAD_START="$new_head"
@@ -254,27 +255,27 @@ retry_or_die() {      # $@ — pathspec; NEW/HEAD_START/BR/TREE — переме
         fi
         attempt=$((attempt + 1))
     done
-    die "3 попытки CAS исчерпаны. Коммит сохранён: refs/monitorex/recovery/$TOKEN
-   Восстановить: git cherry-pick $NEW"
+    die "3 CAS attempts exhausted. Commit saved: refs/monitorex/recovery/$TOKEN
+   Restore: git cherry-pick $NEW"
 }
 
 if ! git update-ref "$BR" "$NEW" "$HEAD_START" 2>/dev/null; then
-    warn "ветку сдвинул сосед — пересобираю коммит"
+    warn "a neighbor moved the branch — rebuilding the commit"
     retry_or_die "$@"
 fi
 
 PHASE=post-cas
 write_journal post-cas
 
-# ─── 10. Синхронизация общего индекса под уже удерживаемым локом ────────────
-sync_index_to "$NEW" || die "индекс не синхронизирован — см. scripts/git-lock.sh release"
+# ─── 10. Sync the shared index under the lock we already hold ───────────────
+sync_index_to "$NEW" || die "index not in sync — see scripts/git-lock.sh release"
 
-# ─── 11. Транзакция завершена ───────────────────────────────────────────────
+# ─── 11. Transaction complete ───────────────────────────────────────────────
 git update-ref -d "refs/monitorex/recovery/$TOKEN"
 rm -f "$JOURNAL"
 PHASE=done
 
-# ─── 12. Предупреждение о новом коде без потребителей (не блокирует) ────────
+# ─── 12. Warning about new code without consumers (non-blocking) ────────────
 bash "$SCRIPT_DIR/git-guards/consumer-warn.sh" "$NEW" "$@" || true
 
 printf '\n✅ %s  %s\n\n' "$(git rev-parse --short "$NEW")" "$(git log -1 --format=%s "$NEW")" >&2

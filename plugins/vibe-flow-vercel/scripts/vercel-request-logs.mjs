@@ -1,24 +1,24 @@
 #!/usr/bin/env node
-// Runtime-логи Vercel (Request Logs API) — сводка ошибок за период.
+// Vercel runtime logs (Request Logs API) — error summary for a period.
 //
-// 🔴 Ограничения API (проверены): окно запроса — МАКСИМУМ 60 000 мс, больше даёт
-// ExceedsBillingLimitError; глубина хранения ~3 суток (дальше — тот же код ошибки!);
-// параметры именно startDate/endDate в миллисекундах; ownerId обязателен;
-// `limit` может игнорироваться (отдаётся ~50 строк) — полноту даёт фильтр
-// `requestMethod`/`route`, а не курсор.
+// 🔴 API limitations (verified): the request window is AT MOST 60 000 ms, more gives
+// ExceedsBillingLimitError; retention depth is ~3 days (deeper — the same error code!);
+// the parameters are exactly startDate/endDate in milliseconds; ownerId is required;
+// `limit` may be ignored (~50 lines are returned) — completeness comes from the
+// `requestMethod`/`route` filter, not the cursor.
 //
-// Токен и проект — как у wait-vercel-deploy.mjs: env или .env.local / .vercel/project.json.
+// Token and project — as in wait-vercel-deploy.mjs: env or .env.local / .vercel/project.json.
 //
-// Использование (из корня проекта):
+// Usage (from the project root):
 //   node vercel-request-logs.mjs [--minutes 30] [--step 1] [--status 400] [--method POST]
 //        [--route /api/x] [--samples]
-//   --minutes  глубина назад (1…4320, по умолчанию 30)
-//   --step     шаг между окнами в минутах: 1 = без пропусков; >1 = выборка (оценка ≈ счёт × шаг)
-//   --status   минимальный код для группировки ошибок (по умолчанию 400)
-//   --method / --route  серверные фильтры API
-//   --samples  показать по одному сообщению из logs[] для каждой группы
+//   --minutes  how far back (1…4320, default 30)
+//   --step     step between windows in minutes: 1 = no gaps; >1 = sampling (estimate ≈ count × step)
+//   --status   minimum code for grouping errors (default 400)
+//   --method / --route  server-side API filters
+//   --samples  show one message from logs[] for each group
 //
-// Коды возврата: 0 ок · 4 нет доступа/токена/привязки · 5 неверные аргументы
+// Exit codes: 0 ok · 4 no access/token/link · 5 invalid arguments
 
 import {
   api, readProjectLink, readToken, teamQuery, LINK_HELP, TOKEN_HELP,
@@ -35,9 +35,9 @@ function parseArgs(argv) {
     else if (k === "--method") { a.method = v; i++; }
     else if (k === "--route") { a.route = v; i++; }
     else if (k === "--samples") { a.samples = true; }
-    else return { error: `неизвестный аргумент ${k}` };
+    else return { error: `unknown argument ${k}` };
   }
-  if (!(a.minutes >= 1 && a.minutes <= 4320)) return { error: "--minutes: 1…4320 (хранение ~3 суток)" };
+  if (!(a.minutes >= 1 && a.minutes <= 4320)) return { error: "--minutes: 1…4320 (retention ~3 days)" };
   if (!(a.step >= 1 && a.step <= 60)) return { error: "--step: 1…60" };
   if (!(a.status >= 100 && a.status <= 599)) return { error: "--status: 100…599" };
   if (a.method && !/^[A-Z]{3,7}$/.test(a.method)) return { error: "--method: GET|POST|PATCH…" };
@@ -64,7 +64,7 @@ async function main() {
   let windows = 0, failedWindows = 0, totalRows = 0, errorRows = 0, lastApiError = null;
 
   for (let s = start; s < now; s += a.step * 60_000) {
-    const e = Math.min(s + 60_000, now); // окно ≤ 60 с
+    const e = Math.min(s + 60_000, now); // window ≤ 60 s
     let q = `/v1/projects/${projectId}/request-logs?startDate=${s}&endDate=${e}&ownerId=${orgId}&limit=200`;
     if (tq) q += `&${tq}`;
     if (a.method) q += `&requestMethod=${a.method}`;
@@ -74,7 +74,7 @@ async function main() {
     try {
       data = await api(token, q);
     } catch (err) {
-      if (err.auth) out({ status: "AUTH_ERROR", error: "токен недействителен или не имеет доступа к проекту — выпусти новый VERCEL_TOKEN" }, 4);
+      if (err.auth) out({ status: "AUTH_ERROR", error: "the token is invalid or has no access to the project — issue a new VERCEL_TOKEN" }, 4);
       failedWindows++;
       lastApiError = `${err.message}${err.body ? " " + err.body : ""}`;
       continue;
@@ -113,8 +113,8 @@ async function main() {
     status: failedWindows === windows && windows > 0 ? "API_FAILED" : "OK",
     periodMinutes: a.minutes, step: a.step, windows, failedWindows, lastApiError,
     totalRows, errorRows, groups: list,
-    note: a.step > 1 ? "выборка: реальное число ≈ count × step" : undefined,
-    hint: failedWindows > 0 ? "ExceedsBillingLimitError на старых окнах = вышли за глубину хранения (~3 суток)" : undefined,
+    note: a.step > 1 ? "sampling: the real number ≈ count × step" : undefined,
+    hint: failedWindows > 0 ? "ExceedsBillingLimitError on old windows = went past the retention depth (~3 days)" : undefined,
   }, 0);
 }
 

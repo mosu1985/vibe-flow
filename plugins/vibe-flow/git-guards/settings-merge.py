@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""settings-merge.py <корень> — вписывает PreToolUse-хук в .claude/settings.json.
+"""settings-merge.py <root> — registers the PreToolUse hook in .claude/settings.json.
 
-🔴 СЛИЯНИЕ, А НЕ ПЕРЕЗАПИСЬ. В settings.json проекта уже могут жить чужие хуки,
-разрешения и настройки; затирание файла целиком — это ровно та потеря чужой
-работы, от которой строился весь набор. Пишем атомарно через временный файл.
+🔴 MERGE, DO NOT OVERWRITE. The project's settings.json may already hold other
+hooks, permissions and settings; clobbering the whole file is exactly the loss of
+someone else's work this whole kit was built to prevent. Written atomically via a temp file.
 """
 import json, os, sys
 
@@ -18,8 +18,8 @@ if os.path.isfile(path):
         with open(path, encoding="utf-8") as fh:
             data = json.load(fh)
     except Exception as exc:
-        # Битый JSON не чиним молча: перезапись стёрла бы содержимое.
-        print(u"🔴 %s не читается (%s) — впишите хук вручную:" % (path, exc))
+        # Broken JSON is not silently "fixed": overwriting would wipe its content.
+        print(u"🔴 %s is unreadable (%s) — add the hook manually:" % (path, exc))
         print(u"   PreToolUse / matcher Bash / command: %s" % CMD)
         sys.exit(0)
 
@@ -29,10 +29,10 @@ pre = hooks.setdefault("PreToolUse", [])
 for entry in pre:
     for hk in entry.get("hooks", []):
         if "monitorex-git-guard" in (hk.get("command") or ""):
-            print(u"= хук уже зарегистрирован")
+            print(u"= hook already registered")
             sys.exit(0)
 
-# Ищем существующую группу с matcher Bash, чтобы не плодить дубли групп.
+# Look for an existing group with matcher Bash so we do not create duplicate groups.
 target = None
 for entry in pre:
     if entry.get("matcher") == "Bash":
@@ -49,5 +49,5 @@ tmp = path + ".tmp"
 with open(tmp, "w", encoding="utf-8") as fh:
     json.dump(data, fh, ensure_ascii=False, indent=2)
     fh.write("\n")
-os.replace(tmp, path)          # атомарная подмена
-print(u"+ хук вписан в .claude/settings.json (остальное содержимое сохранено)")
+os.replace(tmp, path)          # atomic swap
+print(u"+ hook added to .claude/settings.json (other content preserved)")

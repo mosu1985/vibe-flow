@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# wt-new.sh — рабочее место сессии: свой каталог, своя ветка, свой индекс,
-# свой HEAD и свой dev-сервер на свободном порту.
+# wt-new.sh — a session workspace: its own directory, branch, index,
+# HEAD and dev server on a free port.
 #
-#   wt-new.sh <имя> [база]                  новое дерево и ветка от свежего origin/main
-#   wt-new.sh --resume <ветка> [имя]        дерево на СУЩЕСТВУЮЩЕЙ ветке
-#   wt-new.sh <имя> --new                   новое, несмотря на похожую начатую
+#   wt-new.sh <name> [base]                 new tree and branch from a fresh origin/main
+#   wt-new.sh --resume <branch> [name]      tree on an EXISTING branch
+#   wt-new.sh <name> --new                  new, even though a similar one is in progress
 #
-# Всё, что зависит от стека (dev-команда, признак готовности, базовый порт),
-# берётся из .gitguards.conf в корне репозитория.
+# Everything stack-dependent (dev command, readiness marker, base port)
+# comes from .gitguards.conf at the repository root.
 #
-# Основа новой ветки по умолчанию — защищённая ветка (GG_PROTECTED) в самом
-# свежем виде: перед созданием скрипт сам делает `git fetch`. Явная [база]
-# (ветка, тег, коммит) отменяет это поведение.
+# By default the new branch is based on the protected branch (GG_PROTECTED) in its
+# freshest state: the script runs `git fetch` itself before creating it. An explicit
+# [base] (branch, tag, commit) overrides this.
 set -eu
 usage() { sed -n '3,8p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 [ $# -ge 1 ] || usage
@@ -39,43 +39,43 @@ else
     done
 fi
 
-# 🔴 Каталог деревьев считается от ГЛАВНОГО дерева, а не от расположения
-# скрипта: запуск из worktree иначе создаёт вложенное <база>/<база>/.
+# 🔴 The worktree directory is computed from the MAIN working tree, not from the
+# script's location: otherwise running from a worktree creates a nested <base>/<base>/.
 MAIN=$(git -C "$ROOT" worktree list --porcelain | awk '/^worktree /{print substr($0, 10); exit}')
 WT_BASE="${GG_WT_DIR:-$(dirname "$MAIN")/$(basename "$MAIN")-wt}"
 case "$WT_BASE" in /*) ;; *) WT_BASE="$(cd "$MAIN" && cd "$(dirname "$WT_BASE")" && pwd)/$(basename "$WT_BASE")" ;; esac
 
-# ── Возобновление начатой работы ─────────────────────────────────────────────
-# 🔴 Без этого режима вернуться в брошенную ветку было НЕЧЕМ: скрипт умел только
-# заводить новую (`worktree add -b`) и на существующем имени падал с «branch
-# already exists». Оставался голый `git worktree add` — мимо клонирования
-# зависимостей, копирования .env.local, установки гардов и подъёма dev.
+# ── Resuming work in progress ────────────────────────────────────────────────
+# 🔴 Without this mode there was NO WAY back into an abandoned branch: the script
+# could only create a new one (`worktree add -b`) and failed on an existing name with
+# "branch already exists". What remained was a bare `git worktree add` — skipping
+# dependency cloning, copying .env.local, installing the guards and starting dev.
 if [ -n "$RESUME" ]; then
     BRANCH="$RESUME"
     git -C "$ROOT" rev-parse --verify -q "refs/heads/$BRANCH" >/dev/null \
-        || { echo "🔴 ветки $BRANCH нет локально"; exit 1; }
+        || { echo "🔴 no local branch $BRANCH"; exit 1; }
     EXIST=$(git -C "$ROOT" worktree list --porcelain \
         | awk -v b="refs/heads/$BRANCH" '/^worktree /{w=substr($0, 10)} /^branch /{if ($2==b) print w}')
     if [ -n "$EXIST" ]; then
-        echo "🔴 ветка $BRANCH уже разложена в дереве:"; echo "     $EXIST"
-        echo "   Работайте там — второй раз одну ветку git не выдаст."; exit 1
+        echo "🔴 branch $BRANCH is already checked out in a tree:"; echo "     $EXIST"
+        echo "   Work there — git will not check out the same branch twice."; exit 1
     fi
-    # Каталог по умолчанию — по имени ветки; он может быть занят ДРУГОЙ веткой,
-    # поэтому имя задаётся третьим аргументом, а не подбирается молча.
+    # The default directory is named after the branch; it may be taken by ANOTHER
+    # branch, so the name is given as the third argument rather than picked silently.
     [ -n "$NAME" ] || NAME=$(basename "$BRANCH")
 else
     BRANCH="$GG_BRANCH_PREFIX$NAME"
 
-    # ── Не начата ли эта работа раньше ───────────────────────────────────────
-    # 🔴 Совпадение имён ловит сам git. А вот вторая сессия, назвавшая ту же
-    # задачу иначе, молча отпочковывалась от главной ветки и писала всё заново.
+    # ── Has this work already been started? ──────────────────────────────────
+    # 🔴 git itself catches identical names. But a second session that named the
+    # same task differently silently branched off main and wrote everything again.
     if [ "$FORCE_NEW" = "0" ] && [ -x "$ROOT/scripts/wt-status.sh" ]; then
         UNFIN=$(bash "$ROOT/scripts/wt-status.sh" --names 2>/dev/null || true)
         if [ -n "$UNFIN" ]; then
             HITS=""
-            # Общее слово от 4 букв — признак «та же тема». Короче нельзя:
-            # «fix», «api», «ui» совпадут у всего, и предупреждение перестанут
-            # читать ровно тогда, когда оно понадобится.
+            # A shared word of 4+ letters signals "same topic". No shorter:
+            # "fix", "api", "ui" would match everything, and people would stop
+            # reading the warning exactly when it matters.
             for tok in $(printf '%s' "$NAME" | tr '\-_/' '   '); do
                 [ ${#tok} -ge 4 ] || continue
                 for b in $UNFIN; do
@@ -85,14 +85,14 @@ else
                 done
             done
             if [ -n "$HITS" ]; then
-                echo "🔴 Похоже, эта работа уже начата:"
+                echo "🔴 Looks like this work has already been started:"
                 for b in $HITS; do printf '     %s\n' "$b"; done
                 echo ""
-                echo "   Продолжить начатое:  scripts/wt-new.sh --resume <ветка>"
-                echo "   Это другая задача:   scripts/wt-new.sh $NAME --new"
+                echo "   Continue it:            scripts/wt-new.sh --resume <branch>"
+                echo "   It is a different task: scripts/wt-new.sh $NAME --new"
                 exit 1
             fi
-            echo "  ⚠️  есть незавершённые ветки (не по этой теме):"
+            echo "  ⚠️  there are unfinished branches (on other topics):"
             printf '%s\n' "$UNFIN" | sed 's/^/       /'
         fi
     fi
@@ -100,63 +100,63 @@ fi
 
 DIR="$WT_BASE/$NAME"
 if [ -e "$DIR" ]; then
-    echo "🔴 каталог уже занят: $DIR"
+    echo "🔴 directory already taken: $DIR"
     OCC=$(git -C "$ROOT" worktree list --porcelain | awk -v d="$DIR" '/^worktree /{w=substr($0, 10)} /^branch /{if (w==d) {sub("refs/heads/","",$2); print $2}}')
-    [ -n "$OCC" ] && echo "   в нём разложена ветка $OCC"
-    [ -n "$RESUME" ] && echo "   Задайте своё имя каталога:  scripts/wt-new.sh --resume $BRANCH <имя>"
+    [ -n "$OCC" ] && echo "   branch $OCC is checked out there"
+    [ -n "$RESUME" ] && echo "   Give your own directory name:  scripts/wt-new.sh --resume $BRANCH <name>"
     exit 1
 fi
 
-# ── Основа новой ветки ───────────────────────────────────────────────────────
-# 🔴 Раньше основой был HEAD главного дерева. Но вливание идёт на GitHub, а
-# локальную главную ветку после мержа никто не подтягивает: каждая новая
-# задача стартовала со СТАРОГО кода — без правок соседних, уже влитых веток.
-# Отсюда повторные починки уже починенного и конфликты при мерже. Поэтому
-# по умолчанию — свежая защищённая ветка с origin, а не то, что лежит на диске.
+# ── Base of the new branch ───────────────────────────────────────────────────
+# 🔴 The base used to be the main working tree's HEAD. But merging happens on GitHub,
+# and nobody pulls the local main branch after a merge: every new task started from
+# OLD code — without the changes of neighboring branches that were already merged.
+# Hence re-fixing what was already fixed, and merge conflicts. So by default the base
+# is the fresh protected branch from origin, not whatever is on disk.
 has_ref() { git -C "$ROOT" rev-parse --verify -q "$1^{commit}" >/dev/null 2>&1; }
 short() { git -C "$ROOT" rev-parse --short "$1"; }
 if [ -z "$RESUME" ] && [ -z "$BASE" ]; then
     LOCAL="refs/heads/$GG_PROTECTED"; REMOTE="refs/remotes/origin/$GG_PROTECTED"
     if git -C "$ROOT" remote get-url origin >/dev/null 2>&1; then
-        # Без интерактивного запроса пароля и без вечного ожидания на мёртвой
-        # сети: при сбое — предупреждение и работа с тем, что есть локально.
+        # No interactive password prompt and no endless wait on a dead network:
+        # on failure, warn and work with what is available locally.
         GIT_TERMINAL_PROMPT=0 git -C "$ROOT" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=20 \
             fetch -q origin "$GG_PROTECTED" 2>/dev/null \
-            || echo "  ⚠️  не удалось обновить origin/$GG_PROTECTED (нет сети, доступа или такой ветки на origin) — беру то, что есть локально"
+            || echo "  ⚠️  could not update origin/$GG_PROTECTED (no network, no access, or no such branch on origin) — using what is available locally"
     fi
     if has_ref "$REMOTE" && has_ref "$LOCAL"; then
         if git -C "$ROOT" merge-base --is-ancestor "$REMOTE" "$LOCAL"; then
-            BASE="$LOCAL"       # локальная ветка та же или впереди (неотправленные коммиты)
+            BASE="$LOCAL"       # the local branch is the same or ahead (unpushed commits)
         elif git -C "$ROOT" merge-base --is-ancestor "$LOCAL" "$REMOTE"; then
-            BASE="$REMOTE"      # обычный случай: локальная отстала после мержей на GitHub
+            BASE="$REMOTE"      # the usual case: local fell behind after merges on GitHub
         else
             BASE="$REMOTE"
             N=$(git -C "$ROOT" rev-list --count "$REMOTE..$LOCAL")
-            echo "  ⚠️  локальная $GG_PROTECTED разошлась с origin/$GG_PROTECTED — основа origin/$GG_PROTECTED;"
-            echo "      $N локальных коммита(ов) $GG_PROTECTED в новую ветку НЕ попадут"
+            echo "  ⚠️  local $GG_PROTECTED has diverged from origin/$GG_PROTECTED — base is origin/$GG_PROTECTED;"
+            echo "      $N local $GG_PROTECTED commit(s) will NOT be in the new branch"
         fi
     elif has_ref "$REMOTE"; then
         BASE="$REMOTE"
     elif has_ref "$LOCAL"; then
-        BASE="$LOCAL"           # репозиторий без origin — только локальная ветка
+        BASE="$LOCAL"           # repository without origin — local branch only
     else
-        BASE="HEAD"             # нет защищённой ветки вовсе (новый репозиторий)
+        BASE="HEAD"             # no protected branch at all (new repository)
     fi
     case "$BASE" in
         refs/remotes/*) LABEL="${BASE#refs/remotes/}" ;;
         refs/heads/*)   LABEL="${BASE#refs/heads/}" ;;
         *)              LABEL="$BASE" ;;
     esac
-    echo "  основа: $LABEL ($(short "$BASE"))"
+    echo "  base: $LABEL ($(short "$BASE"))"
 
-    # Главное дерево на защищённой ветке и отстаёт — сказать: dev-сервер
-    # главной папки показывает старую версию, и это выглядит как поломка.
+    # The main working tree is on the protected branch and behind — say so: the main
+    # folder's dev server shows an old version, and that looks like breakage.
     if [ "$BASE" = "$REMOTE" ] && has_ref "$LOCAL" \
        && [ "$(git -C "$MAIN" symbolic-ref -q HEAD 2>/dev/null)" = "$LOCAL" ] \
        && git -C "$ROOT" merge-base --is-ancestor "$LOCAL" "$REMOTE"; then
         BEHIND=$(git -C "$ROOT" rev-list --count "$LOCAL..$REMOTE")
         if [ "$BEHIND" -gt 0 ]; then
-            echo "  ℹ️  главная папка отстаёт от origin/$GG_PROTECTED на $BEHIND коммит(ов): git -C \"$MAIN\" pull --ff-only"
+            echo "  ℹ️  the main folder is behind origin/$GG_PROTECTED by $BEHIND commit(s): git -C \"$MAIN\" pull --ff-only"
         fi
     fi
 fi
@@ -164,16 +164,16 @@ fi
 if [ -n "$RESUME" ]; then
     git -C "$ROOT" worktree add "$DIR" "$BRANCH"
 else
-    # --no-track: от origin/<ветка> git иначе назначил бы её upstream'ом новой
-    # ветки, и `git status` писал бы «впереди origin/main». Свой upstream
-    # ветка получает при первом `git push -u origin <ветка>`.
+    # --no-track: otherwise git would make origin/<branch> the new branch's upstream,
+    # and `git status` would say "ahead of origin/main". The branch gets its own
+    # upstream on the first `git push -u origin <branch>`.
     git -C "$ROOT" worktree add --no-track -b "$BRANCH" "$DIR" "$BASE"
 fi
 
-# ── Зависимости ──────────────────────────────────────────────────────────────
-# node_modules: КЛОН через APFS clonefile (`cp -Rc`), а НЕ симлинк. Turbopack
-# (Next 16) отвергает симлинк за пределы каталога проекта и падает сразу. Клон
-# делается за секунды и почти не занимает места (copy-on-write).
+# ── Dependencies ─────────────────────────────────────────────────────────────
+# node_modules: a CLONE via APFS clonefile (`cp -Rc`), NOT a symlink. Turbopack
+# (Next 16) rejects a symlink pointing outside the project directory and fails
+# immediately. A clone takes seconds and uses almost no space (copy-on-write).
 if [ -d "$MAIN/node_modules" ]; then
     LOCK_SAME=1
     for f in package-lock.json pnpm-lock.yaml yarn.lock bun.lockb; do
@@ -181,25 +181,25 @@ if [ -d "$MAIN/node_modules" ]; then
     done
     if [ "$LOCK_SAME" = "1" ]; then
         if cp -Rc "$MAIN/node_modules" "$DIR/node_modules" 2>/dev/null; then
-            echo "  node_modules → клон APFS (copy-on-write)"
+            echo "  node_modules → APFS clone (copy-on-write)"
         else
             cp -R "$MAIN/node_modules" "$DIR/node_modules"
-            echo "  node_modules → обычная копия (clonefile недоступен)"
+            echo "  node_modules → regular copy (clonefile unavailable)"
         fi
     else
-        echo "  ⚠️  lockfile отличается — нужна своя установка пакетов в $DIR"
+        echo "  ⚠️  lockfile differs — a separate package install is needed in $DIR"
     fi
 fi
 
-# 🔴 .env.local не отслеживается git — в свежем дереве его нет, и API отдаёт
-# 500, а причина выглядит как поломка кода.
+# 🔴 .env.local is not tracked by git — a fresh tree lacks it, the API returns
+# 500, and the cause looks like broken code.
 for f in .env.local .env.development.local; do
-    [ -f "$MAIN/$f" ] && [ ! -f "$DIR/$f" ] && cp "$MAIN/$f" "$DIR/$f" && echo "  $f скопирован"
+    [ -f "$MAIN/$f" ] && [ ! -f "$DIR/$f" ] && cp "$MAIN/$f" "$DIR/$f" && echo "  $f copied"
 done
 
 bash "$ROOT/scripts/install-git-guards.sh" >/dev/null
 
-# ── Свой dev на свободном порту ──────────────────────────────────────────────
+# ── Own dev server on a free port ────────────────────────────────────────────
 PORT=""
 if [ -n "$GG_DEV_CMD" ]; then
     PORT="$GG_DEV_PORT_BASE"
@@ -207,39 +207,39 @@ if [ -n "$GG_DEV_CMD" ]; then
     printf '%s\n' ".wt-dev.pid" \
         >> "$(git -C "$DIR" rev-parse --git-path info/exclude)"
 
-    # 🔴 ФОРМА ЗАПУСКА ВАЖНА, И ОЧЕВИДНАЯ — НЕВЕРНА. Связка `cd && nohup … &`
-    # уходит в фон целиком, подоболочка не делает exec и ЖДЁТ сервер, держа
-    # stdout вызвавшей команды; в pid-файл попадает pid обёртки. Здесь
-    # перенаправления навешаны на всю подоболочку, а exec заменяет её сервером.
-    # 🔴 Лог — в служебной папке git, НЕ в дереве: Turbopack следит за деревом,
-    # каждая строка лога для него «изменение файла» → Fast Refresh → браузер
-    # перезагружается → новая строка лога. Вечный цикл перезагрузок.
+    # 🔴 THE LAUNCH FORM MATTERS, AND THE OBVIOUS ONE IS WRONG. `cd && nohup … &`
+    # is backgrounded as a whole, the subshell does not exec and WAITS for the server,
+    # holding the calling command's stdout; the pid file gets the wrapper's pid. Here
+    # the redirects apply to the whole subshell, and exec replaces it with the server.
+    # 🔴 The log goes into git's internal directory, NOT the tree: Turbopack watches the
+    # tree, every log line is a "file change" to it → Fast Refresh → the browser reloads
+    # → a new log line. An endless reload loop.
     DEVLOG="$(git -C "$DIR" rev-parse --absolute-git-dir)/wt-dev.log"
     ( cd "$DIR" && exec env "$GG_DEV_PORT_ENV=$PORT" nohup sh -c "$GG_DEV_CMD" ) \
         < /dev/null > "$DEVLOG" 2>&1 &
     echo $! > "$DIR/.wt-dev.pid"
 
-    # Признак готовности: у Next это сгенерированные .next/types — без них
-    # pre-push откажет, и дерево оказалось бы бесполезным.
+    # Readiness marker: for Next it is the generated .next/types — without them
+    # pre-push refuses, and the tree would be useless.
     if [ -n "$GG_DEV_READY_GLOBS" ]; then
-        echo "  жду готовности ($GG_DEV_READY_GLOBS)…"
+        echo "  waiting for readiness ($GG_DEV_READY_GLOBS)…"
         WAITED=0; FOUND=0
         while [ "$WAITED" -lt "$GG_DEV_READY_WAIT" ]; do
             for g in $GG_DEV_READY_GLOBS; do [ -e "$DIR/$g" ] && FOUND=1; done
             [ "$FOUND" = "1" ] && break
             sleep 2; WAITED=$((WAITED+2))
         done
-        [ "$FOUND" = "1" ] && echo "  готово ✅ — push отсюда пройдёт" \
-            || echo "  ⚠️  признак не появился за ${GG_DEV_READY_WAIT}с: $DEVLOG"
+        [ "$FOUND" = "1" ] && echo "  ready ✅ — push from here will pass" \
+            || echo "  ⚠️  marker did not appear within ${GG_DEV_READY_WAIT}s: $DEVLOG"
     fi
 fi
 
 echo
-echo "Готово: $DIR"
-echo "  ветка:      $BRANCH"
+echo "Done: $DIR"
+echo "  branch:     $BRANCH"
 [ -n "$PORT" ] && echo "  dev:        http://localhost:$PORT  (pid $(cat "$DIR/.wt-dev.pid" 2>/dev/null))"
-[ -n "$PORT" ] && echo "  лог dev:    $DEVLOG"
+[ -n "$PORT" ] && echo "  dev log:    $DEVLOG"
 echo
-echo "Коммит:  scripts/git-safe-commit.sh --message-file <файл> -- <пути>"
-echo "Push:    git push -u origin $BRANCH   (отсюда же)"
-echo "Убрать:  scripts/wt-done.sh $NAME"
+echo "Commit:  scripts/git-safe-commit.sh --message-file <file> -- <paths>"
+echo "Push:    git push -u origin $BRANCH   (from here)"
+echo "Remove:  scripts/wt-done.sh $NAME"

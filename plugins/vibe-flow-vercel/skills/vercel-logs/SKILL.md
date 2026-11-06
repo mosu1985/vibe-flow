@@ -1,43 +1,43 @@
 ---
 name: vercel-logs
-description: Проверить логи последнего деплоя Vercel (статус и ошибки сборки) через API
+description: Check the logs of the latest Vercel deploy (status and build errors) via the API
 disable-model-invocation: false
 ---
 
-Проверь логи последнего деплоя Vercel для текущего проекта.
+Check the logs of the latest Vercel deploy for the current project.
 
-## 🔴 Секреты
+## 🔴 Secrets
 
-Токен — только из окружения (`VERCEL_TOKEN` в окружении или `.env.local`), проект — из `.vercel/project.json` (`vercel link`). Токен не подставлять в командную строку и не печатать.
+The token comes only from the environment (`VERCEL_TOKEN` in the environment or `.env.local`), the project from `.vercel/project.json` (`vercel link`). Do not put the token on the command line and do not print it.
 
-## Шаги
+## Steps
 
-### 1. Найти деплой
-- Нужен деплой конкретного коммита — запусти агента `vibe-flow-vercel:vercel-deploy-monitor` с SHA и target: он ждёт финала и отдаёт ошибки сборки одним вызовом
-- Нужен просто «последний» — через MCP Vercel (`list_deployments`, если подключён) или API `GET /v6/deployments?projectId=…&limit=5&target=production`; помни, что «последний» может быть чужим preview — сверяй `meta.githubCommitSha` с нужным коммитом
+### 1. Find the deploy
+- You need the deploy of a specific commit — launch the `vibe-flow-vercel:vercel-deploy-monitor` agent with the SHA and target: it waits for the final state and returns the build errors in one call
+- You just need "the latest" — via the Vercel MCP (`list_deployments`, if connected) or the API `GET /v6/deployments?projectId=…&limit=5&target=production`; remember that "the latest" may be someone else's preview — compare `meta.githubCommitSha` with the commit you need
 
-### 2. Проверить статус
-- `ERROR` → события деплоя `GET /v3/deployments/{id}/events`, искать stderr и строки с `error`/`failed`/`killed`/`out of memory`
-- `BLOCKED` → сборка не стартовала; причина в `GET /v13/deployments/{id}` → `readyStateReason`, `seatBlock` (частая: Vercel не опознал email автора коммита)
-- 🔴 `BUILDING` может быть залипшим: если `ready` больше `buildingAt` — сборка завершена, что бы ни говорил `state`
+### 2. Check the status
+- `ERROR` → deploy events `GET /v3/deployments/{id}/events`, look for stderr and lines with `error`/`failed`/`killed`/`out of memory`
+- `BLOCKED` → the build did not start; the cause is in `GET /v13/deployments/{id}` → `readyStateReason`, `seatBlock` (a common one: Vercel did not recognize the commit author's email)
+- 🔴 `BUILDING` can be stuck: if `ready` is greater than `buildingAt` — the build is finished, whatever `state` says
 
-### 3. Показать результат
+### 3. Show the result
 
 ```
-Деплой: {id}
-Статус: ✅ READY / ❌ ERROR / 🚫 BLOCKED / 🔄 BUILDING
-Коммит: {sha} — {message}
-Время: {created_at}
+Deploy: {id}
+Status: ✅ READY / ❌ ERROR / 🚫 BLOCKED / 🔄 BUILDING
+Commit: {sha} — {message}
+Time: {created_at}
 
-Ошибки (если есть):
-- {файл}:{строка} — {текст ошибки}
+Errors (if any):
+- {file}:{line} — {error text}
 
-Рекомендации:
-- {что исправить}
+Recommendations:
+- {what to fix}
 ```
 
-## Известные причины падения сборки
+## Known causes of build failure
 
-- `Next.js build worker exited with signal: SIGKILL` + «Out of Memory» → процесс просит больше памяти, чем есть в контейнере сборки; потолок V8 (`--max-old-space-size`) нужно **понижать**, а не повышать (V8 не чистит мусор до упора в потолок). Лучше убрать тяжёлый шаг (например, проверку типов) из сборки
-- `JavaScript heap out of memory` / «Ineffective mark-compacts» → V8 упёрся в свой потолок, повышать
-- Падение на `npm install` из-за скрипта `prepare`/`postinstall`, рассчитанного на наличие `.git` (при деплое из CLI каталога `.git` нет)
+- `Next.js build worker exited with signal: SIGKILL` + "Out of Memory" → the process asks for more memory than the build container has; the V8 ceiling (`--max-old-space-size`) should be **lowered**, not raised (V8 does not collect garbage until it hits the ceiling). Better to remove the heavy step (for example, the type check) from the build
+- `JavaScript heap out of memory` / "Ineffective mark-compacts" → V8 hit its own ceiling, raise it
+- A failure in `npm install` because of a `prepare`/`postinstall` script that assumes `.git` exists (a CLI deploy has no `.git` directory)

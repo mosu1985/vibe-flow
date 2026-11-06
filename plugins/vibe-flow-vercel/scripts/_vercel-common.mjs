@@ -1,12 +1,12 @@
-// Общие помощники скриптов vibe-flow-vercel: привязка к проекту и токен.
-// 🔴 Значение токена никогда не печатается и не попадает в argv.
+// Shared helpers for the vibe-flow-vercel scripts: project link and token.
+// 🔴 The token value is never printed and never reaches argv.
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 export const API = "https://api.vercel.com";
 
-// Читает одну переменную из .env.local проекта (без вывода значения).
+// Reads one variable from the project's .env.local (without printing the value).
 function readEnvLocal(name, cwd) {
   try {
     const text = readFileSync(join(cwd, ".env.local"), "utf8");
@@ -18,12 +18,12 @@ function readEnvLocal(name, cwd) {
       return m[2].replace(/^["']|["']$/g, "").trim() || null;
     }
   } catch {
-    /* файла нет — не страшно */
+    /* no file — not a problem */
   }
   return null;
 }
 
-// Привязка к проекту: env → .vercel/project.json (его создаёт `vercel link`).
+// Project link: env → .vercel/project.json (created by `vercel link`).
 export function readProjectLink(cwd = process.cwd()) {
   let orgId = process.env.VERCEL_ORG_ID || null;
   let projectId = process.env.VERCEL_PROJECT_ID || null;
@@ -33,29 +33,29 @@ export function readProjectLink(cwd = process.cwd()) {
       orgId = orgId || link.orgId || null;
       projectId = projectId || link.projectId || null;
     } catch {
-      /* нет привязки */
+      /* no link */
     }
   }
   return { orgId, projectId };
 }
 
-// Токен: env VERCEL_TOKEN → VERCEL_TOKEN из .env.local проекта.
+// Token: env VERCEL_TOKEN → VERCEL_TOKEN from the project's .env.local.
 export function readToken(cwd = process.cwd()) {
   return process.env.VERCEL_TOKEN || readEnvLocal("VERCEL_TOKEN", cwd) || null;
 }
 
-// team_… — командный аккаунт (нужен teamId); иначе личный, параметр teamId не передаётся.
+// team_… — a team account (teamId is needed); otherwise personal, the teamId parameter is not passed.
 export function teamQuery(orgId) {
   return orgId && orgId.startsWith("team_") ? `teamId=${orgId}` : "";
 }
 
 export const LINK_HELP =
-  "нет привязки к проекту Vercel. Выполни в корне проекта `vercel link` (создаст .vercel/project.json) " +
-  "или задай переменные окружения VERCEL_ORG_ID и VERCEL_PROJECT_ID.";
+  "no Vercel project link. Run `vercel link` in the project root (creates .vercel/project.json) " +
+  "or set the VERCEL_ORG_ID and VERCEL_PROJECT_ID environment variables.";
 
 export const TOKEN_HELP =
-  "нет токена Vercel. Создай токен на vercel.com/account/tokens и положи в .env.local строку " +
-  "VERCEL_TOKEN=... (файл должен быть в .gitignore) либо экспортируй VERCEL_TOKEN в окружение.";
+  "no Vercel token. Create a token at vercel.com/account/tokens and put the line " +
+  "VERCEL_TOKEN=... into .env.local (the file must be in .gitignore), or export VERCEL_TOKEN into the environment.";
 
 export async function api(token, path) {
   const res = await fetch(`${API}${path}`, {
@@ -70,12 +70,12 @@ export async function api(token, path) {
   if (!res.ok) {
     const err = new Error(`HTTP ${res.status}`);
     err.status = res.status;
-    // Тело ответа Vercel содержит код ошибки (например ExceedsBillingLimitError).
+    // The Vercel response body contains the error code (for example ExceedsBillingLimitError).
     try { err.body = (await res.text()).slice(0, 300); } catch { /* ignore */ }
     throw err;
   }
-  // Vercel иногда отдаёт сырые управляющие символы в строках (многострочные сообщения
-  // коммитов) — стандартный JSON.parse их принимает не всегда, поэтому чистим.
+  // Vercel sometimes returns raw control characters in strings (multi-line messages
+  // of commits) — the standard JSON.parse does not always accept them, so we clean them.
   const text = await res.text();
   return JSON.parse(text.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, " "));
 }
