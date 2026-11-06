@@ -1,76 +1,78 @@
-# Как устроен vibe-flow и как его править
+# How vibe-flow works and how to modify it
 
-vibe-flow — рабочая среда разработки с Claude Code, вынесенная из живого
-проекта и очищенная от его специфики. Она должна разворачиваться в ЛЮБОМ
-проекте: любой язык, фреймворк, база, хостинг (или без них).
+vibe-flow is a Claude Code development environment extracted from a live
+project and stripped of its specifics. It must deploy into ANY project:
+any language, framework, database, hosting (or none of them).
 
-## Состав репозитория
+## Repository layout
 
 ```
-.claude-plugin/marketplace.json     маркетплейс «vibe-school» (три плагина)
-plugins/vibe-flow/                  ядро — для любого стека
-  agents/*.md                       агенты (вызов: vibe-flow:<имя>)
-  skills/<имя>/SKILL.md             скиллы (вызов: /vibe-flow:<имя>)
-  skills/init/                      /vibe-flow:init — разворачивает flow в проекте
-  scripts/                          скрипты, на которые ссылаются агенты/скиллы
-  templates/CLAUDE.flow.md          блок правил, который init вписывает в CLAUDE.md
-  git-guards/                       ВЕНДОРНАЯ копия ~/dev/git-guards (не править здесь!)
-plugins/vibe-flow-vercel/           пакет для проектов на Vercel
-plugins/vibe-flow-supabase/         пакет для проектов на Supabase
-tools/sync-git-guards.sh            обновить вендорную копию git-guards
+.claude-plugin/marketplace.json     the "vibe-school" marketplace (three plugins)
+plugins/vibe-flow/                  core, for any stack
+  agents/*.md                       agents (invoked as vibe-flow:<name>)
+  skills/<name>/SKILL.md            skills (invoked as /vibe-flow:<name>)
+  skills/init/                      /vibe-flow:init, deploys the flow into a project
+  scripts/                          scripts referenced by agents/skills
+  templates/CLAUDE.flow.md          rules block that init writes into CLAUDE.md
+  git-guards/                       VENDORED copy of ~/dev/git-guards (do not edit here!)
+plugins/vibe-flow-vercel/           package for projects on Vercel
+plugins/vibe-flow-supabase/         package for projects on Supabase
+tools/sync-git-guards.sh            update the vendored git-guards copy
 ```
 
-## Правила для агентов и скиллов
+## Rules for agents and skills
 
-1. **Язык — русский**, тон и структура как в исходниках (эмодзи-маркеры
-   заголовков, 🔴 для жёстких правил, короткие пункты).
-2. **Никакой специфики конкретного проекта.** Запрещены: названия проектов,
-   клиентов и их интеграций; имена машин и личных инструментов автора;
-   id проектов в облаках, имена команд, токены; пути и функции конкретной
-   кодовой базы, номера миграций; фразы «решение пользователя от <дата>».
-   Правило формулируется как правило, без даты и автора.
-3. **Истории «почему так» сохранять, обезличив.** «Предикат на неверном поле
-   <система> прошёл девять ревью» → «предикат на неверном поле внешнего API
-   прошёл девять проходов ревью плана и доехал до прода». Они — главная
-   ценность: объясняют ученику, зачем правило.
-4. **Стек не предполагать.** Не «Next.js + Supabase», а «если в проекте есть
-   БД с RLS…», «API-роуты (в Next.js — `app/api/**/route.ts`, в Express —
-   роутеры…)». Где нужна конкретика проекта — брать её из:
-   - блока `## 🧩 Проект` в `CLAUDE.md` (стек, команды, где что лежит) —
-     его пишет `/vibe-flow:init`;
-   - `.gitguards.conf` в корне: `GG_TEST_CMD`, `GG_TYPECHECK_CMD`,
-     `GG_DEV_CMD`, `GG_PROTECTED` (защищённая ветка), `GG_WT_DIR`.
-   Нет данных → агент сам определяет по файлам проекта (package.json,
-   pyproject.toml, go.mod, Gemfile…) и говорит, что определил.
-5. **Имена агентов — с префиксом плагина**, когда один агент/скилл/правило
-   велит запустить другого: `vibe-flow:release-gate`,
+1. **Language: Russian**, with the same tone and structure as the sources
+   (emoji markers on headings, 🔴 for hard rules, short bullet points).
+2. **No specifics of any particular project.** Forbidden: names of projects,
+   clients and their integrations; names of the author's machines and
+   personal tools; cloud project ids, team names, tokens; paths and functions
+   of a specific codebase, migration numbers; phrases like "user decision
+   from <date>". A rule is stated as a rule, without a date or author.
+3. **Keep the "why it's like this" stories, anonymized.** "A predicate on the
+   wrong <system> field passed nine reviews" → "a predicate on the wrong
+   field of an external API passed nine rounds of plan review and reached
+   production". These are the main value: they explain to the student why
+   the rule exists.
+4. **Don't assume a stack.** Not "Next.js + Supabase", but "if the project
+   has a database with RLS…", "API routes (in Next.js `app/api/**/route.ts`,
+   in Express routers…)". Where project specifics are needed, take them from:
+   - the `## 🧩 Проект` block in `CLAUDE.md` (stack, commands, where things
+     live), written by `/vibe-flow:init`;
+   - `.gitguards.conf` in the root: `GG_TEST_CMD`, `GG_TYPECHECK_CMD`,
+     `GG_DEV_CMD`, `GG_PROTECTED` (protected branch), `GG_WT_DIR`.
+   No data → the agent detects it from project files (package.json,
+   pyproject.toml, go.mod, Gemfile…) and says what it detected.
+5. **Agent names carry the plugin prefix** when one agent/skill/rule tells
+   you to launch another: `vibe-flow:release-gate`,
    `vibe-flow:security-reviewer`, `vibe-flow-vercel:vercel-deploy-monitor`.
-   В поле `name:` frontmatter — БЕЗ префикса (его добавляет Claude Code).
-6. **Frontmatter агента:** `name`, `description` (с примерами `<example>` —
-   по ним Claude решает, когда звать агента), `model`, `effort`, `tools`,
-   `color`. Поля `hooks`, `mcpServers`, `permissionMode` у плагинных агентов
-   игнорируются — не использовать.
-7. **Файлы плагина** (скрипты, шаблоны, рубрики) — по `${CLAUDE_PLUGIN_ROOT}`
-   (подставляется в текст агента/скилла при загрузке):
-   `node "${CLAUDE_PLUGIN_ROOT}/scripts/wait-vercel-deploy.mjs" …`. Файлы рядом
-   со SKILL.md — по `${CLAUDE_SKILL_DIR}`. В окружении Bash этих переменных
-   НЕТ — только подстановка в тексте.
-8. **Секреты — только из окружения**, никогда в argv, в `-e`-коде, в выводе.
-   Это правило в агентах сохранять.
-9. **Внешние инструменты опциональны.** Codex CLI, Vercel CLI, браузерное
-   расширение Claude in Chrome — агент проверяет наличие и, если инструмента
-   нет, честно возвращает «недоступно: <почему> — <что сделать>», а не
-   выдумывает результат.
-10. **Деплой и необратимое — только по явному «да» пользователя.** Это
-    правило сохранять во всех агентах, которые пушат, мержат, мигрируют.
+   In the frontmatter `name:` field, WITHOUT the prefix (Claude Code adds it).
+6. **Agent frontmatter:** `name`, `description` (with `<example>` examples;
+   Claude uses them to decide when to call the agent), `model`, `effort`,
+   `tools`, `color`. The `hooks`, `mcpServers` and `permissionMode` fields
+   are ignored for plugin agents; don't use them.
+7. **Plugin files** (scripts, templates, rubrics) are referenced via
+   `${CLAUDE_PLUGIN_ROOT}` (substituted into the agent/skill text on load):
+   `node "${CLAUDE_PLUGIN_ROOT}/scripts/wait-vercel-deploy.mjs" …`. Files next
+   to SKILL.md via `${CLAUDE_SKILL_DIR}`. These variables do NOT exist in the
+   Bash environment, only as substitutions in the text.
+8. **Secrets come only from the environment**, never in argv, in `-e` code,
+   or in output. Keep this rule in the agents.
+9. **External tools are optional.** Codex CLI, Vercel CLI, the Claude in
+   Chrome browser extension: the agent checks whether the tool is present
+   and, if not, honestly returns "unavailable: <why> — <what to do>" instead
+   of making up a result.
+10. **Deploys and anything irreversible only after an explicit "yes" from
+    the user.** Keep this rule in every agent that pushes, merges or
+    migrates.
 
-## Обновить git-guards
+## Updating git-guards
 
-Механизм git-guards живёт в отдельном репозитории (`~/dev/git-guards`).
-Правка там → `tools/sync-git-guards.sh` → коммит здесь. Прямые правки в
-`plugins/vibe-flow/git-guards/` теряются при следующей синхронизации.
+The git-guards mechanism lives in a separate repository (`~/dev/git-guards`).
+Edit there → `tools/sync-git-guards.sh` → commit here. Direct edits in
+`plugins/vibe-flow/git-guards/` are lost on the next sync.
 
-## Версии
+## Versions
 
-`version` в `plugins/*/.claude-plugin/plugin.json` поднимать при КАЖДОМ
-релизе — иначе у учеников останется закешированная копия.
+Bump `version` in `plugins/*/.claude-plugin/plugin.json` on EVERY release,
+otherwise students keep a cached copy.
