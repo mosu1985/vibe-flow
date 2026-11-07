@@ -27,6 +27,91 @@ try:
 except Exception:
     allow()
 
+def deny(reason: str):
+    print(json.dumps({"hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "deny",
+        "permissionDecisionReason": reason,
+    }}, ensure_ascii=False))
+    sys.exit(0)
+
+
+def git_out(where: str, *args) -> str:
+    return subprocess.run(("git", "-C", where) + args, capture_output=True,
+                          text=True, timeout=5).stdout.strip()
+
+
+def inside(path: str, root: str) -> bool:
+    """path is root or below it. Case-folded: APFS is case-insensitive by
+    default, and `.GIT/monitorex-locks` is the same directory as `.git/…`."""
+    p, r = path.casefold(), root.rstrip(os.sep).casefold()
+    return p == r or p.startswith(r + os.sep)
+
+
+# ── Write / Edit / MultiEdit / NotebookEdit: nothing inside git's own directories ──
+# The bypass marks (CONFIRM, allow-push, allow-delete), the release-gate verdict,
+# the plan approval marks, claims and the installed hooks all live in
+# $GIT_COMMON_DIR. Bash writes there are caught below; the Write tool used to walk
+# straight past: one Write of `monitorex-locks/release-gate/<tree>` with
+# `verdict=pass` and the push went out without review.
+#   - the path is file_path, or notebook_path for NotebookEdit; neither → deny;
+#   - relative paths resolve from cwd, then realpath (a symlink into .git counts);
+#   - deny if any component is `.git`, or the path is inside the common dir of the
+#     project — computed from $CLAUDE_PROJECT_DIR, not from cwd: after
+#     `cd /private/tmp` a cwd-based check would find no repository and let the
+#     absolute path through (M5). Every worktree's gitdir lives under the common
+#     dir ($COMMON/worktrees/<name>), so it is covered by the same check;
+#   - any failure to decide → deny (this check is fail-CLOSED, unlike the rest).
+WRITE_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
+GIT_DIR_DENY = """🔴 Writing inside git's own directory (`.git`, the common dir of this project) is forbidden to the model.
+
+That is where the guard keeps its state: bypass marks (CONFIRM, allow-push,
+allow-delete), the release-gate verdict, plan approval marks, issue claims and
+the installed hooks. Each of them is a human's or a reviewer's decision.
+
+- a verdict: run the release-gate agent;
+- a bypass: ask the user to run the script via `!`;
+- plan approval: the user approves the plan in Plan Mode (ExitPlanMode);
+- stale hooks: bash scripts/install-git-guards.sh.
+
+If you really need to change something there (e.g. .git/info/exclude), ask the user."""
+
+
+def write_guard():
+    ti = payload.get("tool_input") or {}
+    path = ti.get("file_path") or ti.get("notebook_path")
+    if not isinstance(path, str) or not path.strip():
+        deny("🔴 The guard cannot see which file this tool writes (no file_path / notebook_path), so it refuses.")
+    try:
+        base = payload.get("cwd") or os.getcwd()
+        path = os.path.expanduser(path)
+        absp = os.path.normpath(path if os.path.isabs(path) else os.path.join(base, path))
+        real = os.path.realpath(absp)
+        for cand in (absp, real):
+            if any(part.casefold() == ".git" for part in cand.split(os.sep)):
+                deny(GIT_DIR_DENY)
+        proj = os.environ.get("CLAUDE_PROJECT_DIR") or ""
+        if not proj or not os.path.isdir(proj):
+            raise RuntimeError("CLAUDE_PROJECT_DIR is not set")
+        common = git_out(proj, "rev-parse", "--git-common-dir")
+        if not common:
+            raise RuntimeError("no git common dir for the project")
+        if not os.path.isabs(common):
+            common = os.path.join(proj, common)
+        common = os.path.realpath(common)
+        if inside(real, common) or inside(absp, common):
+            deny(GIT_DIR_DENY)
+    except SystemExit:
+        raise
+    except Exception as e:  # fail-closed
+        deny(f"🔴 The guard could not check this write ({type(e).__name__}: {e}), so it refuses. "
+             "Ask the user if the write is needed.")
+    allow()
+
+
+if payload.get("tool_name") in WRITE_TOOLS:
+    write_guard()
+
 if payload.get("tool_name") != "Bash":
     allow()
 
@@ -109,9 +194,24 @@ MARK_VALUE_FLAGS = {"--report", "--head"}
 MARK_VALUE_SAFE = re.compile(r"[A-Za-z0-9._/@:+%=-]+")
 # Wrappers followed by the real command: `env X=1 cmd`, `nohup cmd`.
 # Without stripping them, `nohup scripts/git-confirm.sh commit` slipped past the check.
-WRAPPERS = {"env", "command", "nohup", "time", "exec", "builtin", "xargs"}
+# `source`/`.` run the script in the current shell, `nice`/`sudo`/`caffeinate`/
+# `arch`/`stdbuf` run it as a child: `source scripts/release-gate.sh pass` and
+# `nice scripts/git-confirm.sh feat` used to go through in one command (L6).
+WRAPPERS = {"env", "command", "nohup", "time", "exec", "builtin", "xargs",
+            "source", ".", "nice", "sudo", "caffeinate", "arch", "stdbuf"}
 # Wrapper flags that take the next word: `env -u VAR cmd`, `exec -a name cmd`.
 WRAPPER_VALUE_FLAGS = {"-u", "--unset", "-C", "--chdir", "-S", "-a", "-I", "-n", "-L", "-P"}
+# Per-wrapper sets where they differ (stdbuf's -i takes a value, env's -i does not).
+WRAPPER_VALUE_FLAGS_BY = {
+    "nice": {"-n", "--adjustment"},
+    "sudo": {"-u", "--user", "-g", "--group", "-h", "--host", "-p", "--prompt",
+             "-C", "--close-from", "-U", "--other-user", "-r", "--role",
+             "-t", "--type", "-D", "--chdir", "-T", "--command-timeout"},
+    "caffeinate": {"-t", "-w"},
+    "arch": {"-arch", "-e"},
+    "stdbuf": {"-i", "-o", "-e", "--input", "--output", "--error"},
+    "source": set(), ".": set(),
+}
 
 
 def basename(word: str) -> str:
@@ -128,7 +228,7 @@ def command_words(seg: str) -> list[str]:
         words = words[1:]
         while words and (words[0].startswith("-")
                          or (head in WRAPPERS and "=" in words[0])):
-            takes = head in WRAPPERS and words[0] in WRAPPER_VALUE_FLAGS
+            takes = head in WRAPPERS and words[0] in WRAPPER_VALUE_FLAGS_BY.get(head, WRAPPER_VALUE_FLAGS)
             words = words[2:] if takes else words[1:]
     return words
 
@@ -237,6 +337,108 @@ Bypassing review is a human decision: ask the user to run
     }}, ensure_ascii=False))
     sys.exit(0)
 
+# ── Writes into the guard's state, whatever the command ──────────────────────
+# Not only the release-gate verdict: CONFIRM (target=feat lets a feature through
+# the plan gate), allow-push, allow-delete, plan-approved/, claims/ and the
+# installed hooks in monitorex-hooks/ (rolling a hook back, `chmod -x`) are all
+# decisions the model must not make. Scripts that legitimately write there
+# (git-safe-commit.sh, git-lock.sh, wt-new.sh, install-git-guards.sh …) are run by
+# name and are not caught: only commands that write by themselves are.
+BARRIER = re.compile(r"monitorex-(?:locks|hooks)\b|monitorex-[*?\[{]")
+BARRIER_WRITERS = WRITERS | {"rm", "rmdir", "unlink", "chmod", "chown", "chflags",
+                             "truncate", "mkdir", "xattr", "mkfifo"}
+IN_PLACE_EDITORS = {"sed", "gsed", "perl"}
+
+
+def redirect_targets(seg: str) -> list[str]:
+    """Targets of output redirections (`>`, `>>`, `>|`, `&>`, `2>`), quotes kept.
+
+    Quote-aware: `echo "a > b"` has no redirection. The target is one shell word,
+    `$(…)` included — `> "$(git rev-parse --git-common-dir)"/monitorex-locks/x`
+    used to slip past a plain regex at the space inside `$(…)`. `>&2` is an fd
+    duplication, not a file."""
+    out, i, n, q = [], 0, len(seg), None
+    while i < n:
+        c = seg[i]
+        if q:
+            if c == q:
+                q = None
+            elif c == "\\" and q == '"':
+                i += 1
+            i += 1
+            continue
+        if c in "'\"":
+            q = c
+        elif c == "\\":
+            i += 1
+        elif c == ">":
+            j = i + 1
+            if j < n and seg[j] in ">|":
+                j += 1
+            if j < n and seg[j] == "&":
+                i = j + 1
+                continue
+            while j < n and seg[j] in " \t":
+                j += 1
+            k, depth, wq = j, 0, None
+            while k < n:
+                ch = seg[k]
+                if wq:
+                    if ch == wq:
+                        wq = None
+                elif ch in "'\"":
+                    wq = ch
+                elif ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    if depth == 0:
+                        break
+                    depth -= 1
+                elif depth == 0 and ch in " \t;|&<>":
+                    break
+                k += 1
+            out.append(seg[j:k])
+            i = k
+            continue
+        i += 1
+    return out
+
+
+def barrier_write(d: dict) -> bool:
+    seg = d["segment"]
+    if any(BARRIER.search(t) for t in redirect_targets(seg)):
+        return True
+    words = command_words(seg)
+    if not words:
+        return False
+    name = basename(words[0])
+    writer = name in BARRIER_WRITERS or (
+        name in IN_PLACE_EDITORS
+        and any(w == "--in-place" or w.startswith("--in-place=")
+                or (w.startswith("-") and not w.startswith("--") and "i" in w[1:])
+                for w in words[1:]))
+    if not writer:
+        return False
+    if any(BARRIER.search(w) for w in words[1:]):
+        return True
+    # `cd .git/monitorex-locks && rm CONFIRM`: the path is in the directory, not the word.
+    dirs = [c.get("cd_dir") or "" for c in d.get("cwd_candidates") or []] + [cwd]
+    return any(BARRIER.search(x) for x in dirs)
+
+
+if any(barrier_write(d) for d in detail):
+    deny("""🔴 Writing into monitorex-locks/ or monitorex-hooks/ is forbidden to the model.
+
+These directories hold the guard's state: bypass marks (CONFIRM, allow-push,
+allow-delete), the release-gate verdict, plan approval marks, issue claims, and
+the installed hooks. Each entry is a human's or a reviewer's decision.
+
+- a bypass mark: show the user what it allows and ask them to run the script via `!`;
+- a stuck lock: scripts/git-lock.sh release;
+- stale hooks: bash scripts/install-git-guards.sh (installs from origin);
+- reading (ls, cat, grep) is allowed.""")
+
+
 # `git push --no-verify` turns off pre-push entirely: typecheck, the parallel-session
 # barriers and release-gate all at once. A human may (the hook does not fire for `!`),
 # the model may not. Same bypass: swapping core.hooksPath via `-c`, `--config-env`,
@@ -325,6 +527,70 @@ via `! git push --no-verify …` and explain exactly what gets skipped.""",
     sys.exit(0)
 
 
+# ── What `origin/<protected>` means must not be rewritten in one command ─────
+# pre-push, the installer and the hook check below all trust refs/remotes/origin/*.
+# `git -c url.<local>.insteadOf=<origin> fetch` fills them with local commits
+# (C1-r2); set-head / symbolic-ref / update-ref / a `:refs/remotes/…` refspec move
+# them directly. Reading (`git symbolic-ref refs/remotes/origin/HEAD`) is allowed.
+REDIRECT_CONF = re.compile(r"(?:url|remote)\.", re.I)
+FETCHERS = {"fetch", "pull", "push", "remote", "ls-remote", "clone", "submodule"}
+
+
+def git_parts(seg: str):
+    """(config values from -c/--config-env, subcommand, args) for a git segment."""
+    words = command_words(seg)
+    if not words or basename(words[0]) != "git":
+        return None
+    rest, conf = words[1:], []
+    while rest and rest[0].startswith("-"):
+        w = rest[0]
+        if w in ("-c", "--config-env"):
+            conf.extend(rest[1:2])
+        elif w.startswith("--config-env="):
+            conf.append(w[len("--config-env="):])
+        elif w.startswith("-c") and w != "-C":
+            conf.append(w[2:])
+        rest = rest[2:] if (w in TAKES_VALUE or w == "--config-env") else rest[1:]
+    if not rest:
+        return conf, "", []
+    return conf, rest[0], rest[1:]
+
+
+def remote_ref_tamper(seg: str) -> bool:
+    parts = git_parts(seg)
+    if not parts:
+        return False
+    conf, sub, args = parts
+    if any(REDIRECT_CONF.match(c) for c in conf):
+        return True
+    if sub in FETCHERS and git_config_env(seg):
+        return True
+    pos = [a for a in args if not a.startswith("-")]
+    if sub == "remote" and pos[:1] == ["set-head"]:
+        return True
+    if sub == "symbolic-ref":
+        deleting = "-d" in args or "--delete" in args
+        if pos and pos[0].startswith("refs/remotes/") and (deleting or len(pos) >= 2):
+            return True
+    if sub == "update-ref" and any("refs/remotes/" in a for a in args):
+        return True
+    if sub in ("fetch", "pull") and any(":refs/remotes/" in a for a in args):
+        return True
+    return False
+
+
+if any(remote_ref_tamper(s) for s in segments):
+    deny("""🔴 Rewriting what `origin/<protected branch>` points to is forbidden to the model.
+
+pre-push, install-git-guards.sh and the hook check all trust refs/remotes/origin/*:
+the plan gate's policy, the release-gate base and the installed hooks come from
+there. Forbidden: `git -c url.*/remote.* …`, `--config-env` with those keys,
+GIT_CONFIG_* for fetch/push, `git remote set-head`, `git symbolic-ref
+refs/remotes/… <target>`, `git update-ref refs/remotes/…`, `git fetch … :refs/remotes/…`.
+
+A plain `git fetch origin` is fine. Anything else — ask the user.""")
+
+
 def git(where: str, *args) -> str:
     return subprocess.run(("git", "-C", where) + args, capture_output=True,
                           text=True, timeout=5).stdout.strip()
@@ -359,6 +625,90 @@ def target_dirs(candidates, c_dirs):
             where = resolve(where, c)
         out.append(where)
     return out
+
+
+# ── Before `git push`: the installed hooks are the ones on origin (H4) ───────
+# Old trees keep old copies of install-git-guards.sh, and `npm install` → `prepare`
+# runs them: the shared monitorex-hooks/ silently went back to a pre-push without
+# the newer barriers, for every tree. A rolled-back hook cannot check itself, so
+# the check lives here: each hook of the installed set must exist, be executable
+# and match `origin/<protected>:githooks/<name>` byte for byte; core.hooksPath must
+# point at that set. A hook not on origin yet (bootstrap) is skipped.
+HOOK_SET = ("pre-commit", "pre-push", "plan-gate.sh")
+
+
+def protected_ref(where: str) -> str | None:
+    """refs/remotes/origin/HEAD → origin/main → origin/master; None without origin."""
+    if subprocess.run(("git", "-C", where, "remote", "get-url", "origin"),
+                      capture_output=True, timeout=5).returncode != 0:
+        return None
+    head = git(where, "symbolic-ref", "-q", "refs/remotes/origin/HEAD")
+    for b in ([head[len("refs/remotes/origin/"):]] if head else []) + ["main", "master"]:
+        ref = f"refs/remotes/origin/{b}"
+        if subprocess.run(("git", "-C", where, "rev-parse", "-q", "--verify", ref + "^{commit}"),
+                          capture_output=True, timeout=5).returncode == 0:
+            return ref
+    return None
+
+
+def hooks_problems(where: str) -> list[str]:
+    import hashlib
+    common = git(where, "rev-parse", "--git-common-dir")
+    if not common:
+        return []                        # not a repository — git push fails by itself
+    if not os.path.isabs(common):
+        common = os.path.join(where, common)
+    ref = protected_ref(where)
+    if not ref:
+        return []
+    dest = os.path.realpath(os.path.join(common, "monitorex-hooks"))
+    probs, on_origin = [], False
+    for name in HOOK_SET:
+        blob = subprocess.run(("git", "-C", where, "cat-file", "blob", f"{ref}:githooks/{name}"),
+                              capture_output=True, timeout=5)
+        if blob.returncode != 0:
+            continue
+        on_origin = True
+        inst = os.path.join(dest, name)
+        if not os.path.isfile(inst):
+            probs.append(f"{name}: not installed")
+        elif not os.access(inst, os.X_OK):
+            probs.append(f"{name}: not executable")
+        else:
+            with open(inst, "rb") as fh:
+                if hashlib.sha256(fh.read()).digest() != hashlib.sha256(blob.stdout).digest():
+                    probs.append(f"{name}: differs from {ref[len('refs/remotes/'):]}")
+    if on_origin:
+        hp = git(where, "rev-parse", "--git-path", "hooks")
+        hp = os.path.realpath(hp if os.path.isabs(hp) else os.path.join(where, hp))
+        if hp != dest:
+            probs.append(f"core.hooksPath is not {dest}")
+    return probs
+
+
+def is_push(seg: str) -> bool:
+    parts = git_parts(seg)
+    return bool(parts) and parts[1] == "push"
+
+
+for d in detail:
+    if not is_push(d["segment"]):
+        continue
+    words = safe_split(strip_env_prefix(d["segment"]))[1:]
+    c_dirs = [words[i + 1] for i, w in enumerate(words[:-1]) if w == "-C"]
+    for where in target_dirs(d.get("cwd_candidates"), c_dirs):
+        where = where or os.environ.get("CLAUDE_PROJECT_DIR") or cwd
+        try:
+            probs = hooks_problems(where) if os.path.isdir(where) else []
+        except Exception:
+            probs = []                   # infrastructure trouble: pre-push still runs
+        if probs:
+            deny("🔴 The installed git hooks do not match origin — they are stale or were replaced:\n\n"
+                 + "\n".join(f"   - {p}" for p in probs)
+                 + "\n\nA rolled-back pre-push silently drops the newer barriers for every tree "
+                 "(this happens when an old tree runs `npm install` → `prepare`).\n"
+                 "Reinstall them from origin, then push again:\n"
+                 "  bash scripts/install-git-guards.sh")
 
 
 hit = None

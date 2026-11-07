@@ -1,6 +1,6 @@
 {
   "name": "vibe-flow-vercel",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "description": "vibe-flow package for Vercel: deploy monitor and logs.",
   "author": {
     "name": "Vibe Coding School"
