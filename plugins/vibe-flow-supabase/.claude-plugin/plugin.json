@@ -1,6 +1,6 @@
 {
   "name": "vibe-flow-supabase",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "vibe-flow package for Supabase: database agent and migrations.",
   "author": {
     "name": "Vibe Coding School"

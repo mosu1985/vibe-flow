@@ -18,9 +18,13 @@
 #     teammate's plan approved by a lead agent is not a human approval);
 #   - realpath(tool_response.filePath) lies directly in ${GG_PLANS_DIR:-~/.claude/plans}
 #     (a symlink pointing out of it does not count) and is a bare <name>.md;
-#   - tool_response.plan — the text the user approved, with their edits — has a
-#     `## … Codex` section and a `Гейт: ✅ пройден` / `Gate: ✅ passed` line;
-#     the sha256 of exactly that text goes into the mark.
+#   - tool_response.plan — the text the user approved, with their edits — has the
+#     `Гейт: ✅ пройден` / `Gate: ✅ passed` line and the external critic is settled:
+#     a `## … Codex` section, OR the `| Codex …` gate row says `❌ unavailable —
+#     user's decision`, OR it says `⚪️ not installed` and codex is really absent
+#     (PATH and the standard locations). Without Codex the gate goes by the Claude
+#     reviewers (vibe-flow 1.2.1); details and the pure, tested functions are in
+#     plan-approved.py. The sha256 of exactly that text goes into the mark.
 # The mark goes to the common dir of $CLAUDE_PROJECT_DIR:
 #   monitorex-locks/plan-approved/<name>   ts=<epoch> sha256=<hex> session=<id> plan=<name>
 #
@@ -30,60 +34,7 @@
 # → no mark, exit 0: this hook must never break the turn.
 set -u
 command -v python3 >/dev/null 2>&1 || exit 0
-exec python3 -B -c '
-import hashlib, json, os, re, subprocess, sys, tempfile, time
-
-def tell(reason):
-    print(json.dumps({"decision": "block", "reason": "Plan approval mark NOT written: " + reason},
-                     ensure_ascii=False))
-    sys.exit(0)
-
-try:
-    p = json.loads(sys.stdin.read())
-except Exception:
-    sys.exit(0)
-if not isinstance(p, dict) or p.get("tool_name") != "ExitPlanMode":
-    sys.exit(0)
-r = p.get("tool_response")
-if not isinstance(r, dict):
-    sys.exit(0)
-if p.get("agent_id") or r.get("isAgent") is not False:
-    tell("this plan was approved inside an agent, not by the user.")
-fp, plan = r.get("filePath"), r.get("plan")
-if not isinstance(fp, str) or not fp.strip() or not isinstance(plan, str) or not plan.strip():
-    tell("ExitPlanMode returned no plan file path or no plan text.")
-try:
-    plans = os.path.realpath(os.path.expanduser(os.environ.get("GG_PLANS_DIR") or "~/.claude/plans"))
-    real = os.path.realpath(os.path.expanduser(fp))
-    name = os.path.basename(real)
-    if (os.path.dirname(real) != plans or ".." in name
-            or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9._-]*\.md", name)):
-        tell("the plan file is not a <name>.md directly in " + plans + ".")
-    if not re.search(r"(?m)^## .*Codex", plan) \
-            or not re.search(r"(?m)^(Гейт: ✅ пройден|Gate: ✅ passed)", plan):
-        tell("the approved text of " + name + " has no `## … Codex` section or no "
-             "`Гейт: ✅ пройден` / `Gate: ✅ passed` line. A [feat] push citing this plan "
-             "will be rejected by pre-push until the plan passes the gate and is approved again.")
-    proj = os.environ.get("CLAUDE_PROJECT_DIR") or ""
-    if not proj or not os.path.isdir(proj):
-        sys.exit(0)
-    common = subprocess.run(["git", "-C", proj, "rev-parse", "--git-common-dir"],
-                            capture_output=True, text=True, timeout=5).stdout.strip()
-    if not common:
-        sys.exit(0)
-    if not os.path.isabs(common):
-        common = os.path.join(proj, common)
-    d = os.path.join(os.path.realpath(common), "monitorex-locks", "plan-approved")
-    os.makedirs(d, exist_ok=True)
-    sid = str(p.get("session_id") or "").replace("\n", " ")
-    body = "ts=%d\nsha256=%s\nsession=%s\nplan=%s\n" % (
-        int(time.time()), hashlib.sha256(plan.encode("utf-8")).hexdigest(), sid, name)
-    fd, tmp = tempfile.mkstemp(dir=d, prefix=".tmp-")
-    with os.fdopen(fd, "w") as fh:
-        fh.write(body)
-    os.replace(tmp, os.path.join(d, name))
-except SystemExit:
-    raise
-except Exception:
-    sys.exit(0)
-'
+# Built-ins only: under a trimmed PATH (GUI launch) dirname may be missing.
+case "$0" in */*) PY="${0%/*}/plan-approved.py" ;; *) PY="./plan-approved.py" ;; esac
+[ -f "$PY" ] || exit 0
+exec python3 -B "$PY"

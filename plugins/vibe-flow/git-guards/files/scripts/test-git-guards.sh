@@ -909,6 +909,78 @@ printf '[feat]: x\n\nPlan: nocodex.md\n' > "$TMP/pa-m"
 out=$( cd "$PA" && sh githooks/plan-gate.sh "$TMP/pa-m" 2>&1 ); rc=$?
 [ $rc -eq 1 ] && echo "$out" | grep -q 'no approval mark' && ok "end to end: a plan the hook refused is rejected by plan-gate.sh" || bad "end to end: refused plan" "$out"
 
+echo "== plan-approved.py: the gate without Codex (decide / codex_found) =="
+# The «no Codex» branch is tested on pure functions, never through the machine's
+# environment: the hook always checks the standard Codex locations, so on a machine
+# with Codex installed an environment-based test would be red (plan C1/C3).
+pa_py() {   # pa_py <python expression over module m> [args…] — prints the result
+    python3 -B - "$CH/plan-approved.py" "$@" <<'PY2'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("pa", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+expr, args = sys.argv[2], sys.argv[3:]
+print(eval(expr))
+PY2
+}
+pa_decide() {   # pa_decide <plan text> <codex found: 0|1> → "OK <kind>" | "NO <reason>"
+    pa_py '(lambda r: ("OK " + r[1]) if r[0] else ("NO " + r[2]))(m.decide(args[0], args[1] == "1"))' "$1" "$2"
+}
+PG_EN='Gate: ✅ passed'; PG_RU='Гейт: ✅ пройден'
+pd_case() {   # pd_case <expect OK|NO> <label> <plan> <found>
+    local out; out=$(pa_decide "$3" "$4" 2>&1)
+    case "$out" in "$1"*) ok "decide: $2" ;; *) bad "decide: $2" "$out" ;; esac
+}
+pd_case OK "(а) row '⚪️ not installed', Codex absent — accepted" "$(printf '| Codex (external critic) | — | ⚪️ not installed |\n\n%s' "$PG_EN")" 0
+out=$(pa_decide "$(printf '| Codex (external critic) | — | ⚪️ not installed |\n\n%s' "$PG_EN")" 1 2>&1)
+case "$out" in NO*codex-plan-critic*) ok "decide: (б) row '⚪️ not installed' but Codex IS installed — refused, points to codex-plan-critic" ;; *) bad "decide: (б) installed Codex" "$out" ;; esac
+pd_case OK "(в) row '❌ unavailable — user's decision' — accepted" "$(printf "| Codex (external critic) | — | ❌ unavailable — user's decision |\n\n%s" "$PG_EN")" 0
+pd_case OK "(г) agent form '⚪️ Critic not installed' — accepted" "$(printf '| Codex | — | ⚪️ Critic not installed |\n%s' "$PG_EN")" 0
+pd_case NO "(д) 'not installed' in prose, no table row — refused" "$(printf 'The critic is not installed here.\n\n%s' "$PG_EN")" 0
+pd_case NO "(е) marker row, but no gate line — refused" "$(printf '| Codex | — | ⚪️ not installed |\n')" 0
+pd_case OK "(ж) '## … Codex' section with Codex installed — accepted (Bomond path untouched)" "$(printf '## External review Codex\n\n%s' "$PG_EN")" 1
+pd_case OK "(з) user's decision with Codex installed — accepted" "$(printf "| Codex | — | ❌ unavailable — user's decision |\n%s" "$PG_EN")" 1
+pd_case OK "(и) Russian '⚪️ не установлен' — accepted" "$(printf '| Codex (внешний критик) | — | ⚪️ не установлен |\n%s' "$PG_RU")" 0
+pd_case OK "(и) Russian '❌ недоступен — решение пользователя' — accepted" "$(printf '| Codex | — | ❌ недоступен — решение пользователя |\n%s' "$PG_RU")" 0
+pd_case OK "(к) '⚪️ Not Installed' (case) — accepted" "$(printf '| Codex | — | ⚪️ Not Installed |\n%s' "$PG_EN")" 0
+pd_case OK "(л) typographic apostrophe 'user’s decision' — accepted" "$(printf '| Codex | — | ❌ unavailable — user’s decision |\n%s' "$PG_EN")" 0
+pd_case NO "(м) markers only in prose/backticks — refused" "$(printf 'Without Codex write `⚪️ not installed` or `❌ unavailable — user'"'"'s decision`.\n\n%s' "$PG_EN")" 0
+pd_case NO "(н) user's decision in prose, Codex installed — refused" "$(printf "Risk: ❌ unavailable — user's decision may be copied.\n\n%s" "$PG_EN")" 1
+pd_case OK "(о) Codex section + '⚪️ not installed' quoted in prose, Codex installed — accepted" "$(printf '## 🧑‍⚖️ External Codex review\n\nquote: `⚪️ not installed`\n\n%s' "$PG_EN")" 1
+pd_case OK "(п) dash '-' in the row — accepted" "$(printf "| Codex | — | ❌ unavailable - user's decision |\n%s" "$PG_EN")" 0
+pd_case OK "(п) dash '–' in the row — accepted" "$(printf "| Codex | — | ❌ unavailable – user's decision |\n%s" "$PG_EN")" 0
+pd_case OK "(п) '⚪️ (Critic) not installed' — accepted" "$(printf '| Codex | — | ⚪️ (Critic) not installed |\n%s' "$PG_EN")" 0
+pd_case OK "(п) '⚪️ Codex not installed' — accepted" "$(printf '| Codex | — | ⚪️ Codex not installed |\n%s' "$PG_EN")" 0
+pd_case OK "(п) '⚪' without U+FE0F — accepted" "$(printf '| Codex | — | ⚪ not installed |\n%s' "$PG_EN")" 0
+pd_case NO "(с) marker in the paragraph BELOW the Codex row — refused (C2)" "$(printf '| Codex (external critic) | — | ❌ unavailable |\n\n❌ unavailable — решение пользователя — later\n\n%s' "$PG_EN")" 1
+pd_case NO "(т) escaped '\\|' example in the side cell, blocking status — refused (C5)" "$(printf '| Codex (пример \\| ❌ недоступен — решение пользователя) | — | ❌ недоступен, решения пользователя ещё нет |\n%s' "$PG_RU")" 1
+pd_case NO "(ф) '❌ недоступен — решение пользователя не получено' — refused (marker must end the cell)" "$(printf '| Codex | — | ❌ недоступен — решение пользователя не получено |\n%s' "$PG_RU")" 0
+pd_case NO "(ф) '⚪️ not installed yet, installing' — refused" "$(printf '| Codex | — | ⚪️ not installed yet, installing |\n%s' "$PG_EN")" 0
+pd_case OK "(ф) trailing dot '⚪️ not installed.' — accepted" "$(printf '| Codex | — | ⚪️ not installed. |\n%s' "$PG_EN")" 0
+pd_case OK "(у) indented row '  | Codex | … |' — accepted" "$(printf '  | Codex | — | ⚪️ not installed |\n%s' "$PG_EN")" 0
+out=$(pa_decide "$(printf '# P\n\n%s\n' "$PG_RU")" 0 2>&1)
+case "$out" in NO*Codex*) ok "decide: no Codex section and no marker — refused, the reason names Codex" ;; *) bad "decide: plain refusal" "$out" ;; esac
+mkdir -p "$TMP/pc-empty" "$TMP/pc-has" "$TMP/pc-noexec"
+printf '#!/bin/sh\n' > "$TMP/pc-has/codex"; chmod +x "$TMP/pc-has/codex"; printf 'x\n' > "$TMP/pc-noexec/codex"
+[ "$(pa_py 'm.codex_found(args[0], [args[1]])' "" "$TMP/pc-empty")" = False ] && ok "codex_found: empty PATH, empty search dir — False" || bad "codex_found empty" ""
+[ "$(pa_py 'm.codex_found(args[0], [args[1]])' "" "$TMP/pc-has")" = True ] && ok "codex_found: executable codex in a search dir — True (not on PATH)" || bad "codex_found search dir" ""
+[ "$(pa_py 'm.codex_found(args[0], [])' "$TMP/pc-has")" = True ] && ok "codex_found: codex on PATH — True" || bad "codex_found PATH" ""
+[ "$(pa_py 'm.codex_found(args[0], [args[1]])' "" "$TMP/pc-noexec")" = False ] && ok "codex_found: non-executable file — False" || bad "codex_found noexec" ""
+out=$(HOME=/h pa_py 'set(m.search_dirs(args[0])) >= {"/opt/homebrew/bin", "/usr/local/bin", "/h/.local/bin"}' "")
+[ "$out" = True ] && ok "search_dirs: GG_CODEX_SEARCH_PATHS='' does NOT drop the standard locations (C3)" || bad "search_dirs C3" "$out"
+out=$(pa_py '"/extra/bin" in m.search_dirs(args[0])' "/extra/bin")
+[ "$out" = True ] && ok "search_dirs: GG_CODEX_SEARCH_PATHS only adds directories" || bad "search_dirs extra" "$out"
+# Integration, deterministic in both environments:
+mkdir -p "$TMP/pa-bin-codex"
+for t in python3 git; do ln -sf "$(python3 -c 'import os,shutil,sys; print(os.path.realpath(shutil.which(sys.argv[1])))' "$t")" "$TMP/pa-bin-codex/$t"; done
+cp "$TMP/pc-has/codex" "$TMP/pa-bin-codex/codex"
+for n in ni.md ud.md; do echo plan > "$GG_PLANS_DIR/$n"; done
+out=$(pa_in ni.md "$(printf '| Codex | — | ⚪️ not installed |\n%s' "$PG_EN")" false | PATH="$TMP/pa-bin-codex" CLAUDE_PROJECT_DIR="$PA" "$BASH" "$CH/plan-approved.sh")
+[ ! -f "$PAM/ni.md" ] && echo "$out" | grep -q 'codex-plan-critic' && echo "$out" | pa_block \
+    && ok "hook: '⚪️ not installed' while codex is on PATH — no mark, block" || bad "hook: not installed + codex on PATH" "$out"
+out=$(pa_run ud.md "$(printf "| Codex | — | ❌ unavailable — user's decision |\n%s" "$PG_EN")" false)
+[ -f "$PAM/ud.md" ] && echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if "systemMessage" in d and "decision" not in d else 1)' \
+    && ok "hook: user's decision — mark written and the user is told (systemMessage)" || bad "hook: user's decision mark + systemMessage" "$out"
+
 echo "== PreToolUse guard: unit cases (test_pretooluse_guard.py) =="
 if [ -d "$ROOT/.claude/hooks" ]; then
     out=$(python3 -B "$ROOT/scripts/git-guards/test_pretooluse_guard.py" 2>&1); rc=$?
