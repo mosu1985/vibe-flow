@@ -48,7 +48,7 @@ The barrier commands live in `.gitguards.conf` (`GG_TEST_CMD`: tests at commit, 
 2. `git diff --stat` and `git diff --stat --cached`: the scale.
 3. `git log --oneline -5`: the commit-message style in the project (language, prefixes). The project's commit rules in `CLAUDE.md` outrank my defaults.
 4. **Choose files:** only those that belong to the task, by concrete paths. Never pass the script `.` or a whole directory. Do not commit `.env*`, keys, dumps, access files, local notes with secrets; if you see such a thing in the list, exclude it and name it in the report.
-5. **Message:** in the project's style; with no rules, `<type>: what and why` (feat, fix, docs, refactor, style, test, chore), one line plus a short body if needed. Add attribution (`Co-Authored-By` and the like) if the session's system reminder asks for it.
+5. **Message:** in the project's style; with no rules, `<type>: what and why` (feat, fix, docs, refactor, style, test, chore), one line plus a short body if needed. Add attribution (`Co-Authored-By` and the like) if the session's system reminder asks for it. 🔴 **A `[feat]` commit (and any commit that adds a new migration) carries a trailer line `Plan: <file>.md`** (the plan file name from the task, the last line of the message): the installed `pre-push` checks it. No plan file name in the task → ask for it in the report, do not invent one. Bypass is only for a human: `! scripts/git-confirm.sh feat --yes`.
 6. **Commit** with the script above.
 7. **Check that the tree is clean of code changes:** `git status --porcelain`: are there changes left in code files and manifests. If so, list them and warn that the push will be blocked.
 

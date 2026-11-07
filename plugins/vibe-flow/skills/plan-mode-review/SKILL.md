@@ -98,6 +98,7 @@ Copy the prohibitions ("do NOT call `ExitPlanMode` until…") into the project's
 
 - **Goal:** at the plan stage (before code), determine the impact on tests — which to **update** (the plan changes the behavior of a covered function), which **new** ones to add (new pure logic / a regression test for a bug), or that tests are **not required**. If the project has no tests at all, say so honestly and propose a minimal start
 - The subagent **does NOT write or change tests itself** — it only recommends
+- 🔴 **Red first:** for a bug fix in logic or a new pure function the subagent must add `### 🔴 Red first` (test file, case, why it fails now); without it — `high`. The plan's `## 📌 Steps` then contains the step "test → red run → code". This is not checked automatically — it holds on this review and on the `test-runner` report
 - 🔴 **ASK THE USER:** if the verdict is not "✅ not required", you **MUST** use `AskUserQuestion` to ask what to do (update existing / add new / both / skip) — **BEFORE** `ExitPlanMode`, and write the answer into the plan
 - **Do NOT call `ExitPlanMode`** until `test-impact-reviewer` has finished and the user has decided what to do about tests
 
@@ -261,6 +262,8 @@ See LIVE FACTS RULE. A plan without external systems does not need the section.]
    - What exactly we change
 2. **Step description** — `path/to/file`
    - What exactly we change
+3. **(for a bug fix in logic or a new pure function) Test → red run → code** — `path/to/test`
+   - Write the test, run it, see it red (the output goes into the report), only then the implementation. Not for integration tests that write to a shared database
 
 ## 📂 Files
 - ✏️ Modify: `file1`, `file2`

@@ -46,10 +46,11 @@ At the start of planning any task — use the `/vibe-flow:architecture-map` skil
 ## 🌳 Work in your own worktree — CRITICAL
 A task that changes anything is done in a separate git worktree, not in the project's main folder: that way parallel sessions and agents do not mix their edits.
 1. **Start of the task:** first `scripts/wt-status.sh` — check whether it has already been started (then `scripts/wt-new.sh --resume <branch>`). Otherwise `scripts/wt-new.sh <task-name>` → branch `wt/<name>`, directory `<project>-wt/<name>`, its own dev port
+   - Task tracked as a GitHub Issue → `scripts/wt-new.sh --issue N` claims it (the claim is local, on one machine only)
 2. **Where to work — pick one way and tell the user:**
    - 💡 **A new session in the worktree (simplest):** ask the user to open a new terminal and run `cd <path-to-worktree> && claude` — everything there works like in a normal project
    - **In the current session:** the worktree directory lies outside the project, and `cd` does not persist between commands. So EVERY command is `cd "<worktree>" && …`, files are addressed by absolute paths inside the worktree, and **every agent** gets the line `Worktree: <absolute path>` in its prompt. An agent without that line will stop and ask when there are several worktrees
-3. **End of the task:** after the merge — `scripts/wt-done.sh <name>` (stops dev, frees the port, will not delete unsaved work)
+3. **End of the task:** after the merge — `scripts/wt-done.sh <name>` (stops dev, frees the port, releases the issue claim, will not delete unsaved work)
 
 ## 📋 Plan Mode — CRITICAL
 **Right after the plan is written to a file, and BEFORE `ExitPlanMode`** — load the `/vibe-flow:plan-mode-review` skill and run it in full: live check of assumptions about external systems → the batch of reviewers in parallel → questions to the user → external critic (Codex, if installed) → gate.
@@ -59,6 +60,7 @@ A task that changes anything is done in a separate git worktree, not in the proj
 - **Reviewer questions** (`🔴 USER QUESTION REQUIRED`, "what to do about tests") — ask via `AskUserQuestion` BEFORE `ExitPlanMode` and do not decide for the user
 - **Verify assumptions about external systems live** (a query, a script) and write the fact into the plan, not "we'll check during implementation"
 - **Gate by defect class:** the plan goes to implementation when no `critical`/`high` findings remain open. A finding without a failure scenario is `medium`. At most 3 rounds of auto-fixing, then sort it out with the user
+- 🔴 **Plan gate on push:** a `[feat]` commit (and any commit that adds a new migration) carries the trailer line `Plan: <file>.md`. The installed `pre-push` checks it. A plan counts as approved when the user approved it in `ExitPlanMode` (the approval mark is written by a Claude Code harness hook, not by the model) and the plan contains the Codex critic section and the gate line. It catches forgetfulness, not deception. Bypass — only by a human: `! scripts/git-confirm.sh feat --yes` (one-off, 15 minutes)
 
 ## 🔀 Implementation — by the verdict of `vibe-flow:orchestration-router`
 - ▶️ **Direct execution** → the main session does it itself
@@ -108,6 +110,8 @@ The user grants in advance automatic launch of vibe-flow agents under these rule
 ## 🧪 Type check and tests
 - If the project has a type check (`GG_TYPECHECK_CMD`), it runs on `pre-push`. A green deploy does not mean the types are fine if the build does not check them
 - `vibe-flow:test-runner` — after every code implementation; it reports failures, the main session fixes them
+- 🔴 **Red first** — for a bug fix in logic and for a new pure function: write the test → run it → **see it red** (put the output in the report) → only then the code. Not for integration tests that write to a shared database. This is not checked automatically: it rests on the plan reviewer (`### 🔴 Red first` in the plan) and on the `vibe-flow:test-runner` report
+- 🔴 **Tests after an edit:** if an edit to a file returned `block` with the tail of a test run (the post-edit tests hook, `GG_POST_EDIT_TESTS=1`) — fix the cause before going on. Do not work around it: no skipping the test, no loosening the assertion to make it pass
 
 ## 🌐 Browser
 - UI checks and work in web consoles — the `vibe-flow:browser-operator` agent (Claude in Chrome extension)
