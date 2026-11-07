@@ -205,7 +205,7 @@ If Codex is not installed — the critic row is `⚪️ not installed`, and the 
 | Codex (external critic) | — | ❌ unavailable — user's decision |
 ```
 
-🔴 **Write these markers literally, in the status cell of the `| Codex …` row.** The `plan-approved` hook reads them there (and only there — a marker quoted in prose does not count) to write the plan approval mark without a `## … Codex` section. Writing `⚪️ not installed` while Codex IS installed gets no mark: the hook checks — run the critic instead.
+🔴 **Write these markers literally, as the WHOLE content of the status cell of the `| Codex …` row** — no bold, no explanation after them (an explanation goes into the text below the table). The `plan-approved` hook reads them there (and only there — a marker quoted in prose does not count) to write the plan approval mark without a `## … Codex` section. Writing `⚪️ not installed` while Codex IS installed gets no mark: the hook checks — run the critic instead.
 
 The score stays in the table: it shows how good the plan is, and a low number with a passed gate is a legitimate reason to tell the user "it passed, but here are the points where the plan is weak".
 
