@@ -953,6 +953,9 @@ pd_case OK "(п) '⚪️ Codex not installed' — accepted" "$(printf '| Codex |
 pd_case OK "(п) '⚪' without U+FE0F — accepted" "$(printf '| Codex | — | ⚪ not installed |\n%s' "$PG_EN")" 0
 pd_case NO "(с) marker in the paragraph BELOW the Codex row — refused (C2)" "$(printf '| Codex (external critic) | — | ❌ unavailable |\n\n❌ unavailable — решение пользователя — later\n\n%s' "$PG_EN")" 1
 pd_case NO "(т) escaped '\\|' example in the side cell, blocking status — refused (C5)" "$(printf '| Codex (пример \\| ❌ недоступен — решение пользователя) | — | ❌ недоступен, решения пользователя ещё нет |\n%s' "$PG_RU")" 1
+pd_case NO "(ф) '❌ недоступен — решение пользователя не получено' — refused (marker must end the cell)" "$(printf '| Codex | — | ❌ недоступен — решение пользователя не получено |\n%s' "$PG_RU")" 0
+pd_case NO "(ф) '⚪️ not installed yet, installing' — refused" "$(printf '| Codex | — | ⚪️ not installed yet, installing |\n%s' "$PG_EN")" 0
+pd_case OK "(ф) trailing dot '⚪️ not installed.' — accepted" "$(printf '| Codex | — | ⚪️ not installed. |\n%s' "$PG_EN")" 0
 pd_case OK "(у) indented row '  | Codex | … |' — accepted" "$(printf '  | Codex | — | ⚪️ not installed |\n%s' "$PG_EN")" 0
 out=$(pa_decide "$(printf '# P\n\n%s\n' "$PG_RU")" 0 2>&1)
 case "$out" in NO*Codex*) ok "decide: no Codex section and no marker — refused, the reason names Codex" ;; *) bad "decide: plain refusal" "$out" ;; esac

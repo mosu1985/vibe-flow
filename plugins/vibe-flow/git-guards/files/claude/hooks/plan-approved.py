@@ -29,13 +29,16 @@ import time
 GATE_LINE = re.compile(r"(?m)^(Гейт: ✅ пройден|Gate: ✅ passed)")
 CODEX_SECTION = re.compile(r"(?m)^## .*Codex")
 CODEX_ROW = re.compile(r"^[ \t]*\|[ \t]*Codex\b", re.I)
-# ⚪ U+26AA, optional U+FE0F; ❌ U+274C. No \s: a marker never spans lines.
+# ⚪ U+26AA, optional U+FE0F; ❌ U+274C (written as escapes: an editor may drop
+# U+FE0F). No \s: a marker never spans lines. The marker must END the status cell:
+# «… решение пользователя не получено» is not a decision.
 NOT_INSTALLED = re.compile(
-    "⚪️?[ \t]*(?:\\(?(?:critic|codex|критик)\\)?[ \t]+)*(?:not installed|не установлен)",
+    "⚪️?[ \t]*(?:\\(?(?:critic|codex|критик)\\)?[ \t]+)*"
+    "(?:not installed|не установлен)[ \t.]*$",
     re.I)
 USER_DECISION = re.compile(
     "❌[ \t]*(?:unavailable|недоступен)[ \t]*[—–-][ \t]*"
-    "(?:user.?s decision|решение пользователя)",
+    "(?:user.?s decision|решение пользователя)[ \t.]*$",
     re.I)
 
 STANDARD_DIRS = ("~/.local/bin", "~/.codex/packages/standalone/current/bin",
