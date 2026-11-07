@@ -495,7 +495,7 @@ out=$(bash "$D/scripts/wt-new.sh" d4 2>&1); rc=$?
 [ $rc -eq 0 ] && echo "$out" | grep -q 'package install failed' && echo "$out" | grep -q 'dev server not started' \
     && [ ! -f "$TMP/d-wt/d4/.wt-dev.pid" ] \
     && ok "install failed — said so, dev server not started" || bad "install failure" "$out"
-: > "$D/.gitguards.conf"
+printf 'GG_DEPS_INSTALL_CMD="mkdir -p node_modules && touch node_modules/.installed"\n' > "$D/.gitguards.conf"
 
 # A branch already merged on GitHub must not block a new task with the same topic
 git -C "$D" -c core.hooksPath=/dev/null checkout -q -b wt/payment-flow
@@ -508,7 +508,7 @@ out=$(bash "$D/scripts/wt-new.sh" payment-fix 2>&1); rc=$?
 
 git -C "$D" config protocol.ext.allow always
 git -C "$D" remote set-url origin "ext::sleep 30"     # a remote that hangs
-printf 'GG_FETCH_TIMEOUT=2\n' > "$D/.gitguards.conf"
+printf 'GG_FETCH_TIMEOUT=2\nGG_DEPS_INSTALL_CMD="mkdir -p node_modules && touch node_modules/.installed"\n' > "$D/.gitguards.conf"
 T0=$SECONDS; out=$(bash "$D/scripts/wt-new.sh" d5 2>&1); rc=$?; T=$((SECONDS-T0))
 [ $rc -eq 0 ] && [ $T -lt 15 ] && echo "$out" | grep -q 'within 2s' \
     && ok "hanging fetch is cut off by the timeout (${T}s)" || bad "fetch timeout" "rc=$rc ${T}s $out"

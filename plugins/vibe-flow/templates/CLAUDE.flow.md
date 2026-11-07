@@ -45,7 +45,7 @@ At the start of planning any task — use the `/vibe-flow:architecture-map` skil
 
 ## 🌳 Work in your own worktree — CRITICAL
 A task that changes anything is done in a separate git worktree, not in the project's main folder: that way parallel sessions and agents do not mix their edits.
-1. **Start of the task:** first `scripts/wt-status.sh` — check whether it has already been started (then `scripts/wt-new.sh --resume <branch>`). Otherwise `scripts/wt-new.sh <task-name>` → branch `wt/<name>`, directory `<project>-wt/<name>`, its own dev port
+1. **Start of the task:** first `scripts/wt-status.sh` — check whether it has already been started (then `scripts/wt-new.sh --resume <branch>`). Otherwise `scripts/wt-new.sh <task-name>` → branch `wt/<name>`, directory `<project>-wt/<name>`, its own dev port. It may install packages for minutes — run it with an extended Bash timeout (up to 600000 ms)
 2. **Where to work — pick one way and tell the user:**
    - 💡 **A new session in the worktree (simplest):** ask the user to open a new terminal and run `cd <path-to-worktree> && claude` — everything there works like in a normal project
    - **In the current session:** the worktree directory lies outside the project, and `cd` does not persist between commands. So EVERY command is `cd "<worktree>" && …`, files are addressed by absolute paths inside the worktree, and **every agent** gets the line `Worktree: <absolute path>` in its prompt. An agent without that line will stop and ask when there are several worktrees

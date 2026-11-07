@@ -192,6 +192,14 @@ else
     git -C "$ROOT" worktree add --no-track -b "$BRANCH" "$DIR" "$BASE"
 fi
 
+# 🔴 Copied BEFORE the package install below: if a long install is interrupted
+# (Ctrl-C, a tool timeout), the tree must not be left without its env files.
+# .env.local is not tracked by git — a fresh tree lacks it, the API returns
+# 500, and the cause looks like broken code.
+for f in .env.local .env.development.local; do
+    [ -f "$MAIN/$f" ] && [ ! -f "$DIR/$f" ] && cp "$MAIN/$f" "$DIR/$f" && echo "  $f copied"
+done
+
 # ── Dependencies ─────────────────────────────────────────────────────────────
 # node_modules: a CLONE via APFS clonefile (`cp -Rc`), NOT a symlink. Turbopack
 # (Next 16) rejects a symlink pointing outside the project directory and fails
@@ -240,6 +248,7 @@ if [ -d "$MAIN/node_modules" ] && [ -f "$DIR/package.json" ]; then
         fi
         DEPSLOG="$(git -C "$DIR" rev-parse --absolute-git-dir)/wt-deps.log"
         echo "  ⚠️  $WHY — installing packages in the tree: $INSTALL"
+        echo "     ⏳ this can take a few minutes (log: $DEPSLOG)"
         if ( cd "$DIR" && sh -c "$INSTALL" ) < /dev/null > "$DEPSLOG" 2>&1; then
             echo "  node_modules → fresh install"
         else
@@ -252,12 +261,6 @@ if [ -d "$MAIN/node_modules" ] && [ -f "$DIR/package.json" ]; then
         fi
     fi
 fi
-
-# 🔴 .env.local is not tracked by git — a fresh tree lacks it, the API returns
-# 500, and the cause looks like broken code.
-for f in .env.local .env.development.local; do
-    [ -f "$MAIN/$f" ] && [ ! -f "$DIR/$f" ] && cp "$MAIN/$f" "$DIR/$f" && echo "  $f copied"
-done
 
 bash "$ROOT/scripts/install-git-guards.sh" >/dev/null
 
