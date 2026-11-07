@@ -15,16 +15,22 @@
 //
 // Usage (from the project root):
 //   node wait-vercel-deploy.mjs --sha <sha|prefix> [--target production|preview]
-//        [--max-seconds 540] [--interval 15]
+//        [--max-seconds 540] [--interval 15] [--domain a.com,*.b.com]
 //   Without --sha it takes `git rev-parse origin/<protected branch>` (default origin/main,
 //   otherwise origin/master).
 //
-// Exit codes: 0 READY · 1 ERROR/CANCELED/BLOCKED · 2 final state not reached
-//                · 3 deploy not found · 4 no access/token/link · 5 invalid arguments
+// 🔴 READY is not "live": for --target production, after READY the script checks that the production
+// domains (--domain, or all non-redirect production domains of the project) are aliased to THIS deploy.
+// A newer production deploy holding them → SUPERSEDED (exit 0); not aliased in time → NOT_LIVE (exit 6).
+// Build wait and domain check share ONE deadline (--max-seconds); every request timeout comes from
+// what is left of it.
+//
+// Exit codes: 0 READY/SUPERSEDED · 1 ERROR/CANCELED/BLOCKED · 2 final state or aliases not confirmed in time
+//                · 3 deploy not found · 4 no access/token/link · 5 invalid arguments · 6 NOT_LIVE
 
 import { execSync } from "node:child_process";
 import {
-  api, readProjectLink, readToken, teamQuery, LINK_HELP, TOKEN_HELP,
+  api, readProjectLink, readToken, teamQuery, LINK_HELP, TOKEN_HELP, evaluateProdAliases, parseDomains,
 } from "./_vercel-common.mjs";
 
 // BLOCKED — the build did not start at all (for example, Vercel did not recognize the commit author).
@@ -40,7 +46,7 @@ function defaultSha() {
 }
 
 function parseArgs(argv) {
-  const args = { target: "production", maxSeconds: 540, interval: 15, sha: null };
+  const args = { target: "production", maxSeconds: 540, interval: 15, sha: null, domains: null };
   for (let i = 0; i < argv.length; i++) {
     const key = argv[i];
     const val = argv[i + 1];
@@ -48,6 +54,11 @@ function parseArgs(argv) {
     else if (key === "--target") { args.target = val; i++; }
     else if (key === "--max-seconds") { args.maxSeconds = Number(val); i++; }
     else if (key === "--interval") { args.interval = Number(val); i++; }
+    else if (key === "--domain") {
+      const parsed = parseDomains(val);
+      if (parsed.error) return { error: parsed.error };
+      args.domains = parsed.domains; i++;
+    }
     else { return { error: `unknown argument ${key}` }; }
   }
   if (!["production", "preview"].includes(args.target)) return { error: "--target: production | preview" };
@@ -65,11 +76,11 @@ function parseArgs(argv) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function findDeployment(ctx, sha, target) {
+async function findDeployment(ctx, sha, target, timeoutMs) {
   // A full SHA is a filter on the Vercel side (finds an old deploy too); a prefix — a window of
   // the last 100, where the comparison is by the start of the string.
   const filter = sha.length === 40 ? `&meta-githubCommitSha=${sha}&limit=20` : "&limit=100";
-  const data = await api(ctx.token, `/v6/deployments?projectId=${ctx.projectId}${ctx.team}${filter}`);
+  const data = await api(ctx.token, `/v6/deployments?projectId=${ctx.projectId}${ctx.team}${filter}`, timeoutMs);
   const matches = (data.deployments ?? []).filter((d) => {
     const commit = String(d.meta?.githubCommitSha ?? "").toLowerCase();
     const isProd = d.target === "production";
@@ -130,7 +141,8 @@ async function main() {
 
   while (Date.now() < deadline) {
     try {
-      deployment = await findDeployment(ctx, args.sha, args.target);
+      // Request timeout = what is left of the shared budget (at most 20 s, at least 1 s).
+      deployment = await findDeployment(ctx, args.sha, args.target, Math.min(20_000, Math.max(1000, deadline - Date.now())));
     } catch (e) {
       if (e.auth) report({ status: "AUTH_ERROR", error: `${e.message}: the token is invalid or has no access to the project — issue a new token and update VERCEL_TOKEN` }, 4);
       // A network failure on one iteration is no reason to give up, try again on the next.
@@ -184,7 +196,38 @@ async function main() {
   }
 
   const id = deployment.uid ?? deployment.id;
-  if (deployment.state === "READY") report(summary, 0);
+  if (deployment.state === "READY") {
+    // Only production is checked: a preview has no production domains.
+    if (args.target !== "production") report(summary, 0);
+    const check = await evaluateProdAliases({
+      get: (path, timeoutMs) => api(token, path, timeoutMs),
+      teamQ: tq,
+      projectId,
+      deploymentId: id,
+      createdAt: deployment.created,
+      domains: args.domains,
+      deadline,
+      interval: args.interval * 1000,
+    }).catch((e) => {
+      if (e.auth) report({ ...summary, status: "AUTH_ERROR", error: `${e.message}: the token has no access to project domains/aliases` }, 4);
+      throw e;
+    });
+    const withAliases = { ...summary, prodAliases: check.prodAliases, waitedSeconds: Math.round((Date.now() - startedAt) / 1000) };
+    if (check.outcome === "live") report({ ...withAliases, live: true }, 0);
+    if (check.outcome === "NO_DOMAINS") {
+      report({ ...withAliases, live: null, note: "no production domains to verify (the project has none without a redirect)" }, 0);
+    }
+    if (check.outcome === "SUPERSEDED") {
+      report({ ...withAliases, status: "SUPERSEDED", buildStatus: "READY", live: false,
+        note: "the build is READY, but a newer production deploy already holds the domains — this commit is not live, and that is expected" }, 0);
+    }
+    if (check.outcome === "NOT_LIVE") {
+      report({ ...withAliases, status: "NOT_LIVE", buildStatus: "READY", live: false, ...(check.error ? { error: check.error } : {}),
+        note: "the build is READY, but the production domains are still not aliased to it — check the Vercel dashboard (domain assignment, skip-build or ignored build step, promotion)" }, 6);
+    }
+    report({ ...withAliases, live: null, ...(check.error ? { error: check.error } : {}),
+      note: "READY, but the aliases could not be confirmed in the remaining time — run again" }, 2);
+  }
   if (deployment.state === "BLOCKED") report({ ...summary, blocked: await blockReason(ctx, id) }, 1);
   if (deployment.state === "ERROR" || deployment.state === "CANCELED") {
     report({ ...summary, buildErrors: await buildErrors(ctx, id) }, 1);
