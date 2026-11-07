@@ -198,7 +198,14 @@ Rounds used: 2 of 3
 | C3 | medium | ... | ✅ accepted | folded into "Risks" |
 ```
 
-If Codex is not installed — the critic row is `⚪️ not installed`, and the gate goes by the Claude reviewers. If it is unavailable and the user decided to proceed without it — the row is `❌ unavailable — user's decision`, and that decision is recorded in the plan.
+If Codex is not installed — the critic row is `⚪️ not installed`, and the gate goes by the Claude reviewers. If it is unavailable and the user decided to proceed without it — the row is `❌ unavailable — user's decision`, and that decision is recorded in the plan:
+
+```
+| Codex (external critic) | — | ⚪️ not installed |
+| Codex (external critic) | — | ❌ unavailable — user's decision |
+```
+
+🔴 **Write these markers literally, in the status cell of the `| Codex …` row.** The `plan-approved` hook reads them there (and only there — a marker quoted in prose does not count) to write the plan approval mark without a `## … Codex` section. Writing `⚪️ not installed` while Codex IS installed gets no mark: the hook checks — run the critic instead.
 
 The score stays in the table: it shows how good the plan is, and a low number with a passed gate is a legitimate reason to tell the user "it passed, but here are the points where the plan is weak".
 

@@ -75,13 +75,15 @@ You **do not critique the plan yourself** and **do not decide** whether to accep
 ## 0️⃣ Step 0 — is Codex there
 
 ```bash
-command -v codex && codex --version
-codex login status; echo "rc=$?"
+# The same places the plan-approved hook looks in — so the agent and the hook agree
+# on "installed" (a GUI-launched Claude Code may have a trimmed PATH).
+CODEX=$(command -v codex || for d in ~/.local/bin ~/.codex/packages/standalone/current/bin /opt/homebrew/bin /usr/local/bin ~/.npm-global/bin; do [ -x "$d/codex" ] && echo "$d/codex" && break; done)
+[ -n "$CODEX" ] && "$CODEX" --version && { "$CODEX" login status; echo "rc=$?"; }
 ```
 
 | Result | What to return |
 |---|---|
-| `codex` is not in `PATH` | `⚪️ Critic not installed` — and the hint: "To install: `npm i -g @openai/codex` (or `brew install codex`), then `codex login`. Until it is installed, the gate goes by the Claude reviewers". **Finish.** |
+| `codex` is found neither on `PATH` nor in those locations | `⚪️ Critic not installed` — and the hint: "To install: `npm i -g @openai/codex` (or `brew install codex`), then `codex login`. Until it is installed, the gate goes by the Claude reviewers". **Finish.** |
 | Installed, `codex login status` exits non-zero / "Not logged in" | `❌ Critic unavailable: Codex is not logged in` + "run `codex login`". **Finish.** |
 | Installed and logged in | Continue |
 
