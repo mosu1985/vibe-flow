@@ -458,6 +458,61 @@ out=$(bash "$W/scripts/wt-new.sh" t6 2>&1); rc=$?
 [ $rc -eq 0 ] && [ "$(git -C "$W" rev-parse wt/t6)" = "$LOCALSHA" ] \
     && ok "no origin — base is local main" || bad "no origin" "$out"
 
+echo "== wt-new: dependencies, early fetch, fetch timeout =="
+DO="$TMP/do.git"; git init -q --bare "$DO"
+D="$TMP/d"; mkrepo "$D"; git -C "$D" branch -M main
+echo '{"name":"t","version":"1.0.0"}' > "$D/package.json"; echo '{"lock":1}' > "$D/package-lock.json"
+git -C "$D" add -A; git -C "$D" commit -qm deps
+git -C "$D" remote add origin "$DO"; git -C "$D" push -q origin main 2>/dev/null
+mkdir -p "$D/scripts" "$D/githooks"
+cp "$ROOT/scripts/wt-new.sh" "$ROOT/scripts/install-git-guards.sh" "$ROOT/scripts/wt-status.sh" "$D/scripts/"
+cp "$ROOT/githooks/pre-commit" "$ROOT/githooks/pre-push" "$D/githooks/"
+# Install = a marker, so the test needs neither npm nor the network
+printf 'GG_DEPS_INSTALL_CMD="mkdir -p node_modules && touch node_modules/.installed"\n' > "$D/.gitguards.conf"
+mkdir -p "$D/node_modules"; echo main > "$D/node_modules/from-main"
+touch "$D/node_modules/.package-lock.json"             # packages installed after the lockfile
+DN="$TMP/dn"; git clone -q "$DO" "$DN" 2>/dev/null
+git -C "$DN" config user.email t@t; git -C "$DN" config user.name t
+
+out=$(bash "$D/scripts/wt-new.sh" d1 2>&1); rc=$?
+[ $rc -eq 0 ] && [ -f "$TMP/d-wt/d1/node_modules/from-main" ] && [ ! -f "$TMP/d-wt/d1/node_modules/.installed" ] \
+    && ok "fresh packages in main — node_modules cloned" || bad "clone of fresh packages" "$out"
+
+touch -t 202001010000 "$D/node_modules/.package-lock.json"   # main pulled without reinstalling
+out=$(bash "$D/scripts/wt-new.sh" d2 2>&1); rc=$?
+[ $rc -eq 0 ] && [ -f "$TMP/d-wt/d2/node_modules/.installed" ] && [ ! -f "$TMP/d-wt/d2/node_modules/from-main" ] \
+    && echo "$out" | grep -q 'outdated too' \
+    && ok "main's packages older than its lockfile — fresh install in the tree" || bad "stale main packages" "$out"
+touch "$D/node_modules/.package-lock.json"
+
+echo '{"lock":2}' > "$DN/package-lock.json"; git -C "$DN" commit -qam "deps bump"; git -C "$DN" push -q origin HEAD:main 2>/dev/null
+out=$(bash "$D/scripts/wt-new.sh" d3 2>&1); rc=$?
+[ $rc -eq 0 ] && [ -f "$TMP/d-wt/d3/node_modules/.installed" ] && echo "$out" | grep -q 'differs between' \
+    && ok "lockfile changed on GitHub — fresh install, not a clone" || bad "lockfile differs" "$out"
+
+printf 'GG_DEPS_INSTALL_CMD="exit 3"\nGG_DEV_CMD="sleep 30"\n' > "$D/.gitguards.conf"
+out=$(bash "$D/scripts/wt-new.sh" d4 2>&1); rc=$?
+[ $rc -eq 0 ] && echo "$out" | grep -q 'package install failed' && echo "$out" | grep -q 'dev server not started' \
+    && [ ! -f "$TMP/d-wt/d4/.wt-dev.pid" ] \
+    && ok "install failed — said so, dev server not started" || bad "install failure" "$out"
+: > "$D/.gitguards.conf"
+
+# A branch already merged on GitHub must not block a new task with the same topic
+git -C "$D" -c core.hooksPath=/dev/null checkout -q -b wt/payment-flow
+echo pay > "$D/b.txt"; git -C "$D" -c core.hooksPath=/dev/null commit -qam pay
+git -C "$D" -c core.hooksPath=/dev/null push -q origin wt/payment-flow 2>/dev/null; git -C "$D" checkout -q main
+git -C "$DN" fetch -q origin; git -C "$DN" merge -q --no-edit origin/wt/payment-flow; git -C "$DN" push -q origin HEAD:main 2>/dev/null
+out=$(bash "$D/scripts/wt-new.sh" payment-fix 2>&1); rc=$?
+[ $rc -eq 0 ] && ! echo "$out" | grep -q 'already been started' \
+    && ok "merged on GitHub — not \"already started\" (fetch runs before the check)" || bad "early fetch" "$out"
+
+git -C "$D" config protocol.ext.allow always
+git -C "$D" remote set-url origin "ext::sleep 30"     # a remote that hangs
+printf 'GG_FETCH_TIMEOUT=2\n' > "$D/.gitguards.conf"
+T0=$SECONDS; out=$(bash "$D/scripts/wt-new.sh" d5 2>&1); rc=$?; T=$((SECONDS-T0))
+[ $rc -eq 0 ] && [ $T -lt 15 ] && echo "$out" | grep -q 'within 2s' \
+    && ok "hanging fetch is cut off by the timeout (${T}s)" || bad "fetch timeout" "rc=$rc ${T}s $out"
+
 # Project tests: scripts/git-guards/test-local-*.sh. They are added by the project
 # itself, not by install.sh — so updating the kit does not overwrite them. All helpers are visible to them.
 for t in "$ROOT"/scripts/git-guards/test-local-*.sh; do

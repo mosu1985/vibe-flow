@@ -26,6 +26,8 @@ GG_DEV_PORT_ENV="PORT"
 GG_DEV_READY_GLOBS=""
 GG_DEV_READY_WAIT=80
 GG_PROTECTED="main"
+GG_FETCH_TIMEOUT=20
+GG_DEPS_INSTALL_CMD=""
 [ -f "$ROOT/.gitguards.conf" ] && . "$ROOT/.gitguards.conf"
 
 RESUME=""; FORCE_NEW=0; NAME=""; BASE=""
@@ -44,6 +46,33 @@ fi
 MAIN=$(git -C "$ROOT" worktree list --porcelain | awk '/^worktree /{print substr($0, 10); exit}')
 WT_BASE="${GG_WT_DIR:-$(dirname "$MAIN")/$(basename "$MAIN")-wt}"
 case "$WT_BASE" in /*) ;; *) WT_BASE="$(cd "$MAIN" && cd "$(dirname "$WT_BASE")" && pwd)/$(basename "$WT_BASE")" ;; esac
+
+# ── Refresh the protected branch from origin ─────────────────────────────────
+# Done BEFORE the "already started" check below: that check compares branches with
+# origin/<protected>, and against a stale ref, branches already merged on GitHub
+# look unfinished and block the new task for nothing.
+# 🔴 macOS has no `timeout`, and git has no connect timeout for HTTP: on a dead
+# route fetch hung for the system TCP timeout (~75 s). Hence our own watchdog.
+run_with_timeout() {
+    local secs="$1"; shift
+    "$@" &
+    local pid=$!
+    ( sleep "$secs"; kill -TERM "$pid" 2>/dev/null ) </dev/null >/dev/null 2>&1 &
+    local watcher=$!
+    local rc=0
+    wait "$pid" || rc=$?
+    kill "$watcher" 2>/dev/null || true
+    return "$rc"
+}
+if [ -z "$RESUME" ] && git -C "$ROOT" remote get-url origin >/dev/null 2>&1; then
+    # No interactive password prompt and no endless wait on a dead network:
+    # on failure, warn and work with what is available locally.
+    if ! run_with_timeout "$GG_FETCH_TIMEOUT" env GIT_TERMINAL_PROMPT=0 \
+            git -C "$ROOT" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=20 \
+            fetch -q origin "$GG_PROTECTED" 2>/dev/null; then
+        echo "  ⚠️  could not update origin/$GG_PROTECTED within ${GG_FETCH_TIMEOUT}s (no network, no access, or no such branch on origin) — using what is available locally"
+    fi
+fi
 
 # ── Resuming work in progress ────────────────────────────────────────────────
 # 🔴 Without this mode there was NO WAY back into an abandoned branch: the script
@@ -117,13 +146,6 @@ has_ref() { git -C "$ROOT" rev-parse --verify -q "$1^{commit}" >/dev/null 2>&1; 
 short() { git -C "$ROOT" rev-parse --short "$1"; }
 if [ -z "$RESUME" ] && [ -z "$BASE" ]; then
     LOCAL="refs/heads/$GG_PROTECTED"; REMOTE="refs/remotes/origin/$GG_PROTECTED"
-    if git -C "$ROOT" remote get-url origin >/dev/null 2>&1; then
-        # No interactive password prompt and no endless wait on a dead network:
-        # on failure, warn and work with what is available locally.
-        GIT_TERMINAL_PROMPT=0 git -C "$ROOT" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=20 \
-            fetch -q origin "$GG_PROTECTED" 2>/dev/null \
-            || echo "  ⚠️  could not update origin/$GG_PROTECTED (no network, no access, or no such branch on origin) — using what is available locally"
-    fi
     if has_ref "$REMOTE" && has_ref "$LOCAL"; then
         if git -C "$ROOT" merge-base --is-ancestor "$REMOTE" "$LOCAL"; then
             BASE="$LOCAL"       # the local branch is the same or ahead (unpushed commits)
@@ -174,12 +196,31 @@ fi
 # node_modules: a CLONE via APFS clonefile (`cp -Rc`), NOT a symlink. Turbopack
 # (Next 16) rejects a symlink pointing outside the project directory and fails
 # immediately. A clone takes seconds and uses almost no space (copy-on-write).
-if [ -d "$MAIN/node_modules" ]; then
-    LOCK_SAME=1
-    for f in package-lock.json pnpm-lock.yaml yarn.lock bun.lockb; do
-        [ -f "$MAIN/$f" ] && { cmp -s "$MAIN/$f" "$DIR/$f" || LOCK_SAME=0; }
+# 🔴 A clone is only correct when the main folder's packages match the tree's
+# lockfile. Since the tree is based on fresh origin/main and the main folder may
+# lag behind, two traps appear: the lockfile changed on GitHub (the tree got no
+# node_modules at all and the dev server started for nothing), or the main folder
+# was pulled without reinstalling (an up-to-date lockfile over outdated packages).
+# In both cases packages are installed in the tree instead of cloned.
+DEPS_OK=1
+if [ -d "$MAIN/node_modules" ] && [ -f "$DIR/package.json" ]; then
+    LOCK=""; MARKER=""; STALE_MAIN=0
+    for pair in package-lock.json:.package-lock.json pnpm-lock.yaml:.modules.yaml \
+                yarn.lock:.yarn-integrity bun.lock: bun.lockb:; do
+        f="${pair%%:*}"
+        [ -f "$DIR/$f" ] || [ -f "$MAIN/$f" ] || continue
+        LOCK="$f"
+        if [ -n "${pair#*:}" ]; then MARKER="node_modules/${pair#*:}"; fi
+        break
     done
-    if [ "$LOCK_SAME" = "1" ]; then
+    WHY=""
+    if [ -n "$LOCK" ] && ! cmp -s "$MAIN/$LOCK" "$DIR/$LOCK"; then
+        WHY="$LOCK differs between the main folder and the tree"
+    elif [ -n "$MARKER" ] && [ -f "$MAIN/$MARKER" ] && [ "$MAIN/$LOCK" -nt "$MAIN/$MARKER" ]; then
+        WHY="the main folder's node_modules is older than its $LOCK"
+        STALE_MAIN=1
+    fi
+    if [ -z "$WHY" ]; then
         if cp -Rc "$MAIN/node_modules" "$DIR/node_modules" 2>/dev/null; then
             echo "  node_modules → APFS clone (copy-on-write)"
         else
@@ -187,7 +228,28 @@ if [ -d "$MAIN/node_modules" ]; then
             echo "  node_modules → regular copy (clonefile unavailable)"
         fi
     else
-        echo "  ⚠️  lockfile differs — a separate package install is needed in $DIR"
+        INSTALL="$GG_DEPS_INSTALL_CMD"
+        if [ -z "$INSTALL" ]; then
+            case "$LOCK" in
+                package-lock.json)  INSTALL="npm ci" ;;
+                pnpm-lock.yaml)     INSTALL="pnpm install --frozen-lockfile" ;;
+                yarn.lock)          INSTALL="yarn install --frozen-lockfile" ;;
+                bun.lock|bun.lockb) INSTALL="bun install --frozen-lockfile" ;;
+                *)                  INSTALL="npm install" ;;
+            esac
+        fi
+        DEPSLOG="$(git -C "$DIR" rev-parse --absolute-git-dir)/wt-deps.log"
+        echo "  ⚠️  $WHY — installing packages in the tree: $INSTALL"
+        if ( cd "$DIR" && sh -c "$INSTALL" ) < /dev/null > "$DEPSLOG" 2>&1; then
+            echo "  node_modules → fresh install"
+        else
+            DEPS_OK=0
+            echo "  🔴 package install failed (log: $DEPSLOG)"
+            echo "     install manually: cd \"$DIR\" && $INSTALL"
+        fi
+        if [ "$STALE_MAIN" = "1" ]; then
+            echo "  ℹ️  the main folder's packages are outdated too: (cd \"$MAIN\" && $INSTALL)"
+        fi
     fi
 fi
 
@@ -201,7 +263,9 @@ bash "$ROOT/scripts/install-git-guards.sh" >/dev/null
 
 # ── Own dev server on a free port ────────────────────────────────────────────
 PORT=""
-if [ -n "$GG_DEV_CMD" ]; then
+if [ -n "$GG_DEV_CMD" ] && [ "$DEPS_OK" = "0" ]; then
+    echo "  ⚠️  dev server not started: packages are not installed (see above)"
+elif [ -n "$GG_DEV_CMD" ]; then
     PORT="$GG_DEV_PORT_BASE"
     while lsof -i:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; do PORT=$((PORT+1)); done
     printf '%s\n' ".wt-dev.pid" \

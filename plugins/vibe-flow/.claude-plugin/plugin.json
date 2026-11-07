@@ -1,6 +1,6 @@
 {
   "name": "vibe-flow",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "vibe-flow core: plan reviewers, agent crew orchestration, the release-gate final check, git-guards and CLAUDE.md rules for any project.",
   "author": {
     "name": "Vibe Coding School"
