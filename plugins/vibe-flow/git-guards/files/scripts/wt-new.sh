@@ -62,6 +62,7 @@ run_with_timeout() {
     local rc=0
     wait "$pid" || rc=$?
     kill "$watcher" 2>/dev/null || true
+    wait "$watcher" 2>/dev/null || true   # otherwise bash prints "Terminated: 15"
     return "$rc"
 }
 if [ -z "$RESUME" ] && git -C "$ROOT" remote get-url origin >/dev/null 2>&1; then
