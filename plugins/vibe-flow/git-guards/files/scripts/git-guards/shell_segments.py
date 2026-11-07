@@ -440,9 +440,12 @@ def _advance_candidates(candidates, op, kind, text):
     if not stripped:
         return candidates
     toks = safe_split(stripped)
-    if not toks or toks[0] != 'cd':
+    # `pushd dir` changes the cwd exactly like `cd dir`; `popd` goes back to a
+    # directory we do not track → unknown.
+    if not toks or toks[0] not in ('cd', 'pushd', 'popd'):
         return candidates
-    arg = toks[1] if len(toks) >= 2 else None
+    args = [t for t in toks[1:] if not t.startswith('-') or t == '-']
+    arg = None if toks[0] == 'popd' else (args[0] if args else None)
     advanced = _dedup_candidates([_resolve_cd_arg(c, arg) for c in candidates])
     if op == '||':
         # the right side of || MAY not run (D8): union "as it was" (the RHS

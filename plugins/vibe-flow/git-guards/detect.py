@@ -46,6 +46,9 @@ elif "typescript" in deps:
 else:
     type_cmd = ""
 
+# ── plan gate: a new migration needs a plan too (if the project has them) ──
+plan_new = "supabase/migrations/*.sql" if os.path.isdir(os.path.join(root, "supabase", "migrations")) else ""
+
 # ── dev server and readiness marker ─────────────────────────────────────────
 dev_cmd = "npm run dev" if "dev" in scripts else ""
 if "next" in deps:
@@ -88,7 +91,17 @@ GG_REQUIRE_DEV_READY=%(require_ready)s
 
 # Part of the dev process name — so wt-done.sh can kill an orphaned server
 GG_DEV_PROC_MATCH=%(proc)s
-""" % {
+
+# Plan gate (pre-push, policy read from origin): commits of these types — and
+# commits adding a file matching GG_PLAN_REQUIRED_NEW — need "Plan: <name>.md"
+# with an approved plan. Space-separated.
+GG_PLAN_REQUIRED_TYPES="feat"
+GG_PLAN_GATE="githooks/plan-gate.sh"
+%(plan_new)s
+# Tests right after an edit (PostToolUse hook post-edit-tests.sh). Policy read from
+# origin. Optional: GG_POST_EDIT_CMD (default GG_TEST_CMD), GG_POST_EDIT_GLOBS,
+# GG_POST_EDIT_DEBOUNCE=20, GG_POST_EDIT_REPO_GAP=10, GG_POST_EDIT_MAX=90 (seconds).
+%(post_edit)s""" % {
     "protected": protected,
     "test_cmd": json.dumps(test_cmd, ensure_ascii=False),
     "type_cmd": json.dumps(type_cmd, ensure_ascii=False),
@@ -96,5 +109,7 @@ GG_DEV_PROC_MATCH=%(proc)s
     "ready": json.dumps(ready, ensure_ascii=False),
     "require_ready": require_ready,
     "proc": json.dumps(proc, ensure_ascii=False),
+    "plan_new": ("GG_PLAN_REQUIRED_NEW=%s\n" % json.dumps(plan_new)) if plan_new else "",
+    "post_edit": "GG_POST_EDIT_TESTS=1\n" if test_cmd else "",
 }
 sys.stdout.write(out)

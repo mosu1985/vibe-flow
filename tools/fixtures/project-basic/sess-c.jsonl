@@ -1,0 +1,1 @@
+{"type":"assistant","timestamp":"2026-10-20T10:01:00.000Z","message":{"id":"k1","model":"claude-opus-5-5","usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":1,"cache_creation_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0}},"content":[{"type":"tool_use","name":"Skill","input":{"skill":"plan-mode-review"}}]}}

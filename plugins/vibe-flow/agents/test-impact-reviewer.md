@@ -144,6 +144,9 @@ Read `${CLAUDE_PLUGIN_ROOT}/skills/plan-mode-review/rubric.md`. Typical deductio
 ### ➕ Add new tests
 - `<test path>` (new) — for `<function>`. Cases: base "<...>", edge "<0/null/empty>", "<typical error>".
 
+### 🔴 Red first
+- Test file: `<path>` · case: "<name>" · why it fails now: <what the current code returns versus what the test expects>
+
 ### Recommendation
 <1–2 lines. The final decision is the user's: update / add / both / skip.>
 
@@ -151,7 +154,9 @@ Read `${CLAUDE_PLUGIN_ROOT}/skills/plan-mode-review/rubric.md`. Typical deductio
 Deductions: <weight and reason for each> | none
 ```
 
-Remove empty subheadings. 🔴 The "blocking: N" line is mandatory even at zero: the main session counts the gate from it.
+Remove empty subheadings, **except `### 🔴 Red first`**: see the next rule.
+
+🔴 **`### 🔴 Red first` is mandatory** for a bug fix in logic or a new pure function: the test file, the case, and **why it fails on the current code** (the test is written first, run, and seen red before any implementation). It is not required for integration tests that write to a shared database. If the plan needs it and the subsection is missing → a finding **`high`** with the scenario "the bug returns unnoticed: nothing proves the test catches it, so a test that was green from the start passes review". Be honest in the plan: the rule is not checked automatically, it rests on this review and on the `vibe-flow:test-runner` report. 🔴 The "blocking: N" line is mandatory even at zero: the main session counts the gate from it.
 
 ### 6. Return a summary in chat
 1–3 lines: verdict, how many tests to update / add, score and number of blocking findings. Do not duplicate the whole checklist; it is already in the plan file.

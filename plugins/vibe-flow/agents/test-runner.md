@@ -67,6 +67,8 @@ Command: <what you ran; "detected myself" if not from GG_TEST_CMD>
 Ran: <list of test files>
 ```
 
+**The plan has a `### 🔴 Red first` subsection** (read the plan file if its path was given) → add one line to the report: `🔴 Red run: recorded` (the red output of the new test before the implementation is in the session or in the report) / `🔴 Red run: NOT recorded` (no evidence that the test was ever seen failing). You cannot prove it from the code alone, so do not guess: mark "recorded" only when you see the red output, otherwise "not recorded". This rule is not enforced automatically: your line is one of its two supports (the other is the plan review).
+
 **Some red (DO NOT FIX, only report):**
 ```
 ❌ TESTS FAILED: M failed / N passed
@@ -88,4 +90,5 @@ If it is a pure function (deterministic input→output), tests are worth adding.
 - **NEVER** edit code or tests (you have no Edit/Write, on purpose).
 - **NEVER** "fit" a test to the code's current behavior.
 - A red test is a report, not a reason to bypass the check (`--no-verify`, skipping tests).
+- If the post-edit tests hook returned `block` with a test tail, that is the same signal: report it, never advise bypassing it.
 - The report must be readable in 5 seconds.

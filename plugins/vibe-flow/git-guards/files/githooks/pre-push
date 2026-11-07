@@ -15,9 +15,20 @@ ZERO="0000000000000000000000000000000000000000"
 
 # ── Project configuration ────────────────────────────────────────────────────
 # The hook lives OUTSIDE the working tree and serves any stack, so everything
-# project-specific comes from .gitguards.conf at the tree root. No file — the
-# defaults below apply: the parallel-session barriers always work, and the type
-# check is silently skipped (nothing to check with).
+# project-specific comes from .gitguards.conf. No file — the defaults below
+# apply: the parallel-session barriers always work, and the type check is
+# silently skipped (nothing to check with).
+#
+# 🔴 The tree's .gitguards.conf is NOT sourced (H1′). It is a file on disk of the
+# tree being pushed — uncommitted, editable in one step: `exit 0` there ended the
+# hook before every barrier, `GG_PROTECTED="wt/x"` made the release-gate diff
+# empty, `git() { :; }` replaced git in every check. All policy (protected branch,
+# release-gate, plan gate, type check command, dev-ready globs) is POLICY: it is
+# read line by line, never evaluated, from the protected branch on origin.
+# Protected branch: refs/remotes/origin/HEAD → origin/main → origin/master; no
+# origin remote, or the branch has no config yet → the main working tree's
+# .gitguards.conf. The same parser lives in githooks/plan-gate.sh and
+# scripts/git-safe-commit.sh — keep the three in sync.
 GG_PROTECTED="main"
 GG_TYPECHECK_CMD=""
 GG_DEV_READY_GLOBS=""
@@ -26,38 +37,91 @@ GG_DEV_CMD=""
 GG_RELEASE_GATE=0
 GG_RELEASE_GATE_SKIP="*.md"
 GG_TOP=$(git rev-parse --show-toplevel 2>/dev/null || echo .)
-if [ -f "$GG_TOP/.gitguards.conf" ]; then . "$GG_TOP/.gitguards.conf"; fi
+MAIN_CONF="$(dirname "$COMMON")/.gitguards.conf"
+
+# Value of the LAST `KEY=` line of stdin; one pair of quotes removed, nothing evaluated.
+conf_raw() {
+    _l=$(grep -E "^$1=" | tail -n 1 | tr -d '\r')
+    [ -n "$_l" ] || return 1
+    _v=${_l#*=}
+    case "$_v" in
+        \"*) _r=${_v#\"}; case "$_r" in *\"*) _v=${_r%%\"*} ;; *) return 1 ;; esac ;;
+        \'*) _r=${_v#\'}; case "$_r" in *\'*) _v=${_r%%\'*} ;; *) return 1 ;; esac ;;
+        *) _v=${_v%%[[:space:]]#*}; _v=$(printf '%s' "$_v" | sed 's/[[:space:]]*$//') ;;
+    esac
+    printf '%s\n' "$_v"
+}
+# Allowlist of policy keys and the shape of each value.
+conf_valid() {
+    case "$1" in
+        GG_RELEASE_GATE|GG_REQUIRE_DEV_READY)
+            printf '%s' "$2" | grep -Eq '^[01]$' ;;
+        GG_PROTECTED)
+            printf '%s' "$2" | grep -Eq '^[A-Za-z0-9._/-]+$' && ! printf '%s' "$2" | grep -q '\.\.' ;;
+        GG_RELEASE_GATE_SKIP)
+            printf '%s' "$2" | grep -Eq '^[][A-Za-z0-9_.*?/ -]*$' ;;
+        # Goes into `find` unquoted — words only, none starting with - ( or ! (L5).
+        GG_DEV_READY_GLOBS)
+            printf '%s' "$2" | grep -Eq '^([A-Za-z0-9_./*][A-Za-z0-9_./*-]*( [A-Za-z0-9_./*][A-Za-z0-9_./*-]*)*)?$' ;;
+        GG_TYPECHECK_CMD|GG_DEV_CMD)
+            ! printf '%s' "$2" | LC_ALL=C grep -q '[[:cntrl:]]' ;;
+        *) return 1 ;;
+    esac
+}
+conf_get() {
+    _cv=$(conf_raw "$1") || return 1
+    conf_valid "$1" "$_cv" || { echo "⚠️  pre-push: ignoring invalid $1 in the policy" >&2; return 1; }
+    printf '%s\n' "$_cv"
+}
+
+# Protected branch.
+PROT_REF=""
+if git remote get-url origin >/dev/null 2>&1; then
+    _h=$(git symbolic-ref -q refs/remotes/origin/HEAD 2>/dev/null) || _h=""
+    for _b in "${_h#refs/remotes/origin/}" main master; do
+        [ -n "$_b" ] || continue
+        if git rev-parse -q --verify "refs/remotes/origin/$_b^{commit}" >/dev/null 2>&1; then
+            GG_PROTECTED=$_b; PROT_REF="refs/remotes/origin/$_b"; break
+        fi
+    done
+elif [ -f "$MAIN_CONF" ]; then
+    GG_PROTECTED=$(conf_get GG_PROTECTED < "$MAIN_CONF") || GG_PROTECTED="main"
+fi
+
+# Policy text: the protected branch's config on origin, else the main working tree's.
+POLICY=""
+POLICY_FROM_ORIGIN=0
+if [ -n "$PROT_REF" ] && POLICY=$(git show "$PROT_REF:.gitguards.conf" 2>/dev/null); then
+    POLICY_FROM_ORIGIN=1
+elif [ -f "$MAIN_CONF" ]; then
+    POLICY=$(cat "$MAIN_CONF")
+fi
+pol() { printf '%s\n' "$POLICY" | conf_get "$1"; }
+
+GG_TYPECHECK_CMD=$(pol GG_TYPECHECK_CMD) || GG_TYPECHECK_CMD=""
+GG_DEV_READY_GLOBS=$(pol GG_DEV_READY_GLOBS) || GG_DEV_READY_GLOBS=""
+GG_REQUIRE_DEV_READY=$(pol GG_REQUIRE_DEV_READY) || GG_REQUIRE_DEV_READY=0
+# Only printed in a hint, never run — the tree's value is fine as a fallback.
+GG_DEV_CMD=$(pol GG_DEV_CMD) \
+    || GG_DEV_CMD=$( [ -f "$GG_TOP/.gitguards.conf" ] && conf_get GG_DEV_CMD < "$GG_TOP/.gitguards.conf" ) \
+    || GG_DEV_CMD=""
 
 # The release-gate is enabled by repository POLICY, not by the branch: a tree from
-# an old base does not know about the new flag in its .gitguards.conf and would skip
-# the gate. So both the protected branch's flag on the remote and the main working
-# tree's flag count — enabled anywhere means enabled (fail-closed). The remote branch
-# is the primary source: the main working tree's checkout can be hundreds of commits behind.
-gate_on() { grep -qE '^GG_RELEASE_GATE="?1"?' 2>/dev/null; }
-if [ "$GG_RELEASE_GATE" != "1" ]; then
-    if git show "refs/remotes/${1:-origin}/$GG_PROTECTED:.gitguards.conf" 2>/dev/null | gate_on; then
-        GG_RELEASE_GATE=1
-    elif [ -f "$(dirname "$COMMON")/.gitguards.conf" ] \
-         && gate_on < "$(dirname "$COMMON")/.gitguards.conf"; then
-        GG_RELEASE_GATE=1
-    fi
+# an old base does not know about the new flag. Enabled on origin OR in the main
+# working tree means enabled (fail-closed: this key can only tighten). The remote
+# branch is the primary source: the main tree's checkout can be far behind.
+[ "$(pol GG_RELEASE_GATE 2>/dev/null)" = "1" ] && GG_RELEASE_GATE=1
+if [ "$GG_RELEASE_GATE" != "1" ] && [ -f "$MAIN_CONF" ] \
+   && [ "$(conf_get GG_RELEASE_GATE < "$MAIN_CONF" 2>/dev/null)" = "1" ]; then
+    GG_RELEASE_GATE=1
 fi
 # The "no review needed" masks are policy too, not a branch setting: a branch that
-# set GG_RELEASE_GATE_SKIP="*" for itself would ship without review. They come from
-# the protected branch's config on the remote, or, if absent, from the main working tree.
-skip_policy() {
-    grep -E '^GG_RELEASE_GATE_SKIP=' | tail -1 \
-        | sed -e 's/^GG_RELEASE_GATE_SKIP=//' -e "s/^[\"']//" -e "s/[\"']\$//"
-}
-GG_RELEASE_GATE_SKIP="*.md"
-if gpol=$(git show "refs/remotes/${1:-origin}/$GG_PROTECTED:.gitguards.conf" 2>/dev/null); then
-    if printf '%s\n' "$gpol" | grep -q '^GG_RELEASE_GATE_SKIP='; then
-        GG_RELEASE_GATE_SKIP=$(printf '%s\n' "$gpol" | skip_policy)
-    fi
-elif [ -f "$(dirname "$COMMON")/.gitguards.conf" ] \
-     && grep -q '^GG_RELEASE_GATE_SKIP=' "$(dirname "$COMMON")/.gitguards.conf"; then
-    GG_RELEASE_GATE_SKIP=$(skip_policy < "$(dirname "$COMMON")/.gitguards.conf")
-fi
+# set GG_RELEASE_GATE_SKIP="*" for itself would ship without review.
+GG_RELEASE_GATE_SKIP=$(pol GG_RELEASE_GATE_SKIP) || GG_RELEASE_GATE_SKIP="*.md"
+
+# Plan gate (githooks/plan-gate.sh): on when the policy names any of its keys.
+PLAN_GATE_ON=0
+printf '%s\n' "$POLICY" | grep -Eq '^GG_PLAN_(GATE|REQUIRED_TYPES|REQUIRED_NEW)=' && PLAN_GATE_ON=1
 GATE_DIR="$COMMON/monitorex-locks/release-gate"
 
 PROTECTED="$GG_PROTECTED"
@@ -186,6 +250,24 @@ while read -r local_ref local_sha remote_ref remote_sha; do
         [ -z "$ACTOR" ] && echo "    your own commits do not count as yours)"
         [ -z "$ACTOR" ] && echo ""
         exit 1
+    fi
+
+    # --- plan gate: a feature or a new migration needs an approved plan ---
+    # Same commit set as the ownership check: commits not yet on the remote the
+    # push goes to (--remotes=<this remote>, C1 — a local `git remote add -f snapshot .`
+    # does not exempt anything). The logic is the INSTALLED githooks/plan-gate.sh,
+    # put next to this hook from the protected branch on origin.
+    if [ "$PLAN_GATE_ON" = "1" ] && [ -n "$new_commits" ]; then
+        PG="$COMMON/monitorex-hooks/plan-gate.sh"
+        if [ ! -f "$PG" ]; then
+            echo ""
+            echo "🔴 plan gate: the policy turns it on, but $PG is not installed."
+            echo "   Reinstall the hooks from the main working tree: bash scripts/install-git-guards.sh"
+            echo ""
+            exit 1
+        fi
+        # shellcheck disable=SC2086 # one SHA per word
+        sh "$PG" --commits $new_commits || exit 1
     fi
 
     # --- release-gate: an Opus reviewer has read the branch diff ---

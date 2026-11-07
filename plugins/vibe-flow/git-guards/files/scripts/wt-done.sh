@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # wt-done.sh <name> [--force] — close a workspace: stop dev, close the Orca
-# tabs, remove the directory, delete the branch.
+# tabs, remove the directory, delete the branch, release the GitHub issue claimed
+# for this branch by `wt-new.sh --issue N`.
 #
 # WHY A SEPARATE SCRIPT. `wt-new.sh` starts dev, but `git worktree remove`
 # knows nothing about it: the directory disappears while the process lives on as
@@ -191,6 +192,23 @@ fi
 # ── 3. Remove the directory and the branch ───────────────────────────────────
 git -C "$ROOT" worktree remove --force "$DIR" && echo "  directory removed: $DIR"
 git -C "$ROOT" branch -D "$BRANCH" 2>/dev/null | sed 's/^/  /' || echo "  no local branch $BRANCH"
+
+# ── 3b. Release the issue claim of this branch (wt-new.sh --issue N) ─────────
+# Only claims whose owner names THIS branch: someone else's claim is not touched.
+# The script removes it itself — sessions are not allowed to write into
+# monitorex-locks/ directly.
+COMMON=$(git -C "$ROOT" rev-parse --git-common-dir 2>/dev/null || true)
+case "$COMMON" in /*|'') ;; *) COMMON="$(cd "$ROOT/$COMMON" 2>/dev/null && pwd -P || true)" ;; esac
+if [ -n "$COMMON" ]; then
+    for c in "$COMMON"/monitorex-locks/claims/issue-*; do
+        [ -d "$c" ] || continue
+        n="${c##*/issue-}"
+        case "$n" in ''|*[!0-9]*) continue ;; esac
+        if [ "$(sed -n 's/^branch=//p' "$c/owner" 2>/dev/null | head -1)" = "$BRANCH" ]; then
+            rm -rf "$c" && echo "  issue #$n released"
+        fi
+    done
+fi
 
 # ── 4. Hint about the remote branch ──────────────────────────────────────────
 # 🔴 `git push origin --delete` is blocked by pre-push: a deletion sends a zero

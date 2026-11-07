@@ -47,18 +47,84 @@ done
 # The test runner depends on the stack, so it comes from .gitguards.conf. Empty
 # means tests are not run, and that is said out loud: a silent skip is
 # indistinguishable from a green run.
-GG_TEST_CMD=""
-GG_PLAN_GATE=""
+#
+# 🔴 Not `source`d (H1): the tree's .gitguards.conf is an uncommitted file this
+# session edits itself — `GG_PLAN_GATE=""` or a test command that sets a bypass
+# mark would go straight through. Keys are read line by line, never evaluated,
+# from the protected branch on origin (origin/HEAD → main → master), else from
+# the main working tree. Same parser as githooks/pre-push and plan-gate.sh.
 GG_TOP=$(git rev-parse --show-toplevel 2>/dev/null || echo .)
-if [ -f "$GG_TOP/.gitguards.conf" ]; then . "$GG_TOP/.gitguards.conf"; fi
+GG_COMMON=$(git rev-parse --git-common-dir)
+case "$GG_COMMON" in /*) ;; *) GG_COMMON="$(cd "$GG_COMMON" && pwd -P)" ;; esac
+GG_MAIN_CONF="$(dirname "$GG_COMMON")/.gitguards.conf"
+
+conf_raw() {       # $1 key; stdin — config text; value of the last KEY= line
+    local l v r
+    l=$(grep -E "^$1=" | tail -n 1 | tr -d '\r')
+    [ -n "$l" ] || return 1
+    v=${l#*=}
+    case "$v" in
+        \"*) r=${v#\"}; case "$r" in *\"*) v=${r%%\"*} ;; *) return 1 ;; esac ;;
+        \'*) r=${v#\'}; case "$r" in *\'*) v=${r%%\'*} ;; *) return 1 ;; esac ;;
+        *) v=${v%%[[:space:]]#*}; v=$(printf '%s' "$v" | sed 's/[[:space:]]*$//') ;;
+    esac
+    printf '%s\n' "$v"
+}
+conf_get() {       # allowlisted keys only, value shape checked
+    local v
+    v=$(conf_raw "$1") || return 1
+    case "$1" in
+        GG_TEST_CMD) ! printf '%s' "$v" | LC_ALL=C grep -q '[[:cntrl:]]' ;;
+        GG_PLAN_GATE) printf '%s' "$v" | grep -Eq '^([A-Za-z0-9_][A-Za-z0-9_./-]*)?$' \
+                          && ! printf '%s' "$v" | grep -q '\.\.' ;;
+        *) false ;;
+    esac || { warn "ignoring invalid $1 in .gitguards.conf"; return 1; }
+    printf '%s\n' "$v"
+}
+
+GG_PROT_REF=""
+if git remote get-url origin >/dev/null 2>&1; then
+    gg_h=$(git symbolic-ref -q refs/remotes/origin/HEAD 2>/dev/null) || gg_h=""
+    for gg_b in "${gg_h#refs/remotes/origin/}" main master; do
+        [ -n "$gg_b" ] || continue
+        if git rev-parse -q --verify "refs/remotes/origin/$gg_b^{commit}" >/dev/null 2>&1; then
+            GG_PROT_REF="refs/remotes/origin/$gg_b"; break
+        fi
+    done
+fi
+GG_POLICY=""
+if [ -n "$GG_PROT_REF" ] && GG_POLICY=$(git show "$GG_PROT_REF:.gitguards.conf" 2>/dev/null); then
+    :
+elif [ -f "$GG_MAIN_CONF" ]; then
+    GG_POLICY=$(cat "$GG_MAIN_CONF")
+fi
+GG_TEST_CMD=$(printf '%s\n' "$GG_POLICY" | conf_get GG_TEST_CMD) || GG_TEST_CMD=""
+GG_PLAN_GATE=$(printf '%s\n' "$GG_POLICY" | conf_get GG_PLAN_GATE) || GG_PLAN_GATE=""
 
 # ─── 0b. Project gate — checked BEFORE tests and locks ──────────────────────
 # A script from .gitguards.conf decides whether this message and these paths may
-# be committed (for example: a feature only with an approved plan). It receives
-# the message file and the paths; a non-zero exit code means rejection. Empty — no gate.
+# be committed (for example: a feature only with an approved plan —
+# githooks/plan-gate.sh). It receives the message file and the paths; a non-zero
+# exit code means rejection. Empty — no gate.
+#
+# 🔴 This check is EARLY and NOT authoritative: this script lives in the branch,
+# and the branch can drop the call. It exists for fast feedback before the commit
+# is made. The authoritative plan gate is the installed pre-push.
+# The script itself is taken from the protected branch on origin; from the tree
+# only when origin does not have it yet (no origin, or the gate is being added).
+# New files are judged by history (HEAD and the protected branch), not by the
+# index: the isolated index does not exist yet at this point.
 if [ -n "$GG_PLAN_GATE" ]; then
-    [ -f "$GG_TOP/$GG_PLAN_GATE" ] || die "GG_PLAN_GATE points to a nonexistent file: $GG_PLAN_GATE"
-    bash "$GG_TOP/$GG_PLAN_GATE" "$MSGFILE" "$@" || exit 1
+    if [ -n "$GG_PROT_REF" ] && git cat-file -e "$GG_PROT_REF:$GG_PLAN_GATE" 2>/dev/null; then
+        gg_gate=$(mktemp -t monitorex-gate)
+        git show "$GG_PROT_REF:$GG_PLAN_GATE" > "$gg_gate"
+        gg_rc=0; bash "$gg_gate" "$MSGFILE" "$@" || gg_rc=$?
+        rm -f "$gg_gate"
+        [ "$gg_rc" = 0 ] || exit 1
+    else
+        [ -f "$GG_TOP/$GG_PLAN_GATE" ] || die "GG_PLAN_GATE points to a nonexistent file: $GG_PLAN_GATE"
+        bash "$GG_TOP/$GG_PLAN_GATE" "$MSGFILE" "$@" || exit 1
+    fi
 fi
 
 # ─── 1. Tests — BEFORE any locks ────────────────────────────────────────────

@@ -3,7 +3,7 @@
 #
 # Does the mechanical part, the same for everyone:
 #   1. git-guards: worktree/commit scripts, git hooks, Claude Code PreToolUse hook
-#   2. the release-gate final-gate flag in .gitguards.conf
+#   2. the release-gate final-gate flag, the plan-gate and post-edit-tests keys in .gitguards.conf
 #   3. the vibe-flow rules block in CLAUDE.md (between markers — refreshed on re-run)
 # The "Project" section in CLAUDE.md (stack, commands) is written by the model per the init skill —
 # it needs judgment, not a template.
@@ -54,6 +54,21 @@ else
     } >> "$CONF"
     echo "  + GG_RELEASE_GATE=$GATE"
 fi
+
+# ── 2b. plan gate and post-edit tests ───────────────────────────────────────
+# Each key is appended only if it is not set yet — a re-run never duplicates it.
+printf '\n\033[1m%s\033[0m\n' "vibe-flow: plan gate and post-edit tests"
+add_conf_key() { # key value comment
+    if grep -q "^$1=" "$CONF" 2>/dev/null; then
+        echo "  = $1 already set: $(grep "^$1=" "$CONF" | tail -1)"
+    else
+        { echo ""; echo "# $3"; echo "$1=\"$2\""; } >> "$CONF"
+        echo "  + $1=\"$2\""
+    fi
+}
+add_conf_key GG_PLAN_REQUIRED_TYPES "feat" "Commit types that must carry a 'Plan: <file>.md' trailer (checked by pre-push)."
+add_conf_key GG_PLAN_GATE "githooks/plan-gate.sh" "Plan-gate script run by pre-push."
+add_conf_key GG_POST_EDIT_TESTS "1" "Run related tests after each file edit (PostToolUse hook). 0 — disable."
 
 # ── 3. CLAUDE.md ─────────────────────────────────────────────────────────────
 printf '\n\033[1m%s\033[0m\n' "vibe-flow: CLAUDE.md"
