@@ -53,6 +53,7 @@ MAX_CEILING = HOOK_TIMEOUT - 15
 TAIL_LINES = 40
 MAX_QUEUE = 50
 NO_TESTS = ("No test files found", "No tests found")
+CMD_NOT_FOUND = re.compile(r": command not found\s*$")
 
 # ── secret masking: whatever a test prints ends up in the session transcript ──
 SECRET_PATTERNS = [re.compile(p) for p in (
@@ -404,6 +405,11 @@ def main():
 
     # A run cut off by the ceiling is not a verdict about the code: no block.
     if timed_out or rc == 0 or any(s in output for s in NO_TESTS):
+        return
+    # The runner itself is missing or not executable (a tree whose package install
+    # failed, a command not on PATH) — infrastructure, not a red test: silent, like
+    # every other infrastructure failure. The shell says so in its first lines.
+    if rc in (126, 127) or any(CMD_NOT_FOUND.search(ln) for ln in output.split("\n")[:5]):
         return
     lines = clean_text(output).rstrip().split("\n")
     tail = "\n".join(ln[:500] for ln in lines[-TAIL_LINES:])

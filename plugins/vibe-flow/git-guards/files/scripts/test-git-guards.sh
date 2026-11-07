@@ -567,9 +567,27 @@ cmp -s "$PGH/pre-push" "$TMP/pg-pp-origin" && ok "installer: a pre-push edited i
 git -C "$PGR" checkout -q -- githooks/pre-push
 PGB="$TMP/pg-norefs"; git clone -q "$PGO" "$PGB" 2>/dev/null
 git -C "$PGB" update-ref -d refs/remotes/origin/main; git -C "$PGB" update-ref -d refs/remotes/origin/HEAD 2>/dev/null
+mkdir -p "$PGB/.git/monitorex-hooks"; printf '#!/bin/sh\n# installed earlier\n' > "$PGB/.git/monitorex-hooks/pre-push"
+git -C "$PGB" config core.hooksPath /some/where
 out=$(bash "$PGB/scripts/install-git-guards.sh" 2>&1); rc=$?
-[ $rc -ne 0 ] && echo "$out" | grep -q 'git fetch' && ok "installer: origin without fetched refs — refused with a git fetch hint" \
-    || bad "installer: origin without refs" "$out"
+[ $rc -eq 0 ] && echo "$out" | grep -q 'hooks left untouched' && grep -q 'installed earlier' "$PGB/.git/monitorex-hooks/pre-push" \
+    && [ "$(git -C "$PGB" config core.hooksPath)" = /some/where ] && [ ! -f "$PGB/.git/monitorex-hooks/.source" ] \
+    && ok "installer: origin without fetched refs — rc 0, warning, hooks and hooksPath untouched (no tree fallback)" \
+    || bad "installer: origin without refs" "rc=$rc $out"
+# CI checkout of a PR: only refs/remotes/pull/N/merge, depth 1, no origin/main
+PGCI="$TMP/pg-ci"; git init -q "$PGCI"; git -C "$PGCI" remote add origin "$PGO"
+git -C "$PGCI" fetch -q --depth=1 origin "+$(git -C "$PGR" rev-parse origin/main):refs/remotes/pull/1/merge" 2>/dev/null
+git -C "$PGCI" checkout -q --detach refs/remotes/pull/1/merge 2>/dev/null
+out=$(bash "$PGCI/scripts/install-git-guards.sh" 2>&1); rc=$?
+[ $rc -eq 0 ] && echo "$out" | grep -q 'hooks left untouched' && [ ! -e "$PGCI/.git/monitorex-hooks" ] \
+    && [ -z "$(git -C "$PGCI" config core.hooksPath)" ] \
+    && ok "installer: CI PR checkout (pull/1/merge, depth 1) — rc 0, nothing installed, npm ci survives" \
+    || bad "installer: CI PR checkout" "rc=$rc $out"
+# no origin remote at all — bootstrap from the tree, never a failure
+PGNO="$TMP/pg-noorigin"; git clone -q "$PGO" "$PGNO" 2>/dev/null; git -C "$PGNO" remote remove origin
+out=$(bash "$PGNO/scripts/install-git-guards.sh" 2>&1); rc=$?
+[ $rc -eq 0 ] && grep -q '^bootstrap@' "$PGNO/.git/monitorex-hooks/.source" 2>/dev/null \
+    && ok "installer: no origin remote — rc 0, bootstrap from the tree" || bad "installer: no origin remote" "rc=$rc $out"
 PGO2="$TMP/pg-o2.git"; git init -q --bare "$PGO2"; git -C "$PGO2" symbolic-ref HEAD refs/heads/main
 PGC="$TMP/pg-boot"; git init -q "$PGC"; git -C "$PGC" symbolic-ref HEAD refs/heads/main
 git -C "$PGC" config user.email t@t; git -C "$PGC" config user.name t
@@ -1131,6 +1149,17 @@ NOPY="$TMP/nopy"; mkdir -p "$NOPY"; for t in cat dirname; do ln -sf "$(command -
 pe_reset
 out=$(pe_in "$PE/lib/a.ts" "$PE" | env PATH="$NOPY" CLAUDE_PROJECT_DIR="$PE" /bin/bash "$CH/post-edit-tests.sh"); rc=$?
 [ $rc -eq 0 ] && [ -z "$out" ] && [ "$(pe_calls)" = 0 ] && ok "no python3 — exit 0, silent" || bad "no python3" "rc=$rc $out"
+
+# The runner is missing (a tree whose package install failed): infrastructure, not a red test
+printf 'GG_POST_EDIT_TESTS=1\nGG_TEST_CMD="%s/no-such-runner"\nGG_POST_EDIT_DEBOUNCE=0\nGG_POST_EDIT_REPO_GAP=0\n' "$TMP" > "$PE/.gitguards.conf"
+pe_reset; out=$(pe_run "$PE/lib/a.ts"); rc=$?
+[ $rc -eq 0 ] && [ -z "$out" ] && ok "runner not found (rc 127) — silent, no block" || bad "runner not found" "rc=$rc $out"
+printf 'GG_POST_EDIT_TESTS=1\nGG_TEST_CMD="no-such-runner-xyz"\nGG_POST_EDIT_DEBOUNCE=0\nGG_POST_EDIT_REPO_GAP=0\n' > "$PE/.gitguards.conf"
+pe_reset; out=$(pe_run "$PE/lib/a.ts")
+[ -z "$out" ] && ok "runner not on PATH ('command not found') — silent" || bad "command not found" "$out"
+pe_conf; pe_reset; echo red > "$PEMODE"; out=$(pe_run "$PE/lib/a.ts")
+printf '%s' "$out" | grep -q '"decision": "block"' && ok "red run after that — still a block" || bad "red after missing runner" "$out"
+echo green > "$PEMODE"
 
 if [ -n "$KIT" ]; then
     echo "== settings-merge.py, detect.py, install.sh: idempotent =="

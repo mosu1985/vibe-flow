@@ -13,8 +13,9 @@
 # barriers — for every tree at once. Now every copy installs what is on origin,
 # and a hook edited in a branch reaches the installed set only after it is merged.
 #   Protected branch: refs/remotes/origin/HEAD → origin/main → origin/master.
-#   origin configured but none of those fetched → refuse (`git fetch`), do NOT
-#     fall back to the tree.
+#   origin configured but none of those fetched (CI checkouts of a PR) → warn and
+#     exit 0 WITHOUT touching anything — no fallback to the tree, no failure of
+#     `npm ci` via `prepare`.
 #   No origin remote, or origin has no githooks/pre-push yet (the project is just
 #     adopting git-guards) → BOOTSTRAP from this working tree, said out loud.
 #   githooks/pre-push exists on origin but cannot be read → error, not bootstrap.
@@ -40,9 +41,15 @@ if g remote get-url origin >/dev/null 2>&1; then
             PROT_REF="refs/remotes/origin/$b"; break
         fi
     done
-    [ -n "$PROT_REF" ] || die "origin is configured, but none of origin/HEAD, origin/main, origin/master is fetched.
-   The hooks are installed from the protected branch on origin, not from this tree.
-   Run: git fetch origin   — then run this script again."
+    if [ -z "$PROT_REF" ]; then
+        # CI and build machines (actions/checkout fetches only refs/remotes/pull/N/merge,
+        # depth 1) land here, and this script runs from `prepare` — failing would
+        # break `npm ci` on every PR. Do NOT fall back to the tree either (H4):
+        # leave the installed hooks and core.hooksPath alone. The PreToolUse guard
+        # compares the installed hooks with origin before every push anyway.
+        echo "⚠️  install-git-guards: origin/<protected branch> is not fetched — hooks left untouched (normal in CI/builds; the guard checks the hooks before push; locally: git fetch origin and run again)" >&2
+        exit 0
+    fi
 fi
 
 MODE=bootstrap
