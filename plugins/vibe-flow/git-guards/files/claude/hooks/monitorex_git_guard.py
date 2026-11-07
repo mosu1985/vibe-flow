@@ -77,6 +77,9 @@ the installed hooks. Each of them is a human's or a reviewer's decision.
 If you really need to change something there (e.g. .git/info/exclude), ask the user."""
 
 
+SERVICE_LIKE = re.compile(r"monitorex-|/worktrees/", re.I)
+
+
 def write_guard():
     ti = payload.get("tool_input") or {}
     path = ti.get("file_path") or ti.get("notebook_path")
@@ -90,12 +93,17 @@ def write_guard():
         for cand in (absp, real):
             if any(part.casefold() == ".git" for part in cand.split(os.sep)):
                 deny(GIT_DIR_DENY)
+        # No project, or the project is not a repository (git answered normally
+        # with a non-zero code) → there is no common dir to protect: allow. The
+        # `.git` component check above still applies.
         proj = os.environ.get("CLAUDE_PROJECT_DIR") or ""
         if not proj or not os.path.isdir(proj):
-            raise RuntimeError("CLAUDE_PROJECT_DIR is not set")
-        common = git_out(proj, "rev-parse", "--git-common-dir")
-        if not common:
-            raise RuntimeError("no git common dir for the project")
+            allow()
+        res = subprocess.run(("git", "-C", proj, "rev-parse", "--git-common-dir"),
+                             capture_output=True, text=True, timeout=5)
+        common = res.stdout.strip()
+        if res.returncode != 0 or not common:
+            allow()
         if not os.path.isabs(common):
             common = os.path.join(proj, common)
         common = os.path.realpath(common)
@@ -103,9 +111,12 @@ def write_guard():
             deny(GIT_DIR_DENY)
     except SystemExit:
         raise
-    except Exception as e:  # fail-closed
-        deny(f"🔴 The guard could not check this write ({type(e).__name__}: {e}), so it refuses. "
-             "Ask the user if the write is needed.")
+    except Exception as e:
+        # Fail-closed only where it matters: an exception or timeout while the path
+        # looks like the guard's state. Anything else is not worth blocking work.
+        if SERVICE_LIKE.search(str(path)):
+            deny(f"🔴 The guard could not check this write ({type(e).__name__}), and the path looks "
+                 "like the guard's own state, so it refuses. Ask the user if the write is needed.")
     allow()
 
 
@@ -341,22 +352,58 @@ Bypassing review is a human decision: ask the user to run
 # Not only the release-gate verdict: CONFIRM (target=feat lets a feature through
 # the plan gate), allow-push, allow-delete, plan-approved/, claims/ and the
 # installed hooks in monitorex-hooks/ (rolling a hook back, `chmod -x`) are all
-# decisions the model must not make. Scripts that legitimately write there
-# (git-safe-commit.sh, git-lock.sh, wt-new.sh, install-git-guards.sh …) are run by
-# name and are not caught: only commands that write by themselves are.
-BARRIER = re.compile(r"monitorex-(?:locks|hooks)\b|monitorex-[*?\[{]")
-BARRIER_WRITERS = WRITERS | {"rm", "rmdir", "unlink", "chmod", "chown", "chflags",
-                             "truncate", "mkdir", "xattr", "mkfifo"}
-IN_PLACE_EDITORS = {"sed", "gsed", "perl"}
+# decisions the model must not make.
+#
+# 🔴 An ALLOWLIST, not a list of writers (HIGH-1′). Every closed list of "commands
+# that write" had holes: `sort -o`, `curl -o`, `wget -O`, `tar -C`, `vim -es`,
+# `git -C <dir> archive -o`… So: a segment that names these directories in its
+# words, or runs inside them (cd/pushd/cwd), is rejected unless its command is a
+# plain reader (READERS). The readers' own output redirections are still checked.
+# Scripts of the kit run by name (wt-new.sh, git-lock.sh, release-gate.sh status…)
+# carry no such path in their words and are not affected.
+# `monitorex-$X` too: a name built from a variable is still the guard's directory.
+BARRIER = re.compile(r"monitorex-(?:locks|hooks)\b|monitorex-[*?\[{$]")
+# git's remote-tracking refs on disk: rewriting them by hand forges origin/<protected>.
+FS_REFS = re.compile(r"\.git/(?:refs/remotes|packed-refs)")
+# Ref NAMES in redirect targets (refs/remotes/… written by path relative to .git).
+REMOTE_REFS = re.compile(r"(?:^|/)refs/remotes(?:/|$)|packed-refs\b")
+READERS = {"ls", "cat", "head", "tail", "less", "more", "grep", "egrep", "fgrep", "rg",
+           "wc", "stat", "file", "readlink", "realpath", "du", "test", "[", "find",
+           "echo", "printf", "diff", "cmp", "shasum", "sha256sum", "md5", "md5sum",
+           "sed", "true", ":"}
+FIND_ACTIONS = re.compile(r"^-(?:delete|exec|execdir|ok|okdir|fprint\w*|fls)$")
+SED_WRITE = re.compile(r"(?:^|[;{}\s])[wWe](?:\s|$)")
+CD_WORDS = {"cd", "pushd", "popd"}
+SAFE_SINKS = {"/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty"}
+
+
+def read_word(seg: str, j: int) -> int:
+    """End index of the shell word starting at j (quotes and $(…) kept whole)."""
+    k, depth, wq, n = j, 0, None, len(seg)
+    while k < n:
+        ch = seg[k]
+        if wq:
+            if ch == wq:
+                wq = None
+        elif ch in "'\"":
+            wq = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            if depth == 0:
+                break
+            depth -= 1
+        elif depth == 0 and ch in " \t;|&<>":
+            break
+        k += 1
+    return k
 
 
 def redirect_targets(seg: str) -> list[str]:
     """Targets of output redirections (`>`, `>>`, `>|`, `&>`, `2>`), quotes kept.
 
     Quote-aware: `echo "a > b"` has no redirection. The target is one shell word,
-    `$(…)` included — `> "$(git rev-parse --git-common-dir)"/monitorex-locks/x`
-    used to slip past a plain regex at the space inside `$(…)`. `>&2` is an fd
-    duplication, not a file."""
+    `$(…)` included. `>&2` is an fd duplication, not a file."""
     out, i, n, q = [], 0, len(seg), None
     while i < n:
         c = seg[i]
@@ -380,23 +427,7 @@ def redirect_targets(seg: str) -> list[str]:
                 continue
             while j < n and seg[j] in " \t":
                 j += 1
-            k, depth, wq = j, 0, None
-            while k < n:
-                ch = seg[k]
-                if wq:
-                    if ch == wq:
-                        wq = None
-                elif ch in "'\"":
-                    wq = ch
-                elif ch == "(":
-                    depth += 1
-                elif ch == ")":
-                    if depth == 0:
-                        break
-                    depth -= 1
-                elif depth == 0 and ch in " \t;|&<>":
-                    break
-                k += 1
+            k = read_word(seg, j)
             out.append(seg[j:k])
             i = k
             continue
@@ -404,29 +435,110 @@ def redirect_targets(seg: str) -> list[str]:
     return out
 
 
-def barrier_write(d: dict) -> bool:
-    seg = d["segment"]
-    if any(BARRIER.search(t) for t in redirect_targets(seg)):
-        return True
-    words = command_words(seg)
-    if not words:
-        return False
+ASSIGN_HEAD = re.compile(r"\s*(?:(?:export|declare|typeset|local|readonly)\s+(?:-\w+\s+)*)?"
+                         r"([A-Za-z_][A-Za-z0-9_]*)=")
+ASSIGN_ONE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def split_assignments(seg: str) -> tuple[list[tuple[str, str]], str]:
+    """Leading `NAME=value` words (and export/declare …) → ([(name, value)], rest).
+    Values are read as whole shell words: shlex would tear `$(…)` apart."""
+    out, rest = [], seg.lstrip()
+    m = re.match(r"(?:export|declare|typeset|local|readonly)\s+(?:-\w+\s+)*", rest)
+    if m:
+        rest = rest[m.end():]
+    while True:
+        m = ASSIGN_ONE.match(rest)
+        if not m:
+            break
+        k = read_word(rest, m.end())
+        out.append((m.group(0)[:-1], rest[m.end():k]))
+        rest = rest[k:].lstrip()
+    return out, rest
+
+
+def guarded(text: str) -> bool:
+    return bool(BARRIER.search(text) or FS_REFS.search(text))
+
+
+def unquote(word: str) -> str:
+    return word.replace('"', "").replace("'", "")
+
+
+def tilde_kind(word: str) -> str:
+    """'abs' — /…, ~, ~/…, ~user/…; 'prev' — ~- (OLDPWD, unknown); 'rel' — the rest
+    (~+ and ~N are relative to the current directory stack)."""
+    w = unquote(word)
+    if w.startswith("/"):
+        return "abs"
+    if w.startswith("~-"):
+        return "prev"
+    if w.startswith("~+") or re.match(r"~[0-9]", w):
+        return "rel"
+    if w.startswith("~"):
+        return "abs"
+    return "rel"
+
+
+def is_reader(words: list[str]) -> bool:
     name = basename(words[0])
-    writer = name in BARRIER_WRITERS or (
-        name in IN_PLACE_EDITORS
-        and any(w == "--in-place" or w.startswith("--in-place=")
-                or (w.startswith("-") and not w.startswith("--") and "i" in w[1:])
-                for w in words[1:]))
-    if not writer:
+    if name not in READERS:
         return False
-    if any(BARRIER.search(w) for w in words[1:]):
-        return True
-    # `cd .git/monitorex-locks && rm CONFIRM`: the path is in the directory, not the word.
-    dirs = [c.get("cd_dir") or "" for c in d.get("cwd_candidates") or []] + [cwd]
-    return any(BARRIER.search(x) for x in dirs)
+    if name == "find":
+        return not any(FIND_ACTIONS.match(w) for w in words[1:])
+    if name == "sed":
+        return not any(w == "--in-place" or w.startswith("--in-place=")
+                       or (w.startswith("-") and not w.startswith("--") and "i" in w[1:])
+                       or SED_WRITE.search(w) for w in words[1:])
+    return True
 
 
-if any(barrier_write(d) for d in detail):
+def refs_var(text: str, names: set[str]) -> bool:
+    return any(re.search(r"\$\{?" + re.escape(n) + r"\b", text) for n in names)
+
+
+def barrier_violation() -> bool:
+    taint: set[str] = set()
+    ever_in = guarded(cwd)          # was the command ever inside the guard's dirs
+    sticky = guarded(cwd)           # an unresolvable cd into them: everything after runs there
+    for d in detail:
+        seg = d["segment"]
+        assigns, body = split_assignments(seg)
+        for name, value in assigns:
+            if guarded(value) or refs_var(value, taint):
+                taint.add(name)
+        in_dir = sticky or any(guarded(c.get("cd_dir") or "")
+                               for c in d.get("cwd_candidates") or [])
+        ever_in = ever_in or in_dir
+        # 1. Output redirections of ANY command.
+        for t in redirect_targets(body):
+            if unquote(t) in SAFE_SINKS:
+                continue
+            kind = tilde_kind(t)
+            if (guarded(t) or REMOTE_REFS.search(t) or refs_var(t, taint)
+                    or (in_dir and kind == "rel") or (ever_in and kind == "prev")):
+                return True
+        if not body.strip():
+            continue
+        words = command_words(body)
+        if not words:
+            continue
+        name = basename(words[0])
+        if name in CD_WORDS:
+            arg = next((w for w in words[1:] if not w.startswith("-")), "")
+            if guarded(body) or refs_var(body, taint):
+                if "$" in arg or "`" in arg:
+                    sticky = True
+                ever_in = True
+            continue
+        # 2. Naming the guard's dirs (or running inside them) — readers only.
+        mentions = guarded(body) or refs_var(body, taint)
+        if (mentions or in_dir) and not is_reader(words):
+            return True
+    return False
+
+
+if barrier_violation():
     deny("""🔴 Writing into monitorex-locks/ or monitorex-hooks/ is forbidden to the model.
 
 These directories hold the guard's state: bypass marks (CONFIRM, allow-push,
@@ -556,6 +668,32 @@ def git_parts(seg: str):
     return conf, rest[0], rest[1:]
 
 
+REMOTE_REWRITE = {"set-head", "set-url", "rename", "remove", "rm", "set-branches"}
+CONFIG_SECTION_FLAGS = {"--rename-section", "--remove-section"}
+
+
+def config_written_keys(args: list[str]) -> list[str]:
+    """Keys a `git config …` call writes (empty for reads)."""
+    pos, i = [], 0
+    while i < len(args):
+        if args[i] in CONFIG_VALUE_FLAGS:
+            i += 2
+            continue
+        if not args[i].startswith("-"):
+            pos.append(args[i])
+        i += 1
+    flags = set(args)
+    if CONFIG_SECTION_FLAGS & flags:
+        return pos
+    if CONFIG_READ_FLAGS & flags or pos[:1] in (["get"], ["list"]):
+        return []
+    if pos[:1] in (["set"], ["unset"], ["rename-section"], ["remove-section"]):
+        return pos[1:2]
+    if CONFIG_WRITE_FLAGS & flags or len(pos) >= 2:
+        return pos[:1]
+    return []
+
+
 def remote_ref_tamper(seg: str) -> bool:
     parts = git_parts(seg)
     if not parts:
@@ -566,17 +704,63 @@ def remote_ref_tamper(seg: str) -> bool:
     if sub in FETCHERS and git_config_env(seg):
         return True
     pos = [a for a in args if not a.startswith("-")]
-    if sub == "remote" and pos[:1] == ["set-head"]:
+    # set-url/rename/remove repoint or drop origin; the next fetch then fills
+    # refs/remotes/origin/* from anywhere (LOW-5). `git remote add` stays allowed.
+    if sub == "remote" and pos[:1] and pos[0] in REMOTE_REWRITE:
+        # `set-head origin --auto` asks the remote itself — that is the honest value.
+        auto = pos[0] == "set-head" and ("-a" in args or "--auto" in args) and len(pos) <= 2
+        if not auto:
+            return True
+    if sub == "config" and any(REDIRECT_CONF.match(k) for k in config_written_keys(args)):
         return True
     if sub == "symbolic-ref":
         deleting = "-d" in args or "--delete" in args
         if pos and pos[0].startswith("refs/remotes/") and (deleting or len(pos) >= 2):
             return True
-    if sub == "update-ref" and any("refs/remotes/" in a for a in args):
+    if sub == "update-ref" and (any("refs/remotes/" in a for a in args) or "--stdin" in args):
         return True
-    if sub in ("fetch", "pull") and any(":refs/remotes/" in a for a in args):
-        return True
+    # git completes a refspec destination itself: `HEAD:remotes/origin/main` is
+    # refs/remotes/origin/main (MEDIUM-1).
+    if sub in ("fetch", "pull"):
+        for a in args:
+            if ":" in a and a.rsplit(":", 1)[1].lstrip("+").startswith(("refs/remotes/", "remotes/")):
+                return True
     return False
+
+
+ALIAS_CONF = re.compile(r"alias\.", re.I)
+GIT_WORD = re.compile(r"(?<![\w.-])git(?![\w.-])")
+
+
+def alias_or_eval(seg: str) -> bool:
+    """`git -c alias.p='push --no-verify' p` runs a command the guard never sees as
+    such; `eval "git push --no-verify"` hides it in a string. Both → deny."""
+    words = command_words(seg)
+    if words and basename(words[0]) == "eval":
+        return bool(GIT_WORD.search(seg))
+    parts = git_parts(seg)
+    if not parts:
+        return False
+    conf, sub, args = parts
+    if any(ALIAS_CONF.match(c) for c in conf):
+        return True
+    return sub == "config" and any(ALIAS_CONF.match(k) for k in config_written_keys(args))
+
+
+# `CMD="git push --no-verify"; eval $CMD` / `$CMD`: the command lives in a variable.
+NO_VERIFY_VALUE = re.compile(r"\bpush\b.*--no-verif", re.S)
+
+
+def no_verify_assignment(seg: str) -> bool:
+    assigns, _ = split_assignments(seg)
+    return any(NO_VERIFY_VALUE.search(v) for _, v in assigns)
+
+
+if any(alias_or_eval(s) or no_verify_assignment(s) for s in segments):
+    deny("""🔴 git aliases defined on the fly (`git -c alias.*=…`, `git config alias.*`), `eval` of a git command and a `push --no-verify` stored in a variable are forbidden to the model.
+
+The guard decides by the command it sees; an alias or an eval'd string hides the
+real one (e.g. `push --no-verify`). Run the git command directly.""")
 
 
 if any(remote_ref_tamper(s) for s in segments):
@@ -651,16 +835,16 @@ def protected_ref(where: str) -> str | None:
     return None
 
 
-def hooks_problems(where: str) -> list[str]:
+def hooks_problems(where: str) -> tuple[list[str], str]:
     import hashlib
     common = git(where, "rev-parse", "--git-common-dir")
     if not common:
-        return []                        # not a repository — git push fails by itself
+        return [], ""                    # not a repository — git push fails by itself
     if not os.path.isabs(common):
         common = os.path.join(where, common)
     ref = protected_ref(where)
     if not ref:
-        return []
+        return [], ""
     dest = os.path.realpath(os.path.join(common, "monitorex-hooks"))
     probs, on_origin = [], False
     for name in HOOK_SET:
@@ -683,7 +867,7 @@ def hooks_problems(where: str) -> list[str]:
         hp = os.path.realpath(hp if os.path.isabs(hp) else os.path.join(where, hp))
         if hp != dest:
             probs.append(f"core.hooksPath is not {dest}")
-    return probs
+    return probs, ref[len("refs/remotes/"):]
 
 
 def is_push(seg: str) -> bool:
@@ -699,15 +883,16 @@ for d in detail:
     for where in target_dirs(d.get("cwd_candidates"), c_dirs):
         where = where or os.environ.get("CLAUDE_PROJECT_DIR") or cwd
         try:
-            probs = hooks_problems(where) if os.path.isdir(where) else []
+            probs, oref = hooks_problems(where) if os.path.isdir(where) else ([], "")
         except Exception:
-            probs = []                   # infrastructure trouble: pre-push still runs
+            probs, oref = [], ""         # infrastructure trouble: pre-push still runs
         if probs:
             deny("🔴 The installed git hooks do not match origin — they are stale or were replaced:\n\n"
                  + "\n".join(f"   - {p}" for p in probs)
                  + "\n\nA rolled-back pre-push silently drops the newer barriers for every tree "
                  "(this happens when an old tree runs `npm install` → `prepare`).\n"
-                 "Reinstall them from origin, then push again:\n"
+                 f"First merge {oref} into this tree (or `scripts/wt-new.sh --resume <branch> --merge-main`), "
+                 "so its scripts are current, then reinstall the hooks from origin and push again:\n"
                  "  bash scripts/install-git-guards.sh")
 
 

@@ -238,6 +238,8 @@ hint() {
    user approves ExitPlanMode. Add a line with the plan's file name to the
    commit message:
      Plan: <plan-file>.md
+   A merge commit that brings in a branch with a new migration counts too:
+   put the Plan: line into the merge commit's message as well.
 
    No approved plan for this work? Go through Plan Mode first.
    Bypass is a human decision: ask the user to run

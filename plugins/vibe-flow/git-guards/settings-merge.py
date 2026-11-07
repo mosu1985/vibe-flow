@@ -35,6 +35,7 @@ WANTED = [
     ("PreToolUse", "Bash", "monitorex-git-guard.sh", None, False),
     ("PreToolUse", "Write|Edit|MultiEdit|NotebookEdit", "monitorex-git-guard.sh", None, False),
     ("PostToolUse", "ExitPlanMode", "plan-approved.sh", None, True),
+    # 120 = HOOK_TIMEOUT in post-edit-tests.py (its run ceiling is capped below it)
     ("PostToolUse", "Edit|Write|MultiEdit", "post-edit-tests.sh", 120, True),
 ]
 

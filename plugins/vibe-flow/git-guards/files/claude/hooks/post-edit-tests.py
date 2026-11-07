@@ -45,6 +45,11 @@ POLICY_KEYS = {
     "GG_POST_EDIT_DEBOUNCE", "GG_POST_EDIT_REPO_GAP", "GG_POST_EDIT_MAX",
     "GG_TEST_CMD", "GG_PROTECTED",
 }
+# 🔴 The ceiling must end BEFORE Claude Code kills the hook (registration timeout,
+# settings-merge.py): otherwise the hook dies first, killpg never runs and the test
+# workers stay alive. After the ceiling: TERM + 3 s, KILL + 5 s, then cleanup.
+HOOK_TIMEOUT = 120
+MAX_CEILING = HOOK_TIMEOUT - 15
 TAIL_LINES = 40
 MAX_QUEUE = 50
 NO_TESTS = ("No test files found", "No tests found")
@@ -52,6 +57,9 @@ NO_TESTS = ("No test files found", "No tests found")
 # ── secret masking: whatever a test prints ends up in the session transcript ──
 SECRET_PATTERNS = [re.compile(p) for p in (
     r"(?<![A-Za-z0-9_-])sk-[A-Za-z0-9_-]{10,}",
+    r"(?<![A-Za-z0-9_-])sk_[A-Za-z0-9_]{20,}",         # ElevenLabs sk_…, Stripe sk_live_/sk_test_
+    r"(?<![A-Za-z0-9_-])rk_(?:live|test)_[A-Za-z0-9]{10,}",   # Stripe restricted keys
+    r"(?<![A-Za-z0-9])\d{8,}:AA[A-Za-z0-9_-]{30,}",     # Telegram bot tokens
     r"(?<![A-Za-z0-9])gh[pousr]_[A-Za-z0-9]{16,}",
     r"(?<![A-Za-z0-9])github_pat_[A-Za-z0-9_]{20,}",
     r"(?<![A-Za-z0-9])xox[abposr]-[A-Za-z0-9-]{8,}",
@@ -299,7 +307,7 @@ def main():
     globs = (pol.get("GG_POST_EDIT_GLOBS") or DEFAULT_GLOBS).split()
     debounce = int_key(pol, "GG_POST_EDIT_DEBOUNCE", 20, 0, 3600)
     repo_gap = int_key(pol, "GG_POST_EDIT_REPO_GAP", 10, 0, 3600)
-    ceiling = int_key(pol, "GG_POST_EDIT_MAX", 90, 1, 600)
+    ceiling = min(int_key(pol, "GG_POST_EDIT_MAX", 90, 1, 3600), MAX_CEILING)
 
     rel = os.path.relpath(real, tree)
     if not matches(rel, globs):
