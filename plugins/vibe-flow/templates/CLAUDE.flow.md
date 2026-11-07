@@ -52,6 +52,17 @@ A task that changes anything is done in a separate git worktree, not in the proj
    - **In the current session:** the worktree directory lies outside the project, and `cd` does not persist between commands. So EVERY command is `cd "<worktree>" && …`, files are addressed by absolute paths inside the worktree, and **every agent** gets the line `Worktree: <absolute path>` in its prompt. An agent without that line will stop and ask when there are several worktrees
 3. **End of the task:** after the merge — `scripts/wt-done.sh <name>` (stops dev, frees the port, releases the issue claim, will not delete unsaved work)
 
+## 🟢 Task size: S or the full procedure
+Two levels only.
+- 🟢 **S — the fast path, no Plan Mode and no plan reviewers.** Only when ALL of these hold:
+  - the commit type is `fix`/`style`/`docs`/`refactor`/`test`/`chore` — **not `feat`**;
+  - at most 2 code files;
+  - no new migrations or schema changes, no new API routes, cron jobs, webhooks or integrations, no new sections or modules;
+  - does not touch permissions, auth, RLS, tenant isolation, money or calculations.
+- **S order:** worktree → code → tests (`test-runner`) → commit → **`release-gate`** → "Push?". The final gate and the user's yes before push apply to S too.
+- 🔴 **Everything else — the full procedure** (Plan Mode below). In doubt — full. Size only grows: if an S task touches any item above — stop, go to Plan Mode.
+- **The kit holds the line:** the plan gate in `pre-push` requires an approved plan for every `[feat]` and every new migration. Renaming the commit type to get into S is a bypass; `release-gate` catches it.
+
 ## 📋 Plan Mode — CRITICAL
 **Right after the plan is written to a file, and BEFORE `ExitPlanMode`** — load the `/vibe-flow:plan-mode-review` skill and run it in full: live check of assumptions about external systems → the batch of reviewers in parallel → questions to the user → external critic (Codex, if installed) → gate.
 
