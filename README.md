@@ -69,10 +69,21 @@ Commands are typed in the Claude Code prompt with `!`, from the folder of the wo
 | What | Command |
 |---|---|
 | Skip the final check | `scripts/release-gate.sh override --yes` |
+| Skip the plan gate for one `[feat]` push (15 minutes) | `scripts/git-confirm.sh feat --yes` |
 | Push without any checks | `git push --no-verify` |
 | Allow pushing commits from a previous session or ones you made in the terminal | `scripts/git-allow-push.sh add <sha> --yes` |
 
 The last one is common: after a Claude restart, push calls your own commits from yesterday "not created by this session". This protects your push from other people's work; review the list and allow it.
+
+Other human-set marks follow the same rule (the hook rejects them from the model): `scripts/git-allow-delete.sh add … --yes` and `scripts/git-confirm.sh <target> --yes`. For a `[feat]` commit without an approved plan the bypass is `! scripts/git-confirm.sh feat --yes` (one-off, 15 minutes).
+
+## Plan gate, red-first tests, issue claims
+
+- **Plan gate.** A `[feat]` commit (and any commit that adds a new migration) must carry a `Plan: <file>.md` trailer; the installed `pre-push` checks it. A plan counts as approved when you approved it in `ExitPlanMode` and it contains the Codex critic section and the gate line. The approval mark is written by a Claude Code hook into the git common-dir of the project **where the session was started**: a plan about another repository (for example vibe-flow, planned from a session in your app) gets its mark in the wrong place. The gate catches forgetfulness, not deception: renaming the commit type bypasses it, and deception is what `release-gate` reads in the diff.
+- **Red first.** For a bug fix in logic or a new pure function: test, run, see it red, then the code. This is not checked automatically; it holds on the plan reviewer (`### 🔴 Red first` in the plan) and on the `test-runner` report.
+- **Tests after an edit.** With `GG_POST_EDIT_TESTS=1` a hook runs related tests after a file edit and can return `block` with the tail of the run. A run takes several seconds and delays the turn; with many parallel sessions some edits are only checked at commit.
+- **Issue claims are local.** `scripts/wt-new.sh --issue N` claims GitHub Issue N on one machine only: two machines know nothing about each other's claims. `wt-done.sh` releases it.
+- **Measuring the plan procedure.** `tools/measure-plan-cost.mjs` counts tokens, money and time of Plan Mode from session transcripts.
 
 ## Updating
 
