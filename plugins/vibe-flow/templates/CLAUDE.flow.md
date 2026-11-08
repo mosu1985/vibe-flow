@@ -94,7 +94,7 @@ The user grants in advance automatic launch of vibe-flow agents under these rule
 **The first push to a new repository** (the remote has no prod branch yet) is done by a human: `! git push -u origin <prod-branch> --no-verify`. The gate and the barriers have nothing to compare against while the remote is empty — tell the user this plainly.
 
 ## 🚦 Final gate — CRITICAL
-**Code goes to push only after the verdict of `vibe-flow:release-gate`** (Opus, effort `xhigh`) — a review of the WHOLE branch diff against the protected branch, no matter who wrote the code.
+**Code goes to push only after the verdict of `vibe-flow:release-gate`** (Opus, effort `high`) — a review of the WHOLE branch diff against the protected branch, no matter who wrote the code.
 - **When:** after the commit, BEFORE asking "Push?". In the prompt: the path to the worktree, the path to the plan file, who wrote the code, the round number
 - 🔴 **Enforced by a hook:** `pre-push` refuses without a verdict for the HEAD tree (`GG_RELEASE_GATE=1` in `.gitguards.conf`). The verdict is bound to the **content**: after any edit — review again. If the diff has only `*.md`, no gate is needed
 - **❌ fail** → fix, commit, run again. **At most 3 rounds**, then stop and sort it out with the user
