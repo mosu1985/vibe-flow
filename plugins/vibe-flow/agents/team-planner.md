@@ -198,7 +198,7 @@ Return the result as your FINAL ANSWER: changed/created files (absolute paths), 
 1. 🧪 `vibe-flow:test-runner` → tests for the changed files
 2. 🔒 `vibe-flow:security-reviewer` → audit (only if applicable, see below)
 3. 💾 Commit: only `scripts/git-safe-commit.sh --message-file <file> -- <paths>` (or via the `vibe-flow:commit-and-ask` agent); a `[feat]` commit (and any commit with a new migration) carries the trailer `Plan: <file>.md` as the last line of the message; a bare `git commit` will be rejected at push later, since without the `Session-Id` trailer a commit does not count as created by this session
-4. 🚦 `vibe-flow:release-gate` (opus · xhigh) → final review of the whole branch diff; without its ✅ the push does not go out
+4. 🚦 `vibe-flow:release-gate` (opus · high) → final review of the whole branch diff; without its ✅ the push does not go out
 5. 🔄 `vibe-flow:dev-server-restart` → only if the project has a dev server and code changed
 
 ### Totals

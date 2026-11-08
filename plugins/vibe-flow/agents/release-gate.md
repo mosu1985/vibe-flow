@@ -33,7 +33,7 @@ description: |
   <commentary>Only *.md (the GG_RELEASE_GATE_SKIP mask): no gate required.</commentary>
   </example>
 model: opus
-effort: xhigh
+effort: high
 color: red
 tools: Read, Grep, Glob, Bash, Write
 ---
