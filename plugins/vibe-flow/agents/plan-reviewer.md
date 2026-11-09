@@ -47,7 +47,7 @@ description: |
   </commentary>
   assistant: "The plan changed — relaunching plan-reviewer for a fresh retelling and score."
   </example>
-model: opus
+model: sonnet
 effort: high
 tools: Read, Grep, Glob, Edit
 color: pink
