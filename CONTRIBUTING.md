@@ -14,10 +14,11 @@ plugins/vibe-flow/                  core, for any stack
   skills/init/                      /vibe-flow:init, deploys the flow into a project
   scripts/                          scripts referenced by agents/skills
   templates/CLAUDE.flow.md          rules block that init writes into CLAUDE.md
-  git-guards/                       VENDORED copy of ~/dev/git-guards (do not edit here!)
+  git-guards/                       parallel-session protection, the source of truth
 plugins/vibe-flow-vercel/           package for projects on Vercel
 plugins/vibe-flow-supabase/         package for projects on Supabase
-tools/sync-git-guards.sh            update the vendored git-guards copy
+tools/rollout-projects.sh           roll the current git-guards out to projects on this machine
+tools/git-guards-known-blobs.txt    git-guards file versions from before it moved here
 ```
 
 ## Rules for agents and skills
@@ -73,9 +74,14 @@ tools/sync-git-guards.sh            update the vendored git-guards copy
 
 ## Updating git-guards
 
-The git-guards mechanism lives in a separate repository (`~/dev/git-guards`).
-Edit there → `tools/sync-git-guards.sh` → commit here. Direct edits in
-`plugins/vibe-flow/git-guards/` are lost on the next sync.
+The mechanism lives in `plugins/vibe-flow/git-guards/`: edit it there and bump
+`version`. Projects keep their own copies, so a fix reaches an installed project
+only through `tools/rollout-projects.sh` or the next `/vibe-flow:init`.
+
+The rollout replaces a project file only if it equals a known version of the
+canonical file. Never delete `tools/git-guards-known-blobs.txt`: without it, every
+older project file looks edited by the project and stops getting updates.
+Run `bash tools/test-rollout-projects.sh` after changing the rollout.
 
 ## Versions
 
