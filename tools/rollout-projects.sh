@@ -13,6 +13,7 @@
 #   GG_ROLLOUT_BRANCH  branch/worktree name (default: gg-update)
 #   GG_ROLLOUT_ONLY    space-separated project names to limit the run
 #   GG_ROLLOUT_SESSION_URL  Claude session URL for commit and PR attribution (default: none)
+#   GG_ROLLOUT_KNOWN   list of known file versions (default: tools/git-guards-known-blobs.txt)
 #
 # 🔴 A project file is replaced only if it equals SOME historical version of the
 # canonical file (git-guards-known-blobs.txt + git history of this repo). A file that
@@ -227,5 +228,5 @@ $SESSION_URL"
         say "  worktree and branch removed"
     done
     ;;
-*) sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2 ;;
+*) sed -n '2,21p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

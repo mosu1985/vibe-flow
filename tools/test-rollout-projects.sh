@@ -42,6 +42,20 @@ out="$(GG_ROLLOUT_ROOTS="$TMP/roots" GG_ROLLOUT_KNOWN="$KNOWN" bash "$HERE/rollo
 printf '%s\n' "$out" | grep -qx '    ! scripts/wt-new.sh (edited by the project)' \
     && ok "another file's hash does not allow a replacement" || bad "another file's hash allowed a replacement"
 
+# A version known only from this repository's git history also gets replaced
+current="$(git hash-object "$GG/files/scripts/wt-new.sh")"
+old="$(git -C "$GG" log --all -m --format= --raw --no-abbrev -- files/scripts/wt-new.sh \
+    | awk '{print $4}' | grep -v '^0\{40\}$' | grep -vx "$current" | head -1)"
+if [ -z "$old" ]; then
+    bad "no older version of wt-new.sh in git history (shallow clone?)"
+else
+    git -C "$GG" cat-file -p "$old" > "$P/scripts/wt-new.sh"
+    : > "$KNOWN"
+    out="$(GG_ROLLOUT_ROOTS="$TMP/roots" GG_ROLLOUT_KNOWN="$KNOWN" bash "$HERE/rollout-projects.sh" list)"
+    printf '%s\n' "$out" | grep -qx '    ~ scripts/wt-new.sh' \
+        && ok "a version from git history gets replaced" || bad "a version from git history does not get replaced"
+fi
+
 # Without the list the script stops instead of calling every file a project edit
 if GG_ROLLOUT_ROOTS="$TMP/roots" GG_ROLLOUT_KNOWN="$TMP/missing.txt" bash "$HERE/rollout-projects.sh" list >/dev/null 2>&1; then
     bad "the script did not stop without the list"
@@ -53,6 +67,9 @@ fi
 real="$HERE/git-guards-known-blobs.txt"
 malformed="$(grep -cvE '^[0-9a-f]{40}  files/[^ ]+$' "$real")"
 [ "$malformed" = 0 ] && ok "the list format is valid" || bad "malformed lines in the list: $malformed"
+# The list holds the versions from before the move; it can grow but must never shrink
+lines="$(grep -c . "$real")"
+[ "$lines" -ge 118 ] && ok "the list is complete" || bad "the list shrank: $lines lines, expected at least 118"
 
 [ "$fails" = 0 ] && { printf 'passed\n'; exit 0; }
 printf 'failed: %s\n' "$fails"

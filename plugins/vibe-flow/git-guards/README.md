@@ -70,7 +70,7 @@ the tree, said out loud (`monitorex-hooks/.source` = `origin@<sha>` or `bootstra
 ## Acceptance
 
 ```bash
-bash files/scripts/test-git-guards.sh     # in this repository: 288 checks
+bash files/scripts/test-git-guards.sh     # from this directory: 288 checks
 bash scripts/test-git-guards.sh           # in a project: 281 (settings-merge, detect, install.sh are not copied there)
 ```
 
