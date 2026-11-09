@@ -95,7 +95,7 @@ Determine a file's **area** from the project layout in `CLAUDE.md`, not from gue
 | Reading the DB schema, checking columns (read-only) | `general-purpose` | haiku | medium | mechanical, no writes |
 | Translations into all project locales | `general-purpose` | haiku | low | adding keys |
 | Codebase research (read-only) | `Explore` | haiku | low | search |
-| UI check in a live browser | `vibe-flow:browser-operator` | opus | high | needs a live Chrome; with several browsers, pass the chosen one in the prompt |
+| UI check in a live browser | `vibe-flow:browser-operator` | sonnet | high | needs a live Chrome; with several browsers, pass the chosen one in the prompt |
 
 If the project has stack packages installed (for example, `vibe-flow-supabase`, `vibe-flow-vercel`) and one of them has an agent for the task, use it, with the package prefix.
 
