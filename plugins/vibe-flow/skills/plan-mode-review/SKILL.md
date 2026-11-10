@@ -252,6 +252,8 @@ Option 3: [Name]
 ```markdown
 # 🎯 [Short task title]
 
+Repository: ~/dev/<repo>   ← only if the work is in a repository other than the session's; one line per repository, above the first `## ` (the approval mark goes there too)
+
 ## 💡 Why
 [1-2 sentences: what the problem is, why this is needed]
 **Chosen approach:** [option — user's choice from TOP-3; remove the line if the selection stage was skipped]

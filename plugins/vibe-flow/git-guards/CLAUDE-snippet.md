@@ -52,6 +52,10 @@ Paste into the project's CLAUDE.md ("Git" section).
   `plan-approved.sh` hook when the user approves `ExitPlanMode`; the plan must have
   a `Gate: ✅ passed` line and a `## … Codex` section — or, without Codex, the
   `| Codex …` gate-table row `⚪️ not installed` / `❌ unavailable — user's decision`. No mark → push refused
+- **Work in another repository than the session's** (session in A, commits in B) — put
+  `Репозиторий: ~/dev/B` (or `Repository: …`) in the plan **header**, above the first
+  `## `, one repository per line; the hook writes the mark into B as well. Without it
+  B's gate refuses the `[feat]` and only a human `git-confirm.sh feat` lets it through
 - The model cannot write the mark (the guard forbids any write into `.git/`); the
   policy comes from `origin/<protected>`, so a branch cannot weaken it
 - Bypass — by a human: `! scripts/git-confirm.sh feat --yes` (one push within 15 min)

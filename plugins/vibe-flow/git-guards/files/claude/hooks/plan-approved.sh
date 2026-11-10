@@ -25,8 +25,13 @@
 #     (PATH and the standard locations). Without Codex the gate goes by the Claude
 #     reviewers (vibe-flow 1.2.1); details and the pure, tested functions are in
 #     plan-approved.py. The sha256 of exactly that text goes into the mark.
-# The mark goes to the common dir of $CLAUDE_PROJECT_DIR:
-#   monitorex-locks/plan-approved/<name>   ts=<epoch> sha256=<hex> session=<id> plan=<name>
+# The mark goes to the common dir of $CLAUDE_PROJECT_DIR, AND to the common dir of
+# every repository the plan names in its header (above the first `## `), one per
+# line: `Репозиторий: ~/dev/x (comment)` / `Repository: /abs/path` — only main working
+# trees inside $HOME with the kit installed (monitorex-hooks/plan-gate.sh), at most 5;
+# hidden header text (<!--, a code fence) → no foreign marks (vibe-flow 1.2.5):
+#   monitorex-locks/plan-approved/<name>   ts=<epoch> sha256=<hex> session=<id> plan=<name> critic=<kind> source=<project>
+# Where it was written / why a target was refused → ONE systemMessage to the user.
 #
 # A plan that was approved but does not qualify → the reason goes to the model
 # ({"decision":"block","reason":…}), so the session knows a [feat] citing it will
