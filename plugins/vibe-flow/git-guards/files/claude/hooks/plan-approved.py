@@ -12,9 +12,24 @@ gate line and the external critic part is settled in ONE of three ways:
 Markers count ONLY inside the status cell of a single table line starting with
 `| Codex`: prose, quotes and reviewer sections that cite the markers do not count.
 
-Pure functions decide() / codex_found() / search_dirs() are tested directly by
-test-git-guards.sh: the «no Codex» branch must be testable on a machine that has
-Codex installed, so it is never tested through the machine's environment.
+Where the mark goes: the common dir of the session's project ($CLAUDE_PROJECT_DIR),
+as before, AND the common dir of every repository the plan names in its HEADER (the
+text above the first `## `), one per line from the start of the line:
+    Репозиторий: ~/dev/tg-assistant (any comment)      Repository: /abs/path
+The path is the first token (whole if in backticks), the rest is a comment. That
+list is part of the text the user approved. A named repository is accepted only if
+(accept_repo): absolute or `~`, no symlinks in the path, inside realpath($HOME) by
+commonpath, a MAIN working tree (P/.git is a directory and is the common dir — a
+worktree or a `gitdir:` file is refused), and the kit is installed there
+(<common>/monitorex-hooks/plan-gate.sh — a place the model cannot write, unlike
+.gitguards.conf). At most 5. Hidden text in the header (`<!--`, a code fence) —
+no foreign marks at all. The mark stays inside .git, where the model may not write in
+any version of the guard, so an old copy of this hook elsewhere is harmless.
+
+Pure functions decide() / codex_found() / search_dirs() / target_repos() /
+header_hidden() / accept_repo() are tested directly by test-git-guards.sh: the «no
+Codex» branch must be testable on a machine that has Codex installed, so it is never
+tested through the machine's environment.
 """
 import hashlib
 import json
@@ -112,6 +127,122 @@ def decide(plan, found):
             "`❌ unavailable — user's decision`.")
 
 
+TARGET_LINE = re.compile(r"^(?:Репозиторий|Repository):[ \t]*(.*)$")
+TARGET_PATH = re.compile(r"^[~/][^\s`]*$")
+MAX_TARGETS = 5
+TARGETS_DEADLINE = 15.0
+_CTRL = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _header_lines(plan):
+    """Lines of the plan header: everything above the first `## ` (CRLF tolerated)."""
+    out = []
+    for line in (plan or "").splitlines():
+        if line.startswith("## "):
+            break
+        out.append(line)
+    return out
+
+
+def header_hidden(plan):
+    """Text the approval window may not show (HTML comment, code fence) in the header."""
+    return any("<!--" in l or l.lstrip().startswith(("```", "~~~")) for l in _header_lines(plan))
+
+
+def target_repos(plan):
+    """Raw paths the header names, one per `Репозиторий:` / `Repository:` line, in order."""
+    out = []
+    for line in _header_lines(plan):
+        m = TARGET_LINE.match(line)
+        if not m:
+            continue
+        rest = m.group(1).strip()
+        if rest.startswith("`"):
+            end = rest.find("`", 1)
+            token = rest[1:end] if end > 0 else ""
+        else:
+            token = re.split(r"[\s(]", rest, maxsplit=1)[0].rstrip(",;")
+        if token and TARGET_PATH.match(token) and token not in out:
+            out.append(token)
+        elif token and not TARGET_PATH.match(token) and token.strip(",;"):
+            out.append(token)   # accept_repo refuses it with a reason (relative path)
+    return out
+
+
+def _git_common(path):
+    env = dict(os.environ, GIT_CONFIG_NOSYSTEM="1", GIT_OPTIONAL_LOCKS="0")
+    r = subprocess.run(["git", "-c", "core.fsmonitor=", "-C", path, "rev-parse", "--git-common-dir"],
+                       capture_output=True, text=True, timeout=5, env=env)
+    out = r.stdout.strip()
+    if r.returncode != 0 or not out:
+        return None
+    return os.path.realpath(out if os.path.isabs(out) else os.path.join(path, out))
+
+
+def expand_target(raw, home):
+    """`~` / `~/…` against the given home (not the process HOME); `~user` → None."""
+    if raw == "~" or raw.startswith("~/"):
+        return os.path.abspath(os.path.join(home, raw[2:]))
+    if raw.startswith("~"):
+        return None
+    return os.path.abspath(raw)
+
+
+def accept_repo(raw, home):
+    """→ (common dir, "") for a target the mark may go to, else (None, reason)."""
+    if not home:
+        return None, "HOME is not set — no target is accepted"
+    if not TARGET_PATH.match(raw or ""):
+        return None, "relative path — write an absolute path or ~/…"
+    home_r = os.path.realpath(home)
+    p = expand_target(raw, home)
+    if p is None:
+        return None, "~user paths are not supported — write ~/… or an absolute path"
+    if os.path.commonpath([p, home_r]) != home_r:
+        return None, "outside HOME (" + home_r + ")"
+    if not os.path.isdir(p):
+        return None, "does not exist or is not a directory"
+    if os.path.realpath(p) != p:
+        return None, "the path goes through a symlink — name the real directory"
+    g = os.path.join(p, ".git")
+    if not os.path.lexists(g):
+        return None, "not a git repository"
+    if os.path.islink(g) or not os.path.isdir(g):
+        return None, "not the main working tree (a worktree or a gitdir: file) — name the main tree"
+    common = _git_common(p)
+    if common is None:
+        return None, "not a git repository"
+    if common != os.path.realpath(g):
+        return None, "not the main working tree — name the main tree"
+    if not os.path.isfile(os.path.join(common, "monitorex-hooks", "plan-gate.sh")):
+        return None, "the git-guards kit is not installed there (no monitorex-hooks/plan-gate.sh)"
+    return common, ""
+
+
+def write_mark(common, name, body):
+    """Atomic write of <common>/monitorex-locks/plan-approved/<name>; refuses symlinked dirs."""
+    common = os.path.realpath(common)
+    locks = os.path.join(common, "monitorex-locks")
+    d = os.path.join(locks, "plan-approved")
+    for x in (locks, d):
+        if os.path.islink(x):
+            raise OSError("symlink " + x)
+    os.makedirs(d, exist_ok=True)
+    if os.path.realpath(d) != d:
+        raise OSError("symlink in " + d)
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".tmp-")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(body)
+        os.replace(tmp, os.path.join(d, name))
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def _tell(reason):
     print(json.dumps({"decision": "block",
                       "reason": "Plan approval mark NOT written: " + reason + " A [feat] "
@@ -148,31 +279,67 @@ def main():
         if not ok:
             _tell("for " + name + ": " + reason)
         proj = os.environ.get("CLAUDE_PROJECT_DIR") or ""
-        if not proj or not os.path.isdir(proj):
-            sys.exit(0)
-        common = subprocess.run(["git", "-C", proj, "rev-parse", "--git-common-dir"],
-                                capture_output=True, text=True, timeout=5).stdout.strip()
-        if not common:
-            sys.exit(0)
-        if not os.path.isabs(common):
-            common = os.path.join(proj, common)
-        d = os.path.join(os.path.realpath(common), "monitorex-locks", "plan-approved")
-        os.makedirs(d, exist_ok=True)
-        sid = str(p.get("session_id") or "").replace("\n", " ")
-        body = "ts=%d\nsha256=%s\nsession=%s\nplan=%s\ncritic=%s\n" % (
-            int(time.time()), hashlib.sha256(plan.encode("utf-8")).hexdigest(), sid, name, kind)
-        fd, tmp = tempfile.mkstemp(dir=d, prefix=".tmp-")
-        with os.fdopen(fd, "w") as fh:
-            fh.write(body)
-        os.replace(tmp, os.path.join(d, name))
+        sid = _CTRL.sub(" ", str(p.get("session_id") or ""))
+        body = "ts=%d\nsha256=%s\nsession=%s\nplan=%s\ncritic=%s\nsource=%s\n" % (
+            int(time.time()), hashlib.sha256(plan.encode("utf-8")).hexdigest(), sid, name, kind,
+            _CTRL.sub(" ", proj))
+        notes = []
+        written = set()
+        session_top = None
+        # 1. The session's project, as before (silently skipped when it is not a repository).
+        try:
+            if proj and os.path.isdir(proj):
+                common = _git_common(proj)
+                if common:
+                    write_mark(common, name, body)
+                    written.add(common)
+                    session_top = os.path.dirname(common)
+        except Exception:
+            pass
+        # 2. The repositories the plan's header names.
+        targets = target_repos(plan)
+        if targets:
+            if header_hidden(plan):
+                notes.append("Marks for the repositories named in the plan were NOT written: the plan header "
+                             "contains hidden text (<!-- or a code fence) the approval window may not show.")
+            else:
+                home = os.environ.get("HOME") or ""
+                deadline = time.monotonic() + TARGETS_DEADLINE
+                ok_list, refused = [], []
+                for i, raw in enumerate(targets):
+                    if i >= MAX_TARGETS:
+                        refused.append("%s — more than %d repositories in one plan" % (raw, MAX_TARGETS))
+                        continue
+                    if time.monotonic() > deadline:
+                        refused.append("%s — time is up" % raw)
+                        continue
+                    try:
+                        # The session's own repository named in the header: already written above.
+                        exp = expand_target(raw, home) if home else None
+                        if exp and session_top and os.path.realpath(exp) == session_top:
+                            continue
+                        common, why = accept_repo(raw, home)
+                        if common is None:
+                            refused.append("%s — %s" % (raw, why))
+                            continue
+                        if common not in written:
+                            write_mark(common, name, body)
+                            written.add(common)
+                        ok_list.append(os.path.dirname(common))
+                    except Exception as e:
+                        refused.append("%s — could not write (%s: %s)" % (raw, type(e).__name__, _CTRL.sub(" ", str(e))[:200]))
+                if ok_list:
+                    notes.append("Plan approval mark for " + name + " was also written to: " + ", ".join(ok_list) + ".")
+                if refused:
+                    notes.append("NOT written for: " + "; ".join(refused) + ".")
         if kind != "section":
             why = ("the user decided to go without it" if kind == "user-decision"
                    else "codex is not installed")
-            print(json.dumps({"systemMessage":
-                              "Plan approval mark for " + name + " was written WITHOUT the "
-                              "external critic (" + why + "). If you did not decide that, "
-                              "delete monitorex-locks/plan-approved/" + name + "."},
-                             ensure_ascii=False))
+            notes.append("Plan approval mark for " + name + " was written WITHOUT the external critic ("
+                         + why + "). If you did not decide that, delete monitorex-locks/plan-approved/"
+                         + name + ".")
+        if notes:
+            print(json.dumps({"systemMessage": "\n".join(notes)}, ensure_ascii=False))
     except SystemExit:
         raise
     except Exception:

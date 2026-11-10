@@ -981,6 +981,104 @@ out=$(pa_run ud.md "$(printf "| Codex | — | ❌ unavailable — user's decisio
 [ -f "$PAM/ud.md" ] && echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if "systemMessage" in d and "decision" not in d else 1)' \
     && ok "hook: user's decision — mark written and the user is told (systemMessage)" || bad "hook: user's decision mark + systemMessage" "$out"
 
+echo "== plan-approved.py: marks in the repositories the plan names (Репозиторий:) =="
+# The plan's header (above the first `## `) names target repositories, one per line; the
+# hook writes the mark into each one's common dir too — only main working trees inside
+# $HOME with the kit installed (monitorex-hooks/plan-gate.sh). HOME is swapped ONLY in
+# pa_run_h; the real ~ is never touched. `pwd -P`: on macOS $TMP is /var/… → /private/var/….
+mkdir -p "$TMP/pahome"; PAH=$(cd "$TMP/pahome" && pwd -P)
+pr_repo() {   # pr_repo <path> [nokit] — a main tree with the kit installed (unless nokit)
+    mkdir -p "$1"; git -C "$1" init -q; git -C "$1" config user.email t@t; git -C "$1" config user.name t
+    git -C "$1" commit -q --allow-empty -m i
+    if [ "${2:-}" != nokit ]; then
+        mkdir -p "$1/.git/monitorex-hooks" "$1/githooks"
+        cp "$ROOT/githooks/plan-gate.sh" "$1/.git/monitorex-hooks/plan-gate.sh"
+        cp "$ROOT/githooks/plan-gate.sh" "$1/githooks/plan-gate.sh"
+        printf 'GG_PLAN_REQUIRED_TYPES="feat"\n' > "$1/.gitguards.conf"
+    fi
+}
+for r in a b c d e f g; do pr_repo "$PAH/dev/$r"; done
+pr_repo "$PAH/dev/nokit" nokit; printf 'GG_PLAN_REQUIRED_TYPES="feat"\n' > "$PAH/dev/nokit/.gitguards.conf"
+pr_repo "$TMP/outside-repo"
+mkdir -p "$PAH/dev/plain"
+git -C "$PAH/dev/a" worktree add -q "$PAH/dev/a-wt" -b wta 2>/dev/null
+ln -s "$PAH/dev/b" "$PAH/dev/b-link"
+pr_repo "$PAH/dev/fake"; rm -rf "$PAH/dev/fake/.git"; printf 'gitdir: %s/dev/c/.git\n' "$PAH" > "$PAH/dev/fake/.git"
+pr_repo "$PAH/dev/lockln"; mkdir -p "$PAH/dev/d/.git/monitorex-locks"; ln -s "$PAH/dev/d/.git/monitorex-locks" "$PAH/dev/lockln/.git/monitorex-locks"
+pr_repo "$PAH/dev/b2"   # $HOME prefix trap lives in the unit case below
+pa_run_h() { pa_in "$@" | HOME="$PAH" CLAUDE_PROJECT_DIR="${PA_SESSION:-$PA}" bash "$CH/plan-approved.sh"; }
+mk() { printf '%s/.git/monitorex-locks/plan-approved/%s' "$1" "$2"; }
+pr_plan() { printf '# P\n\n%s\n\n## 🧑‍⚖️ External review Codex\n\nГейт: ✅ пройден\n' "$1"; }
+
+# Pure functions
+tr_py() { pa_py 'm.target_repos(args[0])' "$1"; }
+[ "$(tr_py "$(printf '# T\n\nРепозиторий: `~/dev/x` (комментарий, `~/dev/y` не трогаем)\n\n## A\n')")" = "['~/dev/x']" ] \
+    && ok "target_repos: path is the first token, the rest of the line is a comment (M2)" || bad "target_repos first token" "$(tr_py "$(printf 'Репозиторий: `~/dev/x` (комментарий, `~/dev/y`)\n')")"
+[ "$(tr_py "$(printf 'Repository: /abs/y\nРепозиторий: ~/dev/z, ~/dev/w\nРепозиторий: /abs/y\n')")" = "['/abs/y', '~/dev/z']" ] \
+    && ok "target_repos: English form, one repository per line, comma is not a separator, duplicates collapsed" || bad "target_repos lines" "$(tr_py "$(printf 'Repository: /abs/y\nРепозиторий: ~/dev/z, ~/dev/w\n')")"
+[ "$(tr_py "$(printf '# T\n\n## Раздел\n\nРепозиторий: ~/dev/x\n')")" = "[]" ] \
+    && ok "target_repos: below the first '## ' (reviewer sections) — ignored" || bad "target_repos below ##"
+[ "$(tr_py "$(printf '# T\n### Под\nРепозиторий: ~/dev/x\n## A\n')")" = "['~/dev/x']" ] \
+    && ok "target_repos: '### ' does not end the header" || bad "target_repos ###"
+for line in '  Репозиторий: ~/dev/x' '> Репозиторий: ~/dev/x' '- Репозиторий: ~/dev/x' '**Репозиторий:** ~/dev/x' 'текст Репозиторий: ~/dev/x' 'репозиторий: ~/dev/x' 'Репозиторий ~/dev/x' 'Репозиторий:' 'Репозиторий: ,,'; do
+    [ "$(tr_py "$(printf '# T\n%s\n' "$line")")" = "[]" ] && ok "target_repos: '$line' — ignored" || bad "target_repos '$line'" "$(tr_py "$(printf '%s\n' "$line")")"
+done
+[ "$(tr_py "$(printf 'Репозиторий: ~/dev/x\r\n## A\r\n')")" = "['~/dev/x']" ] && ok "target_repos: CRLF — no trailing \\r" || bad "target_repos CRLF"
+[ "$(pa_py 'm.header_hidden(args[0])' "$(printf '# T\n<!-- Репозиторий: ~/dev/x -->\n## A\n')")" = True ] \
+    && [ "$(pa_py 'm.header_hidden(args[0])' "$(printf '# T\n```\nРепозиторий: ~/dev/x\n```\n## A\n')")" = True ] \
+    && [ "$(pa_py 'm.header_hidden(args[0])' "$(printf '# T\nРепозиторий: ~/dev/x\n## A\n```\ncode\n```\n')")" = False ] \
+    && ok "header_hidden: '<!--' or a code fence in the header — True; fence below the header — False" || bad "header_hidden"
+ar() { pa_py '(lambda r: "OK" if r[0] else "NO " + r[1])(m.accept_repo(args[0], args[1]))' "$1" "$PAH"; }
+case "$(ar "$PAH/dev/a")" in OK) ok "accept_repo: main tree with the kit inside HOME — OK" ;; *) bad "accept_repo main tree" "$(ar "$PAH/dev/a")" ;; esac
+case "$(ar '~/dev/a' )" in OK) ok "accept_repo: '~' is HOME" ;; *) bad "accept_repo tilde" "$(ar '~/dev/a')" ;; esac
+for c in "dev/a|relative" "$TMP/outside-repo|outside" "$PAH/dev/nokit|kit" "$PAH/dev/plain|repository" "$PAH/dev/missing|exist" \
+         "$PAH/dev/a-wt|main" "$PAH/dev/b-link|symlink" "$PAH/dev/fake|main" "$PAH/dev/../../outside-repo|outside" "$PAH/dev/a/a.txt|exist"; do
+    path=${c%%|*}; want=${c##*|}
+    out=$(ar "$path")
+    case "$out" in NO*"$want"*) ok "accept_repo: $(basename "$path") — refused ($want)" ;; *) bad "accept_repo $path" "$out" ;; esac
+done
+out=$(pa_py '(lambda r: "OK" if r[0] else "NO " + r[1])(m.accept_repo(args[0], args[1]))' "$PAH/dev/b2" "$PAH/dev/b")
+case "$out" in NO*outside*) ok "accept_repo: HOME prefix trap (/h/u vs /h/u2) — commonpath, not startswith" ;; *) bad "accept_repo prefix" "$out" ;; esac
+out=$(HOME= pa_py '(lambda r: "OK" if r[0] else "NO " + r[1])(m.accept_repo(args[0], args[1]))' "$PAH/dev/a" "")
+case "$out" in NO*) ok "accept_repo: empty HOME — refused (fail-closed)" ;; *) bad "accept_repo empty HOME" "$out" ;; esac
+
+# Integration
+for n in rp1.md rp2.md rp3.md rp4.md rp5.md rp6.md rp7.md rp8.md; do echo plan > "$GG_PLANS_DIR/$n"; done
+out=$(pa_run_h rp1.md "$(pr_plan "Репозиторий: \`$PAH/dev/a\` (основной)")" false)
+[ -f "$(mk "$PAH/dev/a" rp1.md)" ] && [ -f "$PAM/rp1.md" ] && grep -q "^source=$PA$" "$(mk "$PAH/dev/a" rp1.md)" \
+    && grep -q '^ts=[0-9]*$' "$(mk "$PAH/dev/a" rp1.md)" && grep -q '^critic=section$' "$(mk "$PAH/dev/a" rp1.md)" \
+    && echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); m=d["systemMessage"]; sys.exit(0 if sys.argv[1] in m and "decision" not in d else 1)' "$PAH/dev/a" \
+    && ok "hook: named repository — mark there (source=, same format) and in the session repo; the user is told where" || bad "hook: named repository" "$out"
+out=$(pa_run_h rp2.md "$(pr_plan "$(printf 'Репозиторий: %s\nРепозиторий: %s\nРепозиторий: %s\nРепозиторий: %s\nРепозиторий: %s' "$TMP/outside-repo" "$PAH/dev/nokit" "$PAH/dev/a-wt" "$PAH/dev/lockln" "$PAH/dev/b")")" false)
+[ ! -f "$(mk "$TMP/outside-repo" rp2.md)" ] && [ ! -f "$(mk "$PAH/dev/nokit" rp2.md)" ] && [ ! -f "$(mk "$PAH/dev/a" rp2.md)" ] \
+    && [ ! -f "$PAH/dev/d/.git/monitorex-locks/plan-approved/rp2.md" ] && [ -f "$(mk "$PAH/dev/b" rp2.md)" ] \
+    && echo "$out" | grep -q 'outside' && echo "$out" | grep -q 'symlink' && echo "$out" | grep -q 'main' \
+    && ok "hook: refused targets (outside HOME, no kit, worktree, symlinked monitorex-locks) get no mark and a reason; the good one still does" || bad "hook: refused targets" "$out"
+out=$(pa_run_h rp3.md "$(pr_plan "$(for r in a b c d e f g; do printf 'Репозиторий: %s\n' "$PAH/dev/$r"; done)")" false)
+[ -f "$(mk "$PAH/dev/e" rp3.md)" ] && [ ! -f "$(mk "$PAH/dev/f" rp3.md)" ] && [ ! -f "$(mk "$PAH/dev/g" rp3.md)" ] && echo "$out" | grep -q '5' \
+    && ok "hook: more than 5 targets — the first five, the rest refused" || bad "hook: limit 5" "$out"
+out=$(pa_run_h rp4.md "$(printf '# P\n<!-- note -->\nРепозиторий: %s\n\n## External review Codex\n\nГейт: ✅ пройден\n' "$PAH/dev/a")" false)
+[ ! -f "$(mk "$PAH/dev/a" rp4.md)" ] && [ -f "$PAM/rp4.md" ] && echo "$out" | grep -q '<!--' \
+    && ok "hook: hidden text in the header — no foreign marks, session mark kept, reason told" || bad "hook: hidden header" "$out"
+out=$(pa_run_h rp5.md "$(printf '# P\nРепозиторий: %s\n\n## P\n\nГейт: ✅ пройден\n' "$PAH/dev/a")" false)
+[ ! -f "$(mk "$PAH/dev/a" rp5.md)" ] && [ ! -f "$PAM/rp5.md" ] && echo "$out" | pa_block \
+    && ok "hook: plan refused by the gate (no Codex) — no mark anywhere" || bad "hook: refused plan" "$out"
+out=$(pa_run_h rp6.md "$(pr_plan "Репозиторий: $PAH/dev/a")" true)
+[ ! -f "$(mk "$PAH/dev/a" rp6.md)" ] && ok "hook: isAgent — no foreign mark" || bad "hook: agent foreign" "$out"
+out=$(PA_SESSION="$TMP/pa-norepo" pa_run_h rp7.md "$(pr_plan "Репозиторий: $PAH/dev/c")" false); rc=$?
+[ $rc -eq 0 ] && [ -f "$(mk "$PAH/dev/c" rp7.md)" ] && echo "$out" | python3 -c 'import json,sys; json.load(sys.stdin)' \
+    && ok "hook: session outside any repository — the named repository still gets the mark" || bad "hook: session not a repo" "rc=$rc $out"
+out=$(pa_run_h rp8.md "$(printf '# P\nРепозиторий: %s\nРепозиторий: %s\n\n| Codex | — | ❌ unavailable — user'"'"'s decision |\n\nГейт: ✅ пройден\n' "$PA" "$PAH/dev/a")" false)
+n=$(printf '%s' "$out" | python3 -c 'import json,sys; t=sys.stdin.read(); d=json.JSONDecoder(); o,i=d.raw_decode(t); print(1 if not t[i:].strip() else 2)' 2>/dev/null)
+[ "$n" = 1 ] && echo "$out" | grep -q 'without' && [ -f "$(mk "$PAH/dev/a" rp8.md)" ] \
+    && ok "hook: critic skipped + named repositories (one is the session repo) — ONE JSON object, both messages" || bad "hook: one JSON" "$out"
+out=$(pa_run good.md "$PA_GOOD" false)
+[ -z "$out" ] && ok "hook: plan without 'Репозиторий:' — silent, as before" || bad "hook: silent without targets" "$out"
+printf '[feat]: x\n\nPlan: rp1.md\n' > "$TMP/pr-m"
+( cd "$PAH/dev/a" && sh githooks/plan-gate.sh "$TMP/pr-m" ) >/dev/null 2>&1 && ok "end to end: plan-gate.sh in the named repository accepts [feat] with Plan:" || bad "end to end: named repo gate"
+out=$( cd "$PAH/dev/g" && sh githooks/plan-gate.sh "$TMP/pr-m" 2>&1 ); rc=$?
+[ $rc -eq 1 ] && echo "$out" | grep -q 'no approval mark' && ok "end to end: a repository the plan did not name — still rejected" || bad "end to end: unnamed repo" "$out"
+
 echo "== PreToolUse guard: unit cases (test_pretooluse_guard.py) =="
 if [ -d "$ROOT/.claude/hooks" ]; then
     out=$(python3 -B "$ROOT/scripts/git-guards/test_pretooluse_guard.py" 2>&1); rc=$?
