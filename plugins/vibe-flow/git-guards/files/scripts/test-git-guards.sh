@@ -1028,6 +1028,10 @@ done
     && [ "$(pa_py 'm.header_hidden(args[0])' "$(printf '# T\n```\nРепозиторий: ~/dev/x\n```\n## A\n')")" = True ] \
     && [ "$(pa_py 'm.header_hidden(args[0])' "$(printf '# T\nРепозиторий: ~/dev/x\n## A\n```\ncode\n```\n')")" = False ] \
     && ok "header_hidden: '<!--' or a code fence in the header — True; fence below the header — False" || bad "header_hidden"
+for hid in $'# T\nРепозиторий: ~/dev/x\rРепозиторий: ~/dev/y\n## A' $'# T\n\e[2KРепозиторий: ~/dev/x\n## A' $'# T\n<details>\nРепозиторий: ~/dev/x\n</details>\n## A'; do
+    [ "$(pa_py 'm.header_hidden(args[0])' "$hid")" = True ] && ok "header_hidden: lone \\r / ANSI escape / <details> — True" || bad "header_hidden extra" "$hid"
+done
+[ "$(tr_py "$(printf '# T\n  ## Indented\nРепозиторий: ~/dev/x\n')")" = "[]" ] && ok "target_repos: an indented '  ## ' still ends the header" || bad "target_repos indented ##"
 ar() { pa_py '(lambda r: "OK" if r[0] else "NO " + r[1])(m.accept_repo(args[0], args[1]))' "$1" "$PAH"; }
 case "$(ar "$PAH/dev/a")" in OK) ok "accept_repo: main tree with the kit inside HOME — OK" ;; *) bad "accept_repo main tree" "$(ar "$PAH/dev/a")" ;; esac
 case "$(ar '~/dev/a' )" in OK) ok "accept_repo: '~' is HOME" ;; *) bad "accept_repo tilde" "$(ar '~/dev/a')" ;; esac
@@ -1074,6 +1078,16 @@ n=$(printf '%s' "$out" | python3 -c 'import json,sys; t=sys.stdin.read(); d=json
     && ok "hook: critic skipped + named repositories (one is the session repo) — ONE JSON object, both messages" || bad "hook: one JSON" "$out"
 out=$(pa_run good.md "$PA_GOOD" false)
 [ -z "$out" ] && ok "hook: plan without 'Репозиторий:' — silent, as before" || bad "hook: silent without targets" "$out"
+echo plan > "$GG_PLANS_DIR/rp9.md"
+out=$(PA_SESSION="$TMP/pa-norepo" pa_run_h rp9.md "$(printf '# P\nРепозиторий: %s\nРепозиторий: %s\n\n| Codex | — | ❌ unavailable — user'"'"'s decision |\n\nГейт: ✅ пройден\n' "$PAH/dev/a" "~/dev/a")" false)
+[ "$(printf '%s' "$out" | grep -o "$PAH/dev/a" | wc -l | tr -d ' ')" = 1 ] && echo "$out" | grep -q 'WITHOUT' \
+    && ok "hook: same repository written twice — listed once; critic notice when a named repo got the mark" || bad "hook: dedup list" "$out"
+echo plan > "$GG_PLANS_DIR/rp10.md"
+out=$(PA_SESSION="$TMP/pa-norepo" pa_run_h rp10.md "$(printf '# P\n\n| Codex | — | ❌ unavailable — user'"'"'s decision |\n\nГейт: ✅ пройден\n')" false)
+[ -z "$out" ] && ok "hook: no mark written anywhere — no false 'was written WITHOUT the critic' notice" || bad "hook: false notice" "$out"
+echo plan > "$GG_PLANS_DIR/rp11.md"
+out=$(pa_run_h rp11.md "$(pr_plan "$(printf 'Репозиторий: ~/dev/\e]0;x\a')")" false)
+printf '%s' "$out" | LC_ALL=C grep -q "$(printf '\033')" && bad "hook: control chars in refusal" "$out" || ok "hook: control characters from the plan never reach the user's terminal"
 printf '[feat]: x\n\nPlan: rp1.md\n' > "$TMP/pr-m"
 ( cd "$PAH/dev/a" && sh githooks/plan-gate.sh "$TMP/pr-m" ) >/dev/null 2>&1 && ok "end to end: plan-gate.sh in the named repository accepts [feat] with Plan:" || bad "end to end: named repo gate"
 out=$( cd "$PAH/dev/g" && sh githooks/plan-gate.sh "$TMP/pr-m" 2>&1 ); rc=$?

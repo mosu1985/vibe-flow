@@ -137,16 +137,17 @@ _CTRL = re.compile(r"[\x00-\x1f\x7f]")
 def _header_lines(plan):
     """Lines of the plan header: everything above the first `## ` (CRLF tolerated)."""
     out = []
-    for line in (plan or "").splitlines():
-        if line.startswith("## "):
+    for line in (plan or "").split("\n"):
+        if line.lstrip().startswith("## "):
             break
-        out.append(line)
+        out.append(line[:-1] if line.endswith("\r") else line)
     return out
 
 
 def header_hidden(plan):
     """Text the approval window may not show (HTML comment, code fence) in the header."""
-    return any("<!--" in l or l.lstrip().startswith(("```", "~~~")) for l in _header_lines(plan))
+    return any("<!--" in l or "<details" in l.lower() or "\r" in l or "\x1b" in l
+               or l.lstrip().startswith(("```", "~~~")) for l in _header_lines(plan))
 
 
 def target_repos(plan):
@@ -307,11 +308,12 @@ def main():
                 deadline = time.monotonic() + TARGETS_DEADLINE
                 ok_list, refused = [], []
                 for i, raw in enumerate(targets):
+                    shown = _CTRL.sub(" ", raw)[:200]
                     if i >= MAX_TARGETS:
-                        refused.append("%s — more than %d repositories in one plan" % (raw, MAX_TARGETS))
+                        refused.append("%s — more than %d repositories in one plan" % (shown, MAX_TARGETS))
                         continue
                     if time.monotonic() > deadline:
-                        refused.append("%s — time is up" % raw)
+                        refused.append("%s — time is up" % shown)
                         continue
                     try:
                         # The session's own repository named in the header: already written above.
@@ -320,19 +322,20 @@ def main():
                             continue
                         common, why = accept_repo(raw, home)
                         if common is None:
-                            refused.append("%s — %s" % (raw, why))
+                            refused.append("%s — %s" % (shown, why))
                             continue
                         if common not in written:
                             write_mark(common, name, body)
                             written.add(common)
-                        ok_list.append(os.path.dirname(common))
+                        if os.path.dirname(common) not in ok_list:
+                            ok_list.append(os.path.dirname(common))
                     except Exception as e:
-                        refused.append("%s — could not write (%s: %s)" % (raw, type(e).__name__, _CTRL.sub(" ", str(e))[:200]))
+                        refused.append("%s — could not write (%s: %s)" % (shown, type(e).__name__, _CTRL.sub(" ", str(e))[:200]))
                 if ok_list:
                     notes.append("Plan approval mark for " + name + " was also written to: " + ", ".join(ok_list) + ".")
                 if refused:
                     notes.append("NOT written for: " + "; ".join(refused) + ".")
-        if kind != "section":
+        if kind != "section" and written:
             why = ("the user decided to go without it" if kind == "user-decision"
                    else "codex is not installed")
             notes.append("Plan approval mark for " + name + " was written WITHOUT the external critic ("
