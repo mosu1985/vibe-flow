@@ -1086,8 +1086,11 @@ echo plan > "$GG_PLANS_DIR/rp10.md"
 out=$(PA_SESSION="$TMP/pa-norepo" pa_run_h rp10.md "$(printf '# P\n\n| Codex | — | ❌ unavailable — user'"'"'s decision |\n\nГейт: ✅ пройден\n')" false)
 [ -z "$out" ] && ok "hook: no mark written anywhere — no false 'was written WITHOUT the critic' notice" || bad "hook: false notice" "$out"
 echo plan > "$GG_PLANS_DIR/rp11.md"
-out=$(pa_run_h rp11.md "$(pr_plan "$(printf 'Репозиторий: ~/dev/\e]0;x\a')")" false)
-printf '%s' "$out" | LC_ALL=C grep -q "$(printf '\033')" && bad "hook: control chars in refusal" "$out" || ok "hook: control characters from the plan never reach the user's terminal"
+# Header control characters → hidden header (no foreign marks); a refusal text is cleaned anyway.
+[ "$(pa_py 'm.header_hidden(args[0])' "$(printf '# T\nРепозиторий: ~/dev/evil \b\b\b\n## A')")" = True ] \
+    && ok "header_hidden: any control character (backspace) — True" || bad "header_hidden backspace"
+out=$(pa_py '(lambda r: r)(m._CTRL.sub(" ", args[0]))' "$(printf 'a\033]0;x\007b')")
+[ "$out" = "a ]0;x b" ] && ok "refusal text: control characters replaced before reaching the user" || bad "refusal text cleaning" "$out"
 printf '[feat]: x\n\nPlan: rp1.md\n' > "$TMP/pr-m"
 ( cd "$PAH/dev/a" && sh githooks/plan-gate.sh "$TMP/pr-m" ) >/dev/null 2>&1 && ok "end to end: plan-gate.sh in the named repository accepts [feat] with Plan:" || bad "end to end: named repo gate"
 out=$( cd "$PAH/dev/g" && sh githooks/plan-gate.sh "$TMP/pr-m" 2>&1 ); rc=$?

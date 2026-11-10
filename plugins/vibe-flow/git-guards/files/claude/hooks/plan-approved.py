@@ -146,7 +146,7 @@ def _header_lines(plan):
 
 def header_hidden(plan):
     """Text the approval window may not show (HTML comment, code fence) in the header."""
-    return any("<!--" in l or "<details" in l.lower() or "\r" in l or "\x1b" in l
+    return any("<!--" in l or "<details" in l.lower() or _CTRL.search(l.replace("\t", ""))
                or l.lstrip().startswith(("```", "~~~")) for l in _header_lines(plan))
 
 
@@ -302,7 +302,7 @@ def main():
         if targets:
             if header_hidden(plan):
                 notes.append("Marks for the repositories named in the plan were NOT written: the plan header "
-                             "contains hidden text (<!-- or a code fence) the approval window may not show.")
+                             "contains text the approval window may not show (<!--, <details>, a code fence or control characters).")
             else:
                 home = os.environ.get("HOME") or ""
                 deadline = time.monotonic() + TARGETS_DEADLINE
