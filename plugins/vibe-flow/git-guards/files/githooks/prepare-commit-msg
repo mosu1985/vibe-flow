@@ -1,0 +1,37 @@
+#!/usr/bin/env sh
+# CANONICAL prepare-commit-msg. Installed by scripts/install-git-guards.sh into
+# $GIT_COMMON_DIR/monitorex-hooks next to pre-push.
+#
+# PURPOSE: stamp `Session-Id: <actor>` on commits that git itself creates —
+# `git merge` (with or without conflicts), `git commit --no-edit` under
+# MERGE_HEAD, `git commit` / `--amend -m` in a worktree. Before this hook only
+# git-safe-commit.sh wrote the trailer, so the documented way of updating a
+# lagging branch (merge origin/<protected>, resolve, `git commit --no-edit`)
+# ALWAYS produced a commit that pre-push called someone else's work, and the
+# push needed a human allowlist mark (11.11.2026, wt/dev-listener, d61b4253).
+#
+# 🔴 Only NEW commits are stamped: source `merge`, `message`, `template` or none
+# (an editor). Rewrites — amend/-c/-C (`commit`), `merge --squash` (`squash`),
+# rebase and cherry-pick — are left alone: they carry existing work, and a
+# commit WITHOUT an id (a human without MONITOREX_ACTOR) must not become ours
+# just because a session rebased it. In SQUASH_MSG a neighbor's trailer is
+# indented and git does not see it — one more reason to skip squash.
+# An existing Session-Id is never replaced either (`--if-exists doNothing`).
+# No actor (a human without MONITOREX_ACTOR) → the message is left untouched.
+# Any failure here must not block the commit: the worst case is the old
+# behavior (pre-push asks for an allowlist mark).
+MSG="$1"
+ACTOR="${CLAUDE_CODE_SESSION_ID:-${MONITOREX_ACTOR:-}}"
+[ -n "$ACTOR" ] || exit 0
+[ -f "$MSG" ] || exit 0
+case "${2:-}" in merge|message|template|"") ;; *) exit 0 ;; esac
+# rebase and cherry-pick pass source `message` like a plain commit (git 2.50) —
+# they are recognized by their state files instead.
+GD=$(git rev-parse --git-dir 2>/dev/null) || exit 0
+[ -f "$GD/CHERRY_PICK_HEAD" ] && exit 0
+[ -d "$GD/rebase-merge" ] && exit 0
+[ -d "$GD/rebase-apply" ] && exit 0
+
+git interpret-trailers --in-place --if-exists doNothing \
+    --trailer "Session-Id: $ACTOR" "$MSG" 2>/dev/null || true
+exit 0

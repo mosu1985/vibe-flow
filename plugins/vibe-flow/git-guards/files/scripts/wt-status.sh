@@ -60,7 +60,7 @@ if [ -n "$COMMON" ] && git remote get-url origin >/dev/null 2>&1; then
     fi
     if [ -n "$PROT" ]; then
         DEST="$COMMON/monitorex-hooks"; DRIFT=""; ANY=0
-        for h in pre-commit pre-push plan-gate.sh; do
+        for h in pre-commit pre-push plan-gate.sh prepare-commit-msg; do
             want=$(git rev-parse -q --verify "refs/remotes/origin/$PROT:githooks/$h" 2>/dev/null) || continue
             ANY=1
             have=$(git hash-object "$DEST/$h" 2>/dev/null || echo missing)

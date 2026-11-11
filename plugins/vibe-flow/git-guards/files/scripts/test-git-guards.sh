@@ -528,7 +528,7 @@ KIT=""; [ -f "$ROOT/../settings-merge.py" ] && KIT="$(cd "$ROOT/.." && pwd)"
 
 kit_copy() {     # $1 = repo: the kit in project layout
     mkdir -p "$1/githooks" "$1/scripts/git-guards" "$1/.claude/hooks"
-    cp "$ROOT/githooks/pre-commit" "$ROOT/githooks/pre-push" "$ROOT/githooks/plan-gate.sh" "$1/githooks/"
+    cp "$ROOT/githooks/pre-commit" "$ROOT/githooks/pre-push" "$ROOT/githooks/plan-gate.sh" "$ROOT/githooks/prepare-commit-msg" "$1/githooks/"
     for s in git-safe-commit.sh install-git-guards.sh wt-new.sh wt-done.sh wt-status.sh git-lock.sh git-confirm.sh; do
         cp "$ROOT/scripts/$s" "$1/scripts/"
     done
@@ -559,6 +559,7 @@ out=$(bash "$PGR/scripts/install-git-guards.sh" 2>&1)
 echo "$out" | grep -q 'source: origin/main' && ok "installer: source is origin/main" || bad "installer: source is origin/main" "$out"
 grep -q '^origin@' "$PGH/.source" 2>/dev/null && ok "installer: .source = origin@<sha>" || bad "installer: .source" "$(cat "$PGH/.source" 2>&1)"
 [ -x "$PGH/plan-gate.sh" ] && ok "installer: plan-gate.sh installed next to pre-push" || bad "installer: plan-gate.sh installed"
+[ -x "$PGH/prepare-commit-msg" ] && ok "installer: prepare-commit-msg installed next to pre-push" || bad "installer: prepare-commit-msg installed"
 echo '# edited in the branch' >> "$PGR/githooks/pre-push"
 bash "$PGR/scripts/install-git-guards.sh" >/dev/null 2>&1
 git -C "$PGR" show origin/main:githooks/pre-push > "$TMP/pg-pp-origin"
@@ -1413,6 +1414,49 @@ print(len(c), sum(1 for m,cm,t in c if m=="Edit|Write|MultiEdit" and t==120))' "
     [ $rc -eq 0 ] && [ "$(head -1 "$IT/.gitguards.conf")" = "# edited by a human" ] && cmp -s "$IT/.claude/settings.json" "$TMP/it.settings" \
         && ok "install.sh rerun — existing .gitguards.conf not overwritten, settings.json unchanged" || bad "install.sh rerun" "$out"
 fi
+
+echo "== prepare-commit-msg: Session-Id on commits git itself creates =="
+# 11.11.2026: merging origin/main into a lagging branch (conflicts → `git commit
+# --no-edit`, as the rules say) gave a commit without Session-Id, and pre-push
+# called it someone else's work. The hook stamps the actor; an existing id stays.
+PM="$TMP/pcm"; mkrepo "$PM"; mkdir -p "$PM/hk"; cp "$ROOT/githooks/prepare-commit-msg" "$PM/hk/"; chmod +x "$PM/hk/prepare-commit-msg"
+git -C "$PM" config core.hooksPath "$PM/hk"
+sid() { git -C "$PM" log -1 --format='%(trailers:key=Session-Id,valueonly,separator=%x2C)' "${1:-HEAD}"; }
+pmc() { ( cd "$PM" && env -u CLAUDE_CODE_SESSION_ID MONITOREX_ACTOR="$1" git "${@:2}" ) >/dev/null 2>&1; }
+B0=$(git -C "$PM" symbolic-ref --short HEAD)
+git -C "$PM" checkout -qb side; echo side > "$PM/a.txt"; pmc s0 commit -qam side
+git -C "$PM" checkout -q "$B0"; echo base > "$PM/a.txt"; pmc s0 commit -qam base
+git -C "$PM" checkout -q side
+pmc s1 merge "$B0"; [ -f "$PM/.git/MERGE_HEAD" ] && ok "fixture: merge stopped on a conflict" || bad "fixture: conflict expected"
+echo resolved > "$PM/a.txt"; git -C "$PM" add a.txt; pmc s1 commit -q --no-edit
+[ "$(git -C "$PM" log -1 --format=%P | wc -w | tr -d ' ')" = "2" ] && [ "$(sid)" = "s1" ] \
+    && ok "conflicted merge + commit --no-edit → Session-Id of the actor" || bad "conflicted merge trailer" "$(git -C "$PM" log -1 --format=%B)"
+git -C "$PM" checkout -q "$B0"; echo n > "$PM/b.txt"; pmc s0 commit -qam more; git -C "$PM" checkout -q side
+pmc s1 merge -q --no-edit "$B0"
+[ "$(git -C "$PM" log -1 --format=%P | wc -w | tr -d ' ')" = "2" ] && [ "$(sid)" = "s1" ] \
+    && ok "clean git merge --no-edit (wt-new --merge-main) → Session-Id of the actor" || bad "clean merge trailer" "$(git -C "$PM" log -1 --format=%B)"
+printf 'neighbor work\n\nSession-Id: other\n' > "$PM/.m"; echo x > "$PM/s.sh"; git -C "$PM" add s.sh
+pmc other commit -q -F .m; pmc s1 commit -q --amend --no-edit
+[ "$(sid)" = "other" ] && ok "amend of a neighbor's commit keeps the neighbor's id (not stolen)" || bad "foreign id kept" "$(sid)"
+# Rewrites never stamp a commit that had NO id (a human without MONITOREX_ACTOR).
+git -C "$PM" checkout -q -b hum "$B0"; echo h1 > "$PM/h1.txt"; git -C "$PM" add h1.txt; pmc "" commit -qm human1
+echo h2 > "$PM/h2.txt"; git -C "$PM" add h2.txt; pmc "" commit -qm human2; H2=$(git -C "$PM" rev-parse HEAD)
+pmc s1 commit -q --amend --no-edit
+[ -z "$(sid)" ] && ok "amend of a commit without an id → still no id" || bad "amend no-id" "$(sid)"
+git -C "$PM" checkout -q -b pick "$B0"; pmc s1 cherry-pick hum
+[ -n "$(git -C "$PM" log -1 --format=%s | grep human2)" ] && [ -z "$(sid)" ] \
+    && ok "cherry-pick of a commit without an id → still no id" || bad "cherry-pick no-id" "$(git -C "$PM" log -1 --format='%s / %(trailers:key=Session-Id,valueonly)')"
+git -C "$PM" checkout -q "$B0"; echo r > "$PM/rb.txt"; git -C "$PM" add rb.txt; pmc s0 commit -qm base2
+git -C "$PM" checkout -q hum; pmc s1 rebase -q "$B0"
+[ "$(git -C "$PM" log -2 --format='%(trailers:key=Session-Id,valueonly)' | tr -d '\n')" = "" ] && [ "$(git -C "$PM" merge-base HEAD "$B0")" = "$(git -C "$PM" rev-parse "$B0")" ] \
+    && ok "rebase of commits without an id → still no id" || bad "rebase no-id" "$(git -C "$PM" log -2 --format='%s / %(trailers:key=Session-Id,valueonly)')"
+git -C "$PM" checkout -q -b sq "$B0"; pmc s1 merge -q --squash hum; pmc s1 commit -q --no-edit
+[ -z "$(sid)" ] && ok "merge --squash → no id stamped (neighbor trailers are invisible there)" || bad "squash" "$(sid)"
+git -C "$PM" checkout -q side
+printf 'own\n' > "$PM/.m"; echo y > "$PM/s.sh"; git -C "$PM" add s.sh; pmc s1 commit -q -F .m
+[ "$(sid)" = "s1" ] && ok "plain commit in a worktree → Session-Id of the actor (one, not duplicated)" || bad "plain commit trailer" "$(sid)"
+echo z > "$PM/b.txt"; git -C "$PM" add b.txt; pmc "" commit -qm noactor
+[ -z "$(sid)" ] && ok "no actor → message untouched" || bad "no actor" "$(sid)"
 
 # Project tests: scripts/git-guards/test-local-*.sh. They are added by the project
 # itself, not by install.sh — so updating the kit does not overwrite them. All helpers are visible to them.
