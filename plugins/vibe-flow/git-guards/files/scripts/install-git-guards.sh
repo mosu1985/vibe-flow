@@ -27,7 +27,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 COMMON=$(git -C "$ROOT" rev-parse --git-common-dir)
 case "$COMMON" in /*) ;; *) COMMON="$(cd "$ROOT/$COMMON" && pwd -P)" ;; esac
 DEST="$COMMON/monitorex-hooks"
-HOOKS="pre-commit pre-push plan-gate.sh"
+HOOKS="pre-commit pre-push plan-gate.sh prepare-commit-msg"
 die() { printf '\n🔴 install-git-guards: %s\n\n' "$*" >&2; exit 1; }
 
 g() { git -C "$ROOT" "$@"; }

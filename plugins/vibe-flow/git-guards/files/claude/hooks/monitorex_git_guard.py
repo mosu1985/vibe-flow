@@ -818,7 +818,7 @@ def target_dirs(candidates, c_dirs):
 # the check lives here: each hook of the installed set must exist, be executable
 # and match `origin/<protected>:githooks/<name>` byte for byte; core.hooksPath must
 # point at that set. A hook not on origin yet (bootstrap) is skipped.
-HOOK_SET = ("pre-commit", "pre-push", "plan-gate.sh")
+HOOK_SET = ("pre-commit", "pre-push", "plan-gate.sh", "prepare-commit-msg")
 
 
 def protected_ref(where: str) -> str | None:

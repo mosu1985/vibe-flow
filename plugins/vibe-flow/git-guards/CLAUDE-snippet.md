@@ -30,6 +30,8 @@ Paste into the project's CLAUDE.md ("Git" section).
   `git add`/`git commit` are allowed there. A commit with `MERGE_HEAD` requires
   the commit lock: `scripts/git-lock.sh take` → `git commit --no-edit` →
   `scripts/git-lock.sh drop` (hold the lock only for the duration of the commit)
+  — the `prepare-commit-msg` hook stamps the session's `Session-Id` on that
+  merge commit, so `pre-push` does not ask for `git-allow-push.sh`
 - **Run the guard tests:** `bash scripts/test-git-guards.sh` (281 checks in a project)
 - **Taking a GitHub issue:** `scripts/wt-new.sh --issue <N>` claims it locally
   (branch `wt/<N>-<slug>`); a second session with the same number is refused —
