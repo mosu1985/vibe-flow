@@ -38,7 +38,7 @@ the next `install.sh`, and the work is lost.
 | `githooks/pre-commit` | Rejects `git commit` in the **main** working tree: the index there is shared |
 | `githooks/pre-push` | Fast-forward required, the protected branch cannot be deleted, foreign commits don't get pushed, types are checked, the plan gate runs. Security policy is read from `origin/<protected>:.gitguards.conf` line by line — never `source`d from the tree |
 | `githooks/plan-gate.sh` | Plan gate: a `[feat]` commit, or one adding a file matching `GG_PLAN_REQUIRED_NEW` that the protected branch does not have yet, needs `Plan: <name>.md` with an approval mark. Installed next to `pre-push`, so a branch cannot weaken it; `git-safe-commit.sh` calls it early (non-authoritative) |
-| `githooks/prepare-commit-msg` | Stamps `Session-Id: <actor>` on commits git itself creates (`git merge`, `git commit --no-edit` under `MERGE_HEAD`, a plain commit in a worktree), so updating a lagging branch from the protected one does not look like foreign work to `pre-push`. An existing `Session-Id` is never replaced |
+| `githooks/prepare-commit-msg` | Stamps `Session-Id: <actor>` on commits git itself creates (`git merge`, `git commit --no-edit` under `MERGE_HEAD`, a plain commit in a worktree), so updating a lagging branch from the protected one does not look like foreign work to `pre-push`. An existing `Session-Id` is never replaced; rewrites (amend, cherry-pick, rebase, `merge --squash`) are not stamped |
 | `scripts/git-safe-commit.sh` | Commit in an isolated `GIT_INDEX_FILE` + branch move via atomic compare-and-swap |
 | `scripts/wt-new.sh` | Session workspace: its own directory, branch, dev server on a free port |
 | `scripts/wt-done.sh` | Cleanup. Won't delete a worktree holding work that exists neither on a remote nor in the protected branch. Closes Orca tabs if Orca is on the machine |
@@ -71,8 +71,8 @@ the tree, said out loud (`monitorex-hooks/.source` = `origin@<sha>` or `bootstra
 ## Acceptance
 
 ```bash
-bash files/scripts/test-git-guards.sh     # from this directory: 343 checks
-bash scripts/test-git-guards.sh           # in a project: 336 (settings-merge, detect, install.sh are not copied there)
+bash files/scripts/test-git-guards.sh     # from this directory: 347 checks
+bash scripts/test-git-guards.sh           # in a project: 340 (settings-merge, detect, install.sh are not copied there)
 ```
 
 Everything runs in temporary repositories; `~/.claude/plans` is replaced by a
