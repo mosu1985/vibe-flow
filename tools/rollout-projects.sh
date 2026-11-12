@@ -233,15 +233,21 @@ dev_types() {
     (cd "$T" && export "$var=$port" && exec bash -c "$cmd") >"$log" 2>&1 </dev/null &
     pid=$!
     set +m
+    disown "$pid" 2>/dev/null   # no "Terminated" job line in the output
+    # Ctrl-C reaches only our group — stop the dev server too, then leave
+    trap 'kill -TERM -- "-$pid" 2>/dev/null; exit 130' INT TERM
     for i in $(seq 1 90); do
-        types_found "$T" "$globs" && break
+        types_found "$T" "$globs" && { sleep 2; break; }   # let Next finish writing
         kill -0 "$pid" 2>/dev/null || break
         curl -s -o /dev/null --max-time 5 "http://localhost:$port/" 2>/dev/null; sleep 2
     done
-    kill -TERM -- "-$pid" 2>/dev/null; sleep 1; kill -KILL -- "-$pid" 2>/dev/null
-    wait "$pid" 2>/dev/null
-    rm -f "$log"
-    types_found "$T" "$globs"
+    kill -TERM -- "-$pid" 2>/dev/null
+    for i in 1 2 3 4 5; do kill -0 -- "-$pid" 2>/dev/null || break; sleep 1; done
+    kill -KILL -- "-$pid" 2>/dev/null
+    trap - INT TERM
+    if types_found "$T" "$globs"; then rm -f "$log"; return 0; fi
+    say "  dev log: $log"
+    return 1
 }
 
 message() {
@@ -261,16 +267,22 @@ EOF
 manifest_get() { sed -n "s/^$2=//p" "$1" | head -1; }
 
 # Merge PR $2 from worktree $1, pinned to commit $3. A refusal right after the PR is
-# created is usually required checks still running: wait for them once, then retry.
+# created is usually required checks still running: wait for them (15 minutes at most),
+# then retry once. A check that never finishes leaves the PR open instead of hanging ship.
 merge_pr() {
-    local W="$1" n="$2" c="$3" err i
+    local W="$1" n="$2" c="$3" err rc i none=0
     err=$(cd "$W" && gh pr merge "$n" --merge --match-head-commit "$c" 2>&1) && return 0
-    say "  merge refused ($(printf '%s' "$err" | tail -1)) — waiting for the PR checks…"
-    for i in 1 2 3 4 5 6; do   # checks may not be registered yet right after the push
-        err=$(cd "$W" && gh pr checks "$n" --watch --interval 15 2>&1) && break
-        printf '%s' "$err" | grep -qi 'no checks reported' || { warn "PR #$n: checks failed"; return 1; }
-        sleep 10
+    say "  merge refused ($(printf '%s' "$err" | tail -1)) — waiting for the required PR checks…"
+    for i in $(seq 1 60); do
+        err=$(cd "$W" && gh pr checks "$n" --required 2>&1); rc=$?
+        [ "$rc" = 0 ] && break
+        if [ "$rc" = 8 ]; then sleep 15; continue; fi                       # pending
+        if printf '%s' "$err" | grep -qi 'no .*checks reported'; then      # not registered yet
+            none=$((none + 1)); [ "$none" -ge 6 ] && break; sleep 15; continue
+        fi
+        warn "PR #$n: required checks failed — not merged"; return 1
     done
+    [ "$rc" = 8 ] && { warn "PR #$n: required checks still pending after 15 minutes — not merged; re-run ship later"; return 1; }
     err=$(cd "$W" && gh pr merge "$n" --merge --match-head-commit "$c" 2>&1) && return 0
     warn "PR #$n: merge refused — $(printf '%s' "$err" | tail -1)"
     return 1
