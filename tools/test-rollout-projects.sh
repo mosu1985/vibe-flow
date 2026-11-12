@@ -151,6 +151,13 @@ sum="$(cksum < "$TMP/rb/target.md")"
 r="$(python3 "$RB" "$TMP/rb/link.md" "$TPL" 9.9.9 2>&1)"
 [ "$r" = "symlink" ] && [ "$(cksum < "$TMP/rb/target.md")" = "$sum" ] \
     && ok "a symlink is not written through" || bad "symlink: got '$r'"
+r="$(python3 "$RB" "$TMP/rb/link.md" "$TPL" 9.9.9 "--follow-symlink-within=$TMP/rb" 2>&1)"
+[ "$r" = "update v0.0.1 → v9.9.9" ] && [ -L "$TMP/rb/link.md" ] && grep -q 'vibe-flow:begin v9.9.9' "$TMP/rb/target.md" \
+    && ok "init mode: a symlink to a file inside the project is written through (link kept)" || bad "follow-within: got '$r'"
+mkdir -p "$TMP/rb-out"; claude_md "$TMP/rb-out/t.md" 0.0.1; ln -s "$TMP/rb-out/t.md" "$TMP/rb/out-link.md"
+r="$(python3 "$RB" "$TMP/rb/out-link.md" "$TPL" 9.9.9 "--follow-symlink-within=$TMP/rb" 2>&1)"
+[ "$r" = "symlink" ] && grep -q 'vibe-flow:begin v0.0.1' "$TMP/rb-out/t.md" \
+    && ok "init mode: a symlink pointing outside the project is not written" || bad "follow-outside: got '$r'"
 claude_md "$F" 0.0.1
 d="$(python3 "$RB" "$F" "$TPL" 9.9.9 --diff 2>&1)"
 hasp "$d" '-<!-- vibe-flow:begin v0.0.1 -->' && hasp "$d" '+<!-- vibe-flow:begin v9.9.9 -->' \
@@ -287,6 +294,13 @@ grep -q 'pr merge' "$GH_LOG" && bad "a PR was merged after a failed push" || ok 
 [ "$rc" != 0 ] && [ -d "$W4" ] && [ "$(cksum < "$R4/pr/CLAUDE.md")" = "$pr_before" ] && hasp "$out" 'push refused' \
     && ok "after a failed push: worktree kept, CLAUDE.md untouched, exit 1" || bad "failed push handling wrong (rc=$rc)"
 
+# a review limited by GG_ROLLOUT_ONLY does not cover a wider prepare
+out="$(GG_ROLLOUT_ONLY="pr" GG_ROLLOUT_ROOTS="$R4" rollout list)"; SHA5="$(vf_sha)"
+GG_ROLLOUT_SHA="$SHA5" GG_ROLLOUT_ROOTS="$R4" rollout prepare >/dev/null 2>&1 \
+    && bad "prepare widened a review limited by GG_ROLLOUT_ONLY" || ok "a review limited by GG_ROLLOUT_ONLY cannot be widened"
+GG_ROLLOUT_SHA="$SHA5" GG_ROLLOUT_ONLY="other" GG_ROLLOUT_ROOTS="$R4" rollout prepare >/dev/null 2>&1 \
+    && bad "prepare ran for a project outside the review" || ok "a project outside the reviewed set is refused"
+
 echo "== plugins"
 R5="$TMP/roots5"
 for d in "p1" "p2" "loc" "Vibe school" 'x$(touch pwned)`touch pwned2`' "$(printf 'tab\there')"; do kit "$R5/$d"; done
@@ -350,8 +364,20 @@ import json,sys; d=json.load(open(sys.argv[1]))
 d["plugins"]["vibe-flow@vibe-school"]=[e for e in d["plugins"]["vibe-flow@vibe-school"] if e["scope"]!="project" or e["projectPath"].endswith(("/p1","/p2"))]
 json.dump(d,open(sys.argv[1],"w"))
 PY
+# a plugin that is gone from the marketplace: no expected version, the path must not shift
+python3 - "$REG" "$R5" <<'PY'
+import json,sys; d=json.load(open(sys.argv[1]))
+d["plugins"]["gone@vibe-school"]=[{"scope":"project","projectPath":sys.argv[2]+"/p2","version":"1.0.0"}]
+json.dump(d,open(sys.argv[1],"w"))
+PY
+: > "$STUB_LOG"
+out="$(cd "$TMP" && STUB_VERSION="$CUR" GG_ROLLOUT_ONLY="p2" GG_ROLLOUT_ROOTS="$R5" rollout plugins 2>&1)"
+grep -qxF "$R5/p2|plugin update gone@vibe-school --scope project" "$STUB_LOG" \
+    && ! grep -q "^$TMP|plugin update" "$STUB_LOG" \
+    && ok "an empty expected version does not shift the path field" || bad "field shift: $(cat "$STUB_LOG")"
+: > "$STUB_LOG"
 out="$(cd "$TMP" && STUB_VERSION=0.0.0 STUB_RC=1 GG_ROLLOUT_ONLY="p1 p2" GG_ROLLOUT_ROOTS="$R5" rollout plugins 2>&1)"; rc=$?
-[ "$(grep -c 'plugin update' "$STUB_LOG")" = 2 ] && ok "GG_ROLLOUT_ONLY limits the run; a failure does not stop the loop" \
+[ "$(grep -c 'plugin update vibe-flow' "$STUB_LOG")" = 2 ] && ok "GG_ROLLOUT_ONLY limits the run; a failure does not stop the loop" \
     || bad "ONLY/continue wrong: $(cat "$STUB_LOG")"
 [ "$rc" = 1 ] && hasp "$out" '⚠️' && ok "a failed or stale update is a warning and exit 1" || bad "failure not reported (rc=$rc)"
 GG_ROLLOUT_PLUGINS_JSON="$TMP/none.json" GG_ROLLOUT_ROOTS="$R5" rollout plugins >/dev/null 2>&1 \

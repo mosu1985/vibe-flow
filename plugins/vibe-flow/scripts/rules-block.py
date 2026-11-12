@@ -2,6 +2,7 @@
 """rules-block.py — the vibe-flow rules block in a project's CLAUDE.md.
 
 usage: rules-block.py <CLAUDE.md> <template> <version> [--check | --diff] [--append-if-missing]
+                      [--follow-symlink-within=<dir>]
 
 The block is the text between `<!-- vibe-flow:begin vX -->` and `<!-- vibe-flow:end -->`;
 everything outside the markers belongs to the project and is never changed.
@@ -13,7 +14,8 @@ Prints one status line:
   edited vA             same version, but the text inside the markers was changed
   no-block              the file has no markers (left alone without --append-if-missing)
   missing               no file (left alone without --append-if-missing)
-  symlink               CLAUDE.md is a symlink — never written through
+  symlink               CLAUDE.md is a symlink — not written through (init passes
+                        --follow-symlink-within=<project> to write a target inside the project)
   appended / created    only with --append-if-missing
 --check prints the status and writes nothing; --diff prints a unified diff of the block
 (old → new) and writes nothing. A write is atomic: temp file in the same folder + rename.
@@ -49,7 +51,11 @@ def write_atomic(path: str, text: str) -> None:
 
 
 def main(argv: list) -> int:
-    flags = {a for a in argv if a.startswith("--")}
+    within = None
+    for a in argv:
+        if a.startswith("--follow-symlink-within="):
+            within = os.path.realpath(a.split("=", 1)[1])
+    flags = {a for a in argv if a.startswith("--") and not a.startswith("--follow-symlink-within=")}
     args = [a for a in argv if not a.startswith("--")]
     unknown = flags - {"--check", "--diff", "--append-if-missing"}
     if len(args) != 3 or unknown:
@@ -60,8 +66,11 @@ def main(argv: list) -> int:
     block = build(template, version)
 
     if os.path.islink(path):
-        print("symlink")
-        return 0
+        target = os.path.realpath(path)
+        if within is None or os.path.commonpath([target, within]) != within or os.path.islink(target):
+            print("symlink")
+            return 0
+        path = target
     exists = os.path.exists(path)
     text = open(path, encoding="utf-8").read() if exists else ""
     m = PAT.search(text)

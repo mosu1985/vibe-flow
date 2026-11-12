@@ -74,11 +74,12 @@ add_conf_key GG_POST_EDIT_TESTS "1" "Run related tests after each file edit (Pos
 printf '\n\033[1m%s\033[0m\n' "vibe-flow: CLAUDE.md"
 # The block logic is shared with tools/rollout-projects.sh — one implementation.
 RB_STATUS=$(python3 "$PLUGIN/scripts/rules-block.py" "$TARGET/CLAUDE.md" \
-    "$PLUGIN/templates/CLAUDE.flow.md" "$VERSION" --append-if-missing) \
+    "$PLUGIN/templates/CLAUDE.flow.md" "$VERSION" --append-if-missing \
+    "--follow-symlink-within=$TARGET") \
     || die "could not update the rules block in $TARGET/CLAUDE.md"
 case "$RB_STATUS" in
     same)    echo "  = rules block is up to date (v$VERSION)" ;;
-    symlink) echo "  ! CLAUDE.md is a symlink — the rules block was not written; update the file it points to" ;;
+    symlink) die "CLAUDE.md is a symlink pointing outside the project — the rules block was not written" ;;
     *)       echo "  + rules block: $RB_STATUS (v$VERSION)" ;;
 esac
 if grep -q '<!-- vibe-flow:project:begin -->' "$TARGET/CLAUDE.md" 2>/dev/null; then

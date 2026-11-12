@@ -76,6 +76,14 @@ pin_from_args() { # prepare/ship: the sha must come from list and be merged
     git -C "$REPO" merge-base --is-ancestor "$SHA" origin/main 2>/dev/null \
         || die "$SHA is not in origin/main of vibe-flow — only merged code is rolled out"
     [ -f "$STATE/$SHA/listed" ] || die "no review for $SHA — run list first and read its rules.diff"
+    # The review covers only the projects list showed: prepare/ship may not widen it
+    local seen; seen="$(sed -n 's/^only=//p' "$STATE/$SHA/listed")"
+    if [ -n "$seen" ]; then
+        [ -n "${GG_ROLLOUT_ONLY:-}" ] || die "list for $SHA was limited to: $seen — run list without GG_ROLLOUT_ONLY or pass the same GG_ROLLOUT_ONLY"
+        local x; for x in $GG_ROLLOUT_ONLY; do
+            case " $seen " in *" $x "*) ;; *) die "$x was not in the reviewed list ($seen) — run list for it first" ;; esac
+        done
+    fi
 }
 
 snapshot() { # SHA → SNAP, GG, KNOWN, TPL, RB, VERSION
@@ -209,7 +217,9 @@ remove_worktree() { # $1 project, $2 worktree, $3 branch — only a clean one (C
         warn "$(basename "$1"): worktree has uncommitted/untracked files — left in place: $2"
         return 1
     fi
-    git -C "$1" worktree remove "$2" && git -C "$1" branch -D "$3" >/dev/null 2>&1
+    git -C "$1" worktree remove "$2" && git -C "$1" branch -D "$3" >/dev/null 2>&1 && return 0
+    warn "$(basename "$1"): could not remove worktree $2 — remove it by hand"
+    return 1
 }
 
 case "$CMD" in
@@ -252,7 +262,7 @@ list)
         [ -f "$f" ] || continue
         { printf '### rules block for: %s\n' "$(tr '\n' ' ' < "${f%.diff}.projects")"; cat "$f"; echo; } >> "$RUN/rules.diff"
     done
-    date '+%Y-%m-%d %H:%M:%S' > "$RUN/listed"
+    { date '+%Y-%m-%d %H:%M:%S'; printf 'only=%s\n' "${GG_ROLLOUT_ONLY:-}"; } > "$RUN/listed"
     say ""
     if [ -s "$RUN/rules.diff" ]; then
         say "── rules block changes (read before prepare) ──"
@@ -278,9 +288,15 @@ prepare)
             st="$(rb "$P/CLAUDE.md" --check)"
             case "$st" in update*|edited*)
                 if claude_in_git "$P"; then
-                    rb "$P/CLAUDE.md" >/dev/null && changed=$(printf '%s\nCLAUDE.md' "$changed")
+                    if [ -n "$(git -C "$P" status --porcelain -- CLAUDE.md)" ]; then
+                        warn "CLAUDE.md has uncommitted edits — rules block not updated (commit them first)"
+                    else
+                        rb "$P/CLAUDE.md" >/dev/null && changed=$(printf '%s\nCLAUDE.md' "$changed")
+                    fi
                 else
-                    rb "$P/CLAUDE.md" >/dev/null && say "  CLAUDE.md (not in git): $st"
+                    mkdir -p "$RUN/backup"; bak="$RUN/backup/$name-CLAUDE-$(date +%Y%m%d-%H%M%S).md"
+                    cp -n "$P/CLAUDE.md" "$bak" && rb "$P/CLAUDE.md" >/dev/null \
+                        && say "  CLAUDE.md (not in git): $st · backup $bak" || warn "CLAUDE.md not updated"
                 fi ;;
             esac
             changed=$(printf '%s\n' "$changed" | grep .)
@@ -477,7 +493,7 @@ for key, entries in sorted(data.get("plugins", {}).items()):
                 warn(f"{shown}: not a vibe-flow project (no git-guards) — skipped"); continue
             if only and os.path.basename(real) not in only:
                 continue
-        sys.stdout.write(f"{scope}\t{key}\t{expected_version(plugin)}\t{path}\0")
+        sys.stdout.write(f"{scope}\t{key}\t{expected_version(plugin) or '-'}\t{path}\0")
 PY
     rc=$?
     cat "$TMPD/skipped"
@@ -493,6 +509,8 @@ for e in json.load(open(reg)).get("plugins",{}).get(key,[]):
 PY
     }
     while IFS="$(printf '\t')" read -r -d '' scope key want path; do
+        [ "$want" = - ] && want=""
+        [ -n "$path" ] && [ -d "$path" ] || { warn "$key: malformed record — skipped"; continue; }
         label="$(basename "$path")"; [ "$scope" = user ] && label="(user)"
         before=$(regver "$key" "$scope" "$path")
         if (cd -- "$path" && "$CLI" plugin update "$key" --scope "$scope" </dev/null >"$TMPD/out" 2>&1); then rc=0; else rc=$?; fi
