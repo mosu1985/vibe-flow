@@ -72,27 +72,19 @@ add_conf_key GG_POST_EDIT_TESTS "1" "Run related tests after each file edit (Pos
 
 # ── 3. CLAUDE.md ─────────────────────────────────────────────────────────────
 printf '\n\033[1m%s\033[0m\n' "vibe-flow: CLAUDE.md"
-python3 - "$TARGET/CLAUDE.md" "$PLUGIN/templates/CLAUDE.flow.md" "$VERSION" <<'PY'
-import os, re, sys
-path, tpl, version = sys.argv[1:4]
-block = (f"<!-- vibe-flow:begin v{version} -->\n"
-         + open(tpl, encoding="utf-8").read().rstrip() + "\n"
-         + "<!-- vibe-flow:end -->")
-text = open(path, encoding="utf-8").read() if os.path.exists(path) else ""
-pat = re.compile(r"<!-- vibe-flow:begin[^>]*-->.*?<!-- vibe-flow:end -->", re.S)
-if pat.search(text):
-    new, how = pat.sub(lambda _: block, text, count=1), "updated"
-elif text.strip():
-    new, how = text.rstrip() + "\n\n" + block + "\n", "appended to the end"
-else:
-    new, how = "# Project rules\n\n" + block + "\n", "created"
-if new != text:
-    open(path, "w", encoding="utf-8").write(new)
-    print(f"  + rules block {how} (v{version})")
-else:
-    print(f"  = rules block is up to date (v{version})")
-has_project = "<!-- vibe-flow:project:begin -->" in new
-print("  = Project section present" if has_project else "  ! no Project section — /vibe-flow:init will fill it in")
-PY
+# The block logic is shared with tools/rollout-projects.sh — one implementation.
+RB_STATUS=$(python3 "$PLUGIN/scripts/rules-block.py" "$TARGET/CLAUDE.md" \
+    "$PLUGIN/templates/CLAUDE.flow.md" "$VERSION" --append-if-missing) \
+    || die "could not update the rules block in $TARGET/CLAUDE.md"
+case "$RB_STATUS" in
+    same)    echo "  = rules block is up to date (v$VERSION)" ;;
+    symlink) echo "  ! CLAUDE.md is a symlink — the rules block was not written; update the file it points to" ;;
+    *)       echo "  + rules block: $RB_STATUS (v$VERSION)" ;;
+esac
+if grep -q '<!-- vibe-flow:project:begin -->' "$TARGET/CLAUDE.md" 2>/dev/null; then
+    echo "  = Project section present"
+else
+    echo "  ! no Project section — /vibe-flow:init will fill it in"
+fi
 
 printf '\n✅ vibe-flow %s deployed in %s\n' "$VERSION" "$TARGET"
