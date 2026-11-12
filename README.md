@@ -95,6 +95,20 @@ Then restart the session and run `/vibe-flow:init` again.
 
 Re-running `init` updates the scripts and the rules block without touching your settings (`.gitguards.conf`) or your own text in `CLAUDE.md`.
 
+### Update every project on this machine at once
+
+From the vibe-flow repository, after the release is merged into `main`:
+
+```
+tools/rollout-projects.sh plugins        # the plugins in every install — no repo changes
+tools/rollout-projects.sh list           # pins origin/main, shows changes and the rules-block diff
+GG_ROLLOUT_SHA=<sha from list> tools/rollout-projects.sh prepare   # a worktree + commit per project
+# vibe-flow:release-gate on every prepared worktree
+GG_ROLLOUT_SHA=<sha from list> tools/rollout-projects.sh ship      # PR + merge = a production deploy
+```
+
+One run rolls out exactly the commit `list` showed — never the working tree and never a newer `main`. The rules block is markdown, which release-gate skips, so read the diff `list` prints before `prepare`. A `CLAUDE.md` kept outside git is written on `ship` (on `prepare` for a project without a remote, which has no `ship`), always with a backup.
+
 ## Contents
 
 **Core `vibe-flow`**: agents plan-reviewer, security-reviewer, performance-reviewer, access-control-reviewer, test-impact-reviewer, codex-plan-critic, orchestration-router, team-planner, orchestrator, release-gate, senior-backend-engineer, test-runner, dev-server-restart, commit-and-ask, push-to-production, browser-operator, discovery-interview. Skills: `init`, `plan-mode-review`, `architecture-map`, `smoke-ui`.

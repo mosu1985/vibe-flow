@@ -110,3 +110,5 @@ Release-note format: ✅ what was deployed · 🎯 what changed in the way of wo
 /plugin update vibe-flow@vibe-school          (and the stack packages, if installed)
 ```
 then restart the session and run this skill from step 3: the installer will update the scripts and the rules block, and will not touch `.gitguards.conf` or the "Project" section. Commit the updated files (step 8).
+
+**All projects on this machine at once** (the vibe-flow repository is cloned locally): `tools/rollout-projects.sh plugins` updates the plugins in every install; then `list` (show the user the changes and the rules-block diff, ask "Apply this rules text?") → `GG_ROLLOUT_SHA=<sha> … prepare` → `vibe-flow:release-gate` on each worktree → ask "Merge into every project? This is a production deploy for: <projects with auto-deploy>" → `GG_ROLLOUT_SHA=<sha> … ship`.
