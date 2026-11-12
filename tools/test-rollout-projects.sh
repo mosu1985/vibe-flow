@@ -322,10 +322,11 @@ cp "$GG/files/scripts/wt-new.sh" "$R6/pc/scripts/wt-new.sh"
 # pd: Next route types required, no `next typegen` — prepare starts GG_DEV_CMD once
 mkrepo "$R6/pd"; cp "$TMP/old-wt-new.sh" "$R6/pd/scripts/wt-new.sh"; printf '.next/\n' > "$R6/pd/.gitignore"
 git -C "$R6/pd" add -A; git -C "$R6/pd" commit -qm old; mkorigin "$R6/pd"
-cat >> "$R6/pd/.gitguards.conf" <<'CONF'
+DEVMARK="37.$$$RANDOM"   # unique per run: the process check below must not see another run
+cat >> "$R6/pd/.gitguards.conf" <<CONF
 GG_REQUIRE_DEV_READY=1
 GG_DEV_READY_GLOBS=".next/types"
-GG_DEV_CMD="mkdir -p .next/types && echo \"// \$PORT\" > .next/types/a.ts && exec sleep 37.5"
+GG_DEV_CMD="mkdir -p .next/types && echo \"// \\\$PORT\" > .next/types/a.ts && exec sleep $DEVMARK"
 CONF
 git -C "$R6/pd" commit -qam devconf; git -C "$R6/pd" push -q origin main
 
@@ -344,7 +345,7 @@ WC="$TMP/wt/pc/gg-update-${SHA6:0:8}"; WD="$TMP/wt/pd/gg-update-${SHA6:0:8}"
     || bad "route types not generated: $(printf '%s' "$out" | grep -A4 '== pd')"
 grep -qE '// [0-9]+$' "$WD/.next/types/a.ts" 2>/dev/null \
     && ok "the dev run gets a port in GG_DEV_PORT_ENV" || bad "the dev run got no port"
-pgrep -f 'sleep 37.5' >/dev/null && { bad "the dev process is still running"; pkill -f 'sleep 37.5'; } \
+pgrep -f "sleep $DEVMARK" >/dev/null && { bad "the dev process is still running"; pkill -f "sleep $DEVMARK"; } \
     || ok "the dev process is stopped after the types appear"
 
 printf '{"changed":1}\n' > "$WC/tsconfig.tsbuildinfo"     # the pre-push typecheck rewrites it
