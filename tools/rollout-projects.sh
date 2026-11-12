@@ -52,7 +52,8 @@ only_ok() { # project name passes GG_ROLLOUT_ONLY
     return 1
 }
 
-projects() {
+projects() { # $1=all → ignore GG_ROLLOUT_ONLY (plugins filters by itself)
+    local scope="${1:-}"
     for r in $ROOTS; do
         find "$r" -maxdepth 3 -path '*/scripts/wt-new.sh' -not -path '*/node_modules/*' \
             -not -path '*-wt/*' 2>/dev/null
@@ -60,7 +61,7 @@ projects() {
         p=$(dirname "$(dirname "$f")")
         [ -f "$p/.gitguards.conf" ] || continue
         case "$p/" in "$REPO"/*) continue ;; esac
-        only_ok "$(basename "$p")" || continue
+        [ "$scope" = all ] || only_ok "$(basename "$p")" || continue
         printf '%s\n' "$p"
     done | sort -u
 }
@@ -414,8 +415,11 @@ $SESSION_URL"
             # CLAUDE.md outside git: only after the "yes" to ship, from the same snapshot
             bak="$RUN/backup/$name-CLAUDE-$(date +%Y%m%d-%H%M%S).md"
             cp -n "$P/CLAUDE.md" "$bak" || { warn "cannot back up $P/CLAUDE.md — not written"; continue; }
-            st="$(rb "$P/CLAUDE.md")" && say "  CLAUDE.md (not in git): $st · backup $bak" \
-                || { warn "rules block not written to $P/CLAUDE.md"; continue; }
+            st="$(rb "$P/CLAUDE.md")" || st=error
+            case "$st" in
+                update*|edited*|same) say "  CLAUDE.md (not in git): $st · backup $bak" ;;
+                *) warn "rules block not written to $P/CLAUDE.md ($st)"; continue ;;
+            esac
         fi
         if [ -n "$W" ]; then
             slug=$(cd "$P" && gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)
@@ -441,7 +445,7 @@ plugins)
         warn "marketplace update failed: $(printf '%s' "$out" | tail -1)"
     fi
     TMPD=$(mktemp -d); trap 'rm -rf "$TMPD"' EXIT
-    projects | tr '\n' '\0' > "$TMPD/projects"
+    projects all | tr '\n' '\0' > "$TMPD/projects"
     # Validated records, NUL-terminated: scope<TAB>plugin<TAB>expected<TAB>path (path last)
     python3 - "$REG" "$MP" "$REPO" "$SHA" "$TMPD/projects" "${GG_ROLLOUT_ONLY:-}" "$ROOTS" \
         > "$TMPD/records" 2> "$TMPD/skipped" <<'PY'
@@ -481,6 +485,8 @@ for key, entries in sorted(data.get("plugins", {}).items()):
                 continue
             path = os.path.expanduser("~")
         else:
+            if only and os.path.basename(os.path.normpath(path)) not in only:
+                continue   # outside GG_ROLLOUT_ONLY: not checked, not reported
             shown = path.encode("unicode_escape").decode()
             if any(c in path for c in "\t\n\0") or not os.path.isabs(path):
                 warn(f"{shown}: invalid path — skipped"); continue
@@ -491,8 +497,6 @@ for key, entries in sorted(data.get("plugins", {}).items()):
                 warn(f"{shown}: outside GG_ROLLOUT_ROOTS — skipped"); continue
             if real not in projects:
                 warn(f"{shown}: not a vibe-flow project (no git-guards) — skipped"); continue
-            if only and os.path.basename(real) not in only:
-                continue
         sys.stdout.write(f"{scope}\t{key}\t{expected_version(plugin) or '-'}\t{path}\0")
 PY
     rc=$?

@@ -107,7 +107,7 @@ GG_ROLLOUT_SHA=<sha from list> tools/rollout-projects.sh prepare   # a worktree 
 GG_ROLLOUT_SHA=<sha from list> tools/rollout-projects.sh ship      # PR + merge = a production deploy
 ```
 
-One run rolls out exactly the commit `list` showed — never the working tree and never a newer `main`. The rules block is markdown, which release-gate skips, so read the diff `list` prints before `prepare`. A `CLAUDE.md` kept outside git is written on `ship`, with a backup.
+One run rolls out exactly the commit `list` showed — never the working tree and never a newer `main`. The rules block is markdown, which release-gate skips, so read the diff `list` prints before `prepare`. A `CLAUDE.md` kept outside git is written on `ship` (on `prepare` for a project without a remote, which has no `ship`), always with a backup.
 
 ## Contents
 

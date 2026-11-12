@@ -371,7 +371,9 @@ d["plugins"]["gone@vibe-school"]=[{"scope":"project","projectPath":sys.argv[2]+"
 json.dump(d,open(sys.argv[1],"w"))
 PY
 : > "$STUB_LOG"
-out="$(cd "$TMP" && STUB_VERSION="$CUR" GG_ROLLOUT_ONLY="p2" GG_ROLLOUT_ROOTS="$R5" rollout plugins 2>&1)"
+out="$(cd "$TMP" && STUB_VERSION="$CUR" GG_ROLLOUT_ONLY="p2" GG_ROLLOUT_ROOTS="$R5" rollout plugins 2>&1)"; rc=$?
+hasp "$out" "not a vibe-flow project" && bad "GG_ROLLOUT_ONLY produced false 'not a vibe-flow project' warnings" \
+    || ok "GG_ROLLOUT_ONLY does not report the other projects as invalid"
 grep -qxF "$R5/p2|plugin update gone@vibe-school --scope project" "$STUB_LOG" \
     && ! grep -q "^$TMP|plugin update" "$STUB_LOG" \
     && ok "an empty expected version does not shift the path field" || bad "field shift: $(cat "$STUB_LOG")"
