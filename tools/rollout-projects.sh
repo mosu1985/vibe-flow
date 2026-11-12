@@ -3,12 +3,15 @@
 #
 #   rollout-projects.sh plugins   update the vibe-flow plugins in every install (no repo changes)
 #   rollout-projects.sh list      pin origin/main of vibe-flow, show what would change:
-#                                 git-guards files + the CLAUDE.md rules block, with its diff
+#                                 git-guards files + the CLAUDE.md rules block, with its diff;
+#                                 compared with each project's origin (what prepare starts from)
 #   GG_ROLLOUT_SHA=<sha> rollout-projects.sh prepare
-#                                 worktree wt/gg-update-<sha8> per project, files, commit
+#                                 worktree wt/gg-update-<sha8> per project, files, commit;
+#                                 Next route types for pre-push (typegen, or GG_DEV_CMD once)
 #   (run vibe-flow:release-gate on every prepared worktree — pre-push requires it)
 #   GG_ROLLOUT_SHA=<sha> rollout-projects.sh ship
-#                                 push, PR, merge exactly the prepared commit, pull the main
+#                                 push, PR, merge exactly the prepared commit (waits for the PR
+#                                 checks if the first merge is refused), pull the main
 #                                 folder, reinstall hooks, CLAUDE.md outside git, clean up
 #
 # One run = one reviewed commit of vibe-flow. `list` pins origin/main and writes the review
@@ -148,6 +151,20 @@ sync_files() {
     done
 }
 
+# The kit files and a tracked CLAUDE.md as they are on ref $2 of project $1, into dir $3.
+# list compares with this view: prepare starts from origin, not from the main folder,
+# which may lag behind (an earlier rollout merged, the folder not pulled) or carry edits.
+view_ref() {
+    local P="$1" ref="$2" V="$3" rel dst
+    pairs | while IFS="$(printf '\t')" read -r rel dst; do
+        git -C "$P" cat-file -e "$ref:$dst" 2>/dev/null || continue
+        mkdir -p "$V/$(dirname "$dst")"; git -C "$P" show "$ref:$dst" > "$V/$dst"
+    done
+    case "$(git -C "$P" ls-tree "$ref" -- CLAUDE.md | cut -c1-6)" in
+        100644|100755) git -C "$P" show "$ref:CLAUDE.md" > "$V/CLAUDE.md" ;;
+    esac
+}
+
 rb() { python3 "$RB" "$1" "$TPL" "$VERSION" "${@:2}"; }
 claude_in_git() { git -C "$1" ls-files --error-unmatch CLAUDE.md >/dev/null 2>&1; }
 
@@ -185,16 +202,46 @@ deps() {
     # Next route types: pre-push refuses without them (GG_REQUIRE_DEV_READY)
     local globs; globs="$(conf "$P" GG_DEV_READY_GLOBS)"
     if [ -n "$globs" ] && [ "$(conf "$P" GG_REQUIRE_DEV_READY)" = "1" ]; then
-        local g dir found=""; g="${globs%% *}"; dir="${g%%/.next*}"; [ "$dir" = "$g" ] && dir=.
-        for g in $globs; do
-            [ -n "$(find "$T/$g" -name '*.ts' 2>/dev/null | head -1)" ] && found=1
-        done
-        if [ -z "$found" ]; then
-            (cd "$T/$dir" && npx --no-install next typegen >/dev/null 2>&1) \
-                && say "  next typegen ($dir)" \
-                || warn "no Next route types in $dir — run the project's dev once before ship"
+        local g dir; g="${globs%% *}"; dir="${g%%/.next*}"; [ "$dir" = "$g" ] && dir=.
+        if ! types_found "$T" "$globs"; then
+            if (cd "$T/$dir" && npx --no-install next typegen >/dev/null 2>&1); then
+                say "  next typegen ($dir)"
+            elif dev_types "$P" "$T" "$globs"; then
+                say "  route types via dev (GG_DEV_CMD, once)"
+            else
+                warn "no Next route types in $dir — run the project's dev once before ship"
+            fi
         fi
     fi
+}
+
+types_found() { # $1 tree, $2 globs
+    local g; for g in $2; do [ -n "$(find "$1/$g" -name '*.ts' 2>/dev/null | head -1)" ] && return 0; done; return 1
+}
+
+# Next before `next typegen` (14 and older) writes route types only on the first page
+# compile in dev: start the project's GG_DEV_CMD in tree $2 on a free port, request
+# the root page until the types appear (about 3–10 minutes at most), then stop the whole group.
+dev_types() {
+    local P="$1" T="$2" globs="$3" cmd var port pid i log
+    cmd="$(conf "$P" GG_DEV_CMD)"; [ -n "$cmd" ] || return 1
+    var="$(conf "$P" GG_DEV_PORT_ENV)"; var="${var:-PORT}"
+    case "$var" in *[!A-Za-z0-9_]*|[0-9]*) return 1 ;; esac
+    port=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])') || return 1
+    log="$(mktemp)"
+    set -m   # its own process group, so the dev server's children stop with it
+    (cd "$T" && export "$var=$port" && exec bash -c "$cmd") >"$log" 2>&1 </dev/null &
+    pid=$!
+    set +m
+    for i in $(seq 1 90); do
+        types_found "$T" "$globs" && break
+        kill -0 "$pid" 2>/dev/null || break
+        curl -s -o /dev/null --max-time 5 "http://localhost:$port/" 2>/dev/null; sleep 2
+    done
+    kill -TERM -- "-$pid" 2>/dev/null; sleep 1; kill -KILL -- "-$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+    rm -f "$log"
+    types_found "$T" "$globs"
 }
 
 message() {
@@ -213,7 +260,27 @@ EOF
 
 manifest_get() { sed -n "s/^$2=//p" "$1" | head -1; }
 
+# Merge PR $2 from worktree $1, pinned to commit $3. A refusal right after the PR is
+# created is usually required checks still running: wait for them once, then retry.
+merge_pr() {
+    local W="$1" n="$2" c="$3" err i
+    err=$(cd "$W" && gh pr merge "$n" --merge --match-head-commit "$c" 2>&1) && return 0
+    say "  merge refused ($(printf '%s' "$err" | tail -1)) — waiting for the PR checks…"
+    for i in 1 2 3 4 5 6; do   # checks may not be registered yet right after the push
+        err=$(cd "$W" && gh pr checks "$n" --watch --interval 15 2>&1) && break
+        printf '%s' "$err" | grep -qi 'no checks reported' || { warn "PR #$n: checks failed"; return 1; }
+        sleep 10
+    done
+    err=$(cd "$W" && gh pr merge "$n" --merge --match-head-commit "$c" 2>&1) && return 0
+    warn "PR #$n: merge refused — $(printf '%s' "$err" | tail -1)"
+    return 1
+}
+
 remove_worktree() { # $1 project, $2 worktree, $3 branch — only a clean one (Codex C4)
+    # A tracked *.tsbuildinfo is a compiler cache the pre-push typecheck of this run rewrote,
+    # not work: restore it. Anything else that is dirty keeps the worktree.
+    git -C "$2" diff --name-only -z -- '*.tsbuildinfo' 2>/dev/null \
+        | xargs -0 -I{} git -C "$2" checkout -q -- {} 2>/dev/null
     if [ -n "$(git -C "$2" status --porcelain --untracked-files=all 2>/dev/null)" ]; then
         warn "$(basename "$1"): worktree has uncommitted/untracked files — left in place: $2"
         return 1
@@ -231,13 +298,27 @@ list)
     rm -rf "$RUN/diffs"; mkdir -p "$RUN/diffs"
     while IFS= read -r P; do
         T=$(mktemp -d)
+        S="$P"; CM="$P/CLAUDE.md"; extra=""
+        if has_origin "$P"; then
+            PROT=$(conf "$P" GG_PROTECTED)
+            if git -C "$P" fetch -q origin "$PROT" 2>/dev/null; then
+                S="$T/view"; mkdir -p "$S"; view_ref "$P" "origin/$PROT" "$S"
+                [ -f "$S/CLAUDE.md" ] && CM="$S/CLAUDE.md"
+                if [ "$(git -C "$P" branch --show-current)" = "$PROT" ]; then
+                    b=$(git -C "$P" rev-list --count "HEAD..origin/$PROT" 2>/dev/null)
+                    [ "${b:-0}" -gt 0 ] && extra=" · main folder $b commit(s) behind origin"
+                fi
+            else
+                extra=" · origin unreachable — compared with the main folder"
+            fi
+        fi
         pairs | while IFS="$(printf '\t')" read -r rel dst; do
-            [ -f "$P/$dst" ] || { say "    + $dst"; continue; }
-            cmp -s "$GG/$rel" "$P/$dst" && continue
-            known_blob "$rel" "$(git hash-object "$P/$dst")" && say "    ~ $dst" || say "    ! $dst (edited by the project)"
+            [ -f "$S/$dst" ] || { say "    + $dst"; continue; }
+            cmp -s "$GG/$rel" "$S/$dst" && continue
+            known_blob "$rel" "$(git hash-object "$S/$dst")" && say "    ~ $dst" || say "    ! $dst (edited by the project)"
         done > "$T/out"
         : > "$T/notes"
-        st="$(rb "$P/CLAUDE.md" --check)"
+        st="$(rb "$CM" --check)"
         case "$st" in
             same) ;;
             update*) say "    ~ CLAUDE.md (rules block ${st#update })" >> "$T/out" ;;
@@ -247,13 +328,13 @@ list)
             *)        say "    ? CLAUDE.md ($st — skipped)" >> "$T/notes" ;;
         esac
         case "$st" in update*|edited*)
-            d="$(rb "$P/CLAUDE.md" --diff)"
+            d="$(rb "$CM" --diff)"
             h="$(printf '%s' "$d" | cksum | tr -d ' \t')"
             [ -f "$RUN/diffs/$h.diff" ] || printf '%s\n' "$d" > "$RUN/diffs/$h.diff"
             printf '%s\n' "$(basename "$P")" >> "$RUN/diffs/$h.projects" ;;
         esac
         n=$(grep -c . "$T/out")
-        extra=""; has_origin "$P" || extra=" · no origin"
+        has_origin "$P" || extra=" · no origin"
         [ -e "$P/CLAUDE.md" ] && ! claude_in_git "$P" && extra="$extra · CLAUDE.md not in git"
         say "$(basename "$P"): $n change(s)$extra"
         cat "$T/out" "$T/notes"; rm -rf "$T"
@@ -399,7 +480,7 @@ $SESSION_URL"
             fi
             head=$(cd "$W" && gh pr view "$n" --json headRefOid -q .headRefOid 2>/dev/null)
             [ "$head" = "$COMMIT" ] || { warn "PR #$n head is $head, not $COMMIT — not merged"; continue; }
-            (cd "$W" && gh pr merge "$n" --merge --match-head-commit "$COMMIT" >/dev/null 2>&1)
+            merge_pr "$W" "$n" "$COMMIT"
             state=$(cd "$W" && gh pr view "$n" --json state -q .state 2>/dev/null)
             say "  PR #$n → $state"
             [ "$state" = "MERGED" ] || { warn "PR #$n not merged"; continue; }

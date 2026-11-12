@@ -227,6 +227,9 @@ case "$1 $2" in
     br=""; while [ $# -gt 0 ]; do [ "$1" = "--head" ] && br="$2"; shift; done
     printf '%s' "$br" > "$GH_STATE/$(basename "$org").pr"; echo "https://example.invalid/pull/1" ;;
   "pr merge")
+    if [ -f "$GH_STATE/refuse-once" ]; then
+        rm -f "$GH_STATE/refuse-once"; echo "X Pull request is not mergeable: the base branch policy prohibits the merge." >&2; exit 1
+    fi
     f="$GH_STATE/$(basename "$org").pr"; br="$(cat "$f")"; want=""
     while [ $# -gt 0 ]; do [ "$1" = "--match-head-commit" ] && want="$2"; shift; done
     head="$(git --git-dir="$org" rev-parse "refs/heads/$br")"
@@ -300,6 +303,60 @@ GG_ROLLOUT_SHA="$SHA5" GG_ROLLOUT_ROOTS="$R4" rollout prepare >/dev/null 2>&1 \
     && bad "prepare widened a review limited by GG_ROLLOUT_ONLY" || ok "a review limited by GG_ROLLOUT_ONLY cannot be widened"
 GG_ROLLOUT_SHA="$SHA5" GG_ROLLOUT_ONLY="other" GG_ROLLOUT_ROOTS="$R4" rollout prepare >/dev/null 2>&1 \
     && bad "prepare ran for a project outside the review" || ok "a project outside the reviewed set is refused"
+
+echo "== list compares with origin; ship waits for checks; build caches; dev route types"
+R6="$TMP/roots6"; KNOWN6="$TMP/known6.txt"; : > "$GH_LOG"
+printf '# old\n' > "$TMP/old-wt-new.sh"
+printf '%s  files/scripts/wt-new.sh\n' "$(git hash-object "$TMP/old-wt-new.sh")" > "$KNOWN6"
+push_from_clone() { # $1 project, $2 command run inside a clone of its origin, then pushed
+    rm -rf "$TMP/c6"; git clone -q "$1.origin.git" "$TMP/c6"
+    (cd "$TMP/c6" && eval "$2" && git add -A && git commit -qm upd && git push -q origin main)
+}
+# pb: origin already has the current kit, the main folder lags one commit behind
+mkrepo "$R6/pb"; cp "$TMP/old-wt-new.sh" "$R6/pb/scripts/wt-new.sh"; git -C "$R6/pb" commit -qam old; mkorigin "$R6/pb"
+push_from_clone "$R6/pb" "cp '$GG/files/scripts/wt-new.sh' scripts/wt-new.sh"
+# pc: origin has the old file, the main folder has the new one uncommitted; a tracked build cache
+mkrepo "$R6/pc"; cp "$TMP/old-wt-new.sh" "$R6/pc/scripts/wt-new.sh"; printf '{}\n' > "$R6/pc/tsconfig.tsbuildinfo"
+git -C "$R6/pc" add -A; git -C "$R6/pc" commit -qm old; mkorigin "$R6/pc"
+cp "$GG/files/scripts/wt-new.sh" "$R6/pc/scripts/wt-new.sh"
+# pd: Next route types required, no `next typegen` — prepare starts GG_DEV_CMD once
+mkrepo "$R6/pd"; cp "$TMP/old-wt-new.sh" "$R6/pd/scripts/wt-new.sh"; printf '.next/\n' > "$R6/pd/.gitignore"
+git -C "$R6/pd" add -A; git -C "$R6/pd" commit -qm old; mkorigin "$R6/pd"
+cat >> "$R6/pd/.gitguards.conf" <<'CONF'
+GG_REQUIRE_DEV_READY=1
+GG_DEV_READY_GLOBS=".next/types"
+GG_DEV_CMD="mkdir -p .next/types && echo \"// \$PORT\" > .next/types/a.ts && exec sleep 37.5"
+CONF
+git -C "$R6/pd" commit -qam devconf; git -C "$R6/pd" push -q origin main
+
+out="$(GG_ROLLOUT_ROOTS="$R6" GG_ROLLOUT_KNOWN="$KNOWN6" rollout list)"; SHA6="$(vf_sha)"
+hasp "$out" 'pb: 0 change(s)' && hasp "$out" 'main folder 1 commit(s) behind origin' \
+    && ok "list: a file already updated on origin is not a change (main folder behind is noted)" \
+    || bad "list compares with the main folder instead of origin: $(printf '%s' "$out" | grep -A2 '^pb')"
+has "$out" '    ~ scripts/wt-new.sh' && hasp "$out" 'pc: 1 change(s)' \
+    && ok "list: an old file on origin is a change even if the main folder has the new one" \
+    || bad "list missed a change on origin: $(printf '%s' "$out" | grep -A2 '^pc')"
+
+out="$(GG_ROLLOUT_SHA="$SHA6" GG_ROLLOUT_ROOTS="$R6" GG_ROLLOUT_KNOWN="$KNOWN6" rollout prepare 2>&1)"
+WC="$TMP/wt/pc/gg-update-${SHA6:0:8}"; WD="$TMP/wt/pd/gg-update-${SHA6:0:8}"
+[ -f "$WD/.next/types/a.ts" ] && hasp "$out" 'route types via dev' \
+    && ok "prepare: no typegen → GG_DEV_CMD run once writes the route types" \
+    || bad "route types not generated: $(printf '%s' "$out" | grep -A4 '== pd')"
+grep -qE '// [0-9]+$' "$WD/.next/types/a.ts" 2>/dev/null \
+    && ok "the dev run gets a port in GG_DEV_PORT_ENV" || bad "the dev run got no port"
+pgrep -f 'sleep 37.5' >/dev/null && { bad "the dev process is still running"; pkill -f 'sleep 37.5'; } \
+    || ok "the dev process is stopped after the types appear"
+
+printf '{"changed":1}\n' > "$WC/tsconfig.tsbuildinfo"     # the pre-push typecheck rewrites it
+touch "$GH_STATE/refuse-once"                             # required checks still running
+out="$(GG_ROLLOUT_SHA="$SHA6" GG_ROLLOUT_ROOTS="$R6" rollout ship 2>&1)"
+[ "$(git --git-dir="$R6/pc.origin.git" rev-parse refs/heads/main)" != "$(git -C "$R6/pc" rev-parse main)" ] \
+    && grep -q 'pr checks' "$GH_LOG" && ! hasp "$out" 'not merged' \
+    && ok "ship: a merge refused while checks run waits for them and merges" \
+    || bad "ship did not wait for checks: $(printf '%s' "$out" | grep -E 'PR|merge' | head -3)"
+[ ! -d "$WC" ] && ! hasp "$out" 'left in place' \
+    && ok "ship: a typecheck-rewritten build cache does not keep the worktree" \
+    || bad "worktree kept because of tsconfig.tsbuildinfo"
 
 echo "== plugins"
 R5="$TMP/roots5"
