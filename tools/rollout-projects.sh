@@ -342,8 +342,9 @@ prepare)
             fi
             continue
         fi
+        # pre-push checks types / dev readiness even for a markdown-only change
+        deps "$P" "$W"
         if printf '%s\n' "$changed" | grep -qvx 'CLAUDE.md'; then
-            deps "$P" "$W"
             (cd "$W" && bash scripts/test-git-guards.sh >/dev/null 2>&1) && say "  test-git-guards ✅" \
                 || warn "test-git-guards FAILED in $W"
         fi
