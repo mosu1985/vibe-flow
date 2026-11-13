@@ -71,7 +71,7 @@ the tree, said out loud (`monitorex-hooks/.source` = `origin@<sha>` or `bootstra
 ## Acceptance
 
 ```bash
-bash files/scripts/test-git-guards.sh     # from this directory: 377 checks
+bash files/scripts/test-git-guards.sh     # from this directory: 425 checks
 bash scripts/test-git-guards.sh           # in a project: fewer (settings-merge, detect, install.sh are not copied there)
 ```
 
@@ -88,10 +88,24 @@ says out loud that it is skipped. A made-up value is more dangerous than an
 empty one: a nonexistent command in `GG_TYPECHECK_CMD` makes push impossible,
 and it will look like a broken hook.
 
+**How it is read.** The file is data, never code: no script or hook `source`s it.
+The text comes from the protected branch — `origin/<protected>:.gitguards.conf`
+(the branch is `origin/HEAD` → `main` → `master`; for another name run
+`git remote set-head origin -a`), without an origin ref from the committed config
+of local `main`/`master`. The main working tree's file is read only while the
+branch has no config yet (a project adopting the kit). So an edit takes effect
+**after it is merged** into the protected branch, and a branch's own copy changes
+nothing. Each value is the last `KEY=` line; quotes work as in the shell
+(`'…'` literal, `"…"` with `\$ \" \\ \`` un-escaped), nothing is evaluated —
+`$PORT` in a command stays text and is expanded when the command runs. Only a
+leading `$HOME/` or `~/` in `GG_WT_DIR` is expanded. A value of the wrong shape is
+ignored with a warning, and the default is used. The reader for the scripts is
+`scripts/git-guards/conf.sh`.
+
 | Key | Meaning |
 |---|---|
-| `GG_WT_DIR` | Where to put worktrees. Empty → `<repo parent>/<repo name>-wt` |
-| `GG_PROTECTED` | Branch that cannot be deleted or rewound |
+| `GG_WT_DIR` | Where to put worktrees. Empty → `<repo parent>/<repo name>-wt`. A leading `$HOME/` or `~/` is expanded |
+| `GG_PROTECTED` | Branch that cannot be deleted or rewound. Read only without an origin ref: with origin the branch is `origin/HEAD` → `main` → `master` |
 | `GG_TEST_CMD` | Test runner on commit. Paths are passed positionally |
 | `GG_TYPECHECK_CMD` | Typecheck on push. 🔴 Empty — nobody checks types |
 | `GG_DEV_CMD` · `GG_DEV_PORT_BASE` · `GG_DEV_PORT_ENV` | Dev server of a new worktree |

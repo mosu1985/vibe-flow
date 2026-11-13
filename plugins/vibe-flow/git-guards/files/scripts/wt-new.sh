@@ -24,18 +24,34 @@ usage() { sed -n '3,10p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-GG_WT_DIR=""
-GG_BRANCH_PREFIX="wt/"
-GG_DEV_CMD=""
-GG_DEV_PORT_BASE=3000
-GG_DEV_PORT_ENV="PORT"
-GG_DEV_READY_GLOBS=""
-GG_DEV_READY_WAIT=80
-GG_PROTECTED="main"
-GG_FETCH_TIMEOUT=20
-GG_DEPS_INSTALL_CMD=""
-GG_ISSUE_TIMEOUT=15
-[ -f "$ROOT/.gitguards.conf" ] && . "$ROOT/.gitguards.conf"
+# ── Project configuration ────────────────────────────────────────────────────
+# 🔴 Read as TEXT from the protected branch (scripts/git-guards/conf.sh), never
+# sourced: a line added to an uncommitted .gitguards.conf used to run right here.
+GG_CONF_LIB="$ROOT/scripts/git-guards/conf.sh"
+if [ ! -f "$GG_CONF_LIB" ]; then
+    echo "🔴 scripts/git-guards/conf.sh missing — the kit in this tree is incomplete: merge the protected branch into it" >&2
+    echo "   (scripts/wt-new.sh --resume <branch> --merge-main from the main folder) or reinstall the kit (/vibe-flow:init)" >&2
+    exit 1
+fi
+. "$GG_CONF_LIB"
+# Called once now and once more after the fetch below: the fresh origin config wins.
+load_conf() {
+    local prev="${GG_PROT:-}|${GG_POLICY_SOURCE:-}|${GG_POLICY:-}"
+    gg_conf_init "$ROOT" || { echo "🔴 cannot read the repository at $ROOT" >&2; exit 1; }
+    if [ "${1:-}" = again ] && [ "$prev" = "$GG_PROT|$GG_POLICY_SOURCE|$GG_POLICY" ]; then return 0; fi
+    GG_PROTECTED=$GG_PROT
+    GG_WT_DIR=$(gg_get GG_WT_DIR "")
+    GG_BRANCH_PREFIX=$(gg_get GG_BRANCH_PREFIX "wt/")
+    GG_DEV_CMD=$(gg_get GG_DEV_CMD "")
+    GG_DEV_PORT_BASE=$(gg_get GG_DEV_PORT_BASE 3000)
+    GG_DEV_PORT_ENV=$(gg_get GG_DEV_PORT_ENV PORT)
+    GG_DEV_READY_GLOBS=$(gg_get GG_DEV_READY_GLOBS "")
+    GG_DEV_READY_WAIT=$(gg_get GG_DEV_READY_WAIT 80)
+    GG_FETCH_TIMEOUT=$(gg_get GG_FETCH_TIMEOUT 20)
+    GG_DEPS_INSTALL_CMD=$(gg_get GG_DEPS_INSTALL_CMD "")
+    GG_ISSUE_TIMEOUT=$(gg_get GG_ISSUE_TIMEOUT 15)
+}
+load_conf
 
 RESUME=""; FORCE_NEW=0; NAME=""; BASE=""
 ISSUE=""; ISSUE_SET=0; MERGE_MAIN=0; NPOS=0
@@ -73,8 +89,7 @@ fi
 # 🔴 The worktree directory is computed from the MAIN working tree, not from the
 # script's location: otherwise running from a worktree creates a nested <base>/<base>/.
 MAIN=$(git -C "$ROOT" worktree list --porcelain | awk '/^worktree /{print substr($0, 10); exit}')
-WT_BASE="${GG_WT_DIR:-$(dirname "$MAIN")/$(basename "$MAIN")-wt}"
-case "$WT_BASE" in /*) ;; *) WT_BASE="$(cd "$MAIN" && cd "$(dirname "$WT_BASE")" && pwd)/$(basename "$WT_BASE")" ;; esac
+# WT_BASE is computed after the fetch below — from the fresh config.
 
 COMMON=$(git -C "$ROOT" rev-parse --git-common-dir)
 case "$COMMON" in /*) ;; *) COMMON="$(cd "$ROOT/$COMMON" && pwd -P)" ;; esac
@@ -105,31 +120,6 @@ run_with_timeout() {
     kill -TERM "$watcher" 2>/dev/null || true
     wait "$watcher" 2>/dev/null || true   # otherwise bash prints "Terminated: 15"
     return "$rc"
-}
-
-# ── Protected branch (the kit-wide rule) ─────────────────────────────────────
-# origin/HEAD → origin/main → origin/master; without an origin remote — the MAIN
-# working tree's .gitguards.conf, read as text (never sourced), or "main".
-conf_value() {      # $1 = file, $2 = key → value with one pair of quotes removed
-    [ -f "$1" ] || return 1
-    local v
-    v=$(sed -n "s/^$2=//p" "$1" | tail -1)
-    [ -n "$v" ] || return 1
-    case "$v" in \"*\") v="${v#\"}"; v="${v%\"}" ;; \'*\') v="${v#\'}"; v="${v%\'}" ;; esac
-    printf '%s\n' "$v"
-}
-gg_protected() {
-    local r b
-    if git -C "$ROOT" remote get-url origin >/dev/null 2>&1; then
-        r=$(git -C "$ROOT" symbolic-ref -q refs/remotes/origin/HEAD 2>/dev/null || true)
-        case "$r" in refs/remotes/origin/?*) printf '%s\n' "${r#refs/remotes/origin/}"; return ;; esac
-        for b in main master; do
-            if has_ref "refs/remotes/origin/$b"; then printf '%s\n' "$b"; return; fi
-        done
-    fi
-    r=$(conf_value "$(dirname "$COMMON")/.gitguards.conf" GG_PROTECTED || true)
-    case "$r" in ''|-*|*[!A-Za-z0-9._/-]*) r="main" ;; esac
-    printf '%s\n' "$r"
 }
 
 # ── Issue lookup (--issue N) ─────────────────────────────────────────────────
@@ -225,7 +215,13 @@ if git -C "$ROOT" remote get-url origin >/dev/null 2>&1; then
         echo "  ⚠️  could not update origin/$GG_PROTECTED within ${GG_FETCH_TIMEOUT}s (no network, no access, or no such branch on origin) — using what is available locally"
     fi
 fi
-PROT=$(gg_protected)
+# The protected branch and the config, read again after the fetch (conf.sh):
+# origin/HEAD → origin/main → origin/master; without an origin ref — the committed
+# config of local main/master, else the main working tree's text.
+load_conf again
+PROT=$GG_PROTECTED
+WT_BASE="${GG_WT_DIR:-$(dirname "$MAIN")/$(basename "$MAIN")-wt}"
+case "$WT_BASE" in /*) ;; *) WT_BASE="$(cd "$MAIN" && cd "$(dirname "$WT_BASE")" && pwd)/$(basename "$WT_BASE")" ;; esac
 
 # Guard files of a branch vs the protected branch on origin. An old branch brings
 # old copies: its install-git-guards.sh (run by `npm install` → prepare) would put

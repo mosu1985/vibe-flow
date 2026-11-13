@@ -17,11 +17,19 @@ NAME="$1"; FORCE="${2:-}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # ── Project configuration ────────────────────────────────────────────────────
-GG_WT_DIR=""
-GG_BRANCH_PREFIX="wt/"
-GG_PROTECTED="main"
-GG_DEV_PROC_MATCH=""      # part of the dev process name, for killing orphans
-[ -f "$ROOT/.gitguards.conf" ] && . "$ROOT/.gitguards.conf"
+# 🔴 Read as TEXT from the protected branch (scripts/git-guards/conf.sh), never
+# sourced: an uncommitted GG_PROTECTED used to unlock deleting unpushed work.
+GG_CONF_LIB="$ROOT/scripts/git-guards/conf.sh"
+if [ ! -f "$GG_CONF_LIB" ]; then
+    echo "🔴 scripts/git-guards/conf.sh missing — the kit in this tree is incomplete: merge the protected branch into it" >&2
+    echo "   (scripts/wt-new.sh --resume <branch> --merge-main from the main folder) or reinstall the kit (/vibe-flow:init)" >&2
+    exit 1
+fi
+. "$GG_CONF_LIB"
+gg_conf_init "$ROOT" || { echo "🔴 cannot read the repository at $ROOT"; exit 1; }
+GG_PROTECTED=$GG_PROT
+GG_WT_DIR=$(gg_get GG_WT_DIR "")
+GG_DEV_PROC_MATCH=$(gg_get GG_DEV_PROC_MATCH "")   # part of the dev process name, for killing orphans
 
 MAIN=$(git -C "$ROOT" worktree list --porcelain | awk '/^worktree /{print substr($0, 10); exit}')
 WT_BASE="${GG_WT_DIR:-$(dirname "$MAIN")/$(basename "$MAIN")-wt}"
@@ -39,6 +47,11 @@ BRANCH=$(git -C "$DIR" symbolic-ref --quiet --short HEAD 2>/dev/null || echo "")
 if [ -z "$BRANCH" ]; then
     echo "🔴 $DIR has a detached HEAD — no way to determine the branch, not deleting blindly."
     echo "   Remove manually:  git worktree remove $DIR"
+    exit 1
+fi
+# Whatever the config says, the protected branch itself is never deleted.
+if [ "$BRANCH" = "$GG_PROTECTED" ]; then
+    echo "🔴 $BRANCH is the protected branch — not deleting it (with or without --force)."
     exit 1
 fi
 

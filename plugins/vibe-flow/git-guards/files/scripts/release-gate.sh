@@ -35,10 +35,20 @@ case "$COMMON" in /*) ;; *) COMMON="$(cd "$COMMON" && pwd -P)" ;; esac
 DIR="$COMMON/monitorex-locks/release-gate"
 mkdir -p "$DIR"
 
-GG_PROTECTED="main"
-GG_RELEASE_GATE_SKIP="*.md"
 TOP=$(git rev-parse --show-toplevel)
-if [ -f "$TOP/.gitguards.conf" ]; then . "$TOP/.gitguards.conf"; fi
+# 🔴 The policy is read as TEXT (scripts/git-guards/conf.sh), never sourced from
+# the tree: a branch's own GG_PROTECTED used to move the review base, and so
+# shrink the diff the reviewer sees. The protected branch follows the kit-wide
+# rule (origin/HEAD → origin/main → origin/master).
+GG_CONF_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/git-guards/conf.sh"
+if [ ! -f "$GG_CONF_LIB" ]; then
+    echo "🔴 scripts/git-guards/conf.sh missing — the kit in this tree is incomplete: merge the protected branch into it" >&2
+    echo "   (scripts/wt-new.sh --resume <branch> --merge-main from the main folder) or reinstall the kit (/vibe-flow:init)" >&2
+    exit 1
+fi
+. "$GG_CONF_LIB"
+gg_conf_init "$TOP" || { echo "🔴 cannot read the repository at $TOP" >&2; exit 1; }
+GG_PROTECTED=$GG_PROT
 
 # origin if it exists: pre-push gets the remote explicitly, and with a second remote
 # that sorts earlier alphabetically, scope/status would compute a different base.
@@ -49,19 +59,14 @@ BASE_REF="refs/remotes/$REMOTE/$GG_PROTECTED"
 # the protected branch's config on the remote, or, if absent, from the main working
 # tree. The branch's own config does not affect the mask, otherwise SKIP="*" in it
 # would disable the gate.
-skip_policy() {
-    grep -E '^GG_RELEASE_GATE_SKIP=' | tail -1 \
-        | sed -e 's/^GG_RELEASE_GATE_SKIP=//' -e "s/^[\"']//" -e "s/[\"']\$//"
-}
-GG_RELEASE_GATE_SKIP="*.md"
 if gpol=$(git show "$BASE_REF:.gitguards.conf" 2>/dev/null); then
-    if printf '%s\n' "$gpol" | grep -q '^GG_RELEASE_GATE_SKIP='; then
-        GG_RELEASE_GATE_SKIP=$(printf '%s\n' "$gpol" | skip_policy)
-    fi
-elif [ -f "$(dirname "$COMMON")/.gitguards.conf" ] \
-     && grep -q '^GG_RELEASE_GATE_SKIP=' "$(dirname "$COMMON")/.gitguards.conf"; then
-    GG_RELEASE_GATE_SKIP=$(skip_policy < "$(dirname "$COMMON")/.gitguards.conf")
+    GG_POLICY=$gpol
+elif [ -f "$GG_MAIN_CONF" ]; then
+    GG_POLICY=$(cat "$GG_MAIN_CONF")
+else
+    GG_POLICY=""
 fi
+GG_RELEASE_GATE_SKIP=$(gg_get GG_RELEASE_GATE_SKIP "*.md")
 HEAD_SHA=$(git rev-parse HEAD)
 TREE=$(git rev-parse 'HEAD^{tree}')
 
