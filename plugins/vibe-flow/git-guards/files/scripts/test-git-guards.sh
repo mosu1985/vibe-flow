@@ -885,6 +885,7 @@ PGE="$TMP/pge"; mkrepo "$PGE"; printf 'GG_PLAN_GATE=""\n' > "$PGE/.gitguards.con
 echo v2 > "$PGE/a.txt"
 out=$(commit "$PGE" "[feat]: no gate" a.txt); rc=$?
 [ $rc -eq 0 ] && ! echo "$out" | grep -q 'plan gate' && ok "GG_PLAN_GATE empty — safe-commit runs no gate" || bad "GG_PLAN_GATE empty" "$out"
+! echo "$out" | grep -q 'ignoring invalid' && ok "GG_PLAN_GATE empty — no false 'ignoring invalid' warning" || bad "GG_PLAN_GATE empty warns" "$out"
 # The canonical plan-gate.sh plugs into the same GG_PLAN_GATE contract
 PGK="$TMP/pgk"; mkrepo "$PGK"; mkdir -p "$PGK/githooks"; cp "$ROOT/githooks/plan-gate.sh" "$PGK/githooks/"
 printf 'GG_PLAN_GATE="githooks/plan-gate.sh"\nGG_PLAN_REQUIRED_TYPES="feat"\n' > "$PGK/.gitguards.conf"
@@ -1705,6 +1706,16 @@ out=$(HOME="$CFH" bash "$CF/scripts/wt-status.sh" --names 2>&1)
 ev_none && ok "wt-status: nothing in the config runs" || bad "wt-status executed the config" "$(ev_list)"
 
 CW="$CFH/cfwt/cf1"
+# wt-new run FROM a worktree: that tree's own (uncommitted) config is not read either
+cp "$CW/.gitguards.conf" "$TMP/cw-conf.bak"
+printf 'touch "%s/b1"\nGG_WT_DIR="%s"\nGG_BRANCH_PREFIX="evil/"\n' "$EV" "$TMP/cf-evil-wt" >> "$CW/.gitguards.conf"
+ev_clear
+out=$( cd "$CW" && HOME="$CFH" bash scripts/wt-new.sh cf2 2>&1 ); rc=$?
+ev_none && ok "wt-new run from a worktree: nothing in that tree's config runs" || bad "wt-new from a worktree executed its config" "$(ev_list)"
+[ $rc -eq 0 ] && [ -d "$CFH/cfwt/cf2" ] && git -C "$CF" rev-parse -q --verify refs/heads/wt/cf2 >/dev/null && [ ! -e "$TMP/cf-evil-wt" ] \
+    && ok "wt-new run from a worktree: values come from origin, not from the tree" || bad "wt-new from a worktree: values" "rc=$rc $out"
+cp "$TMP/cw-conf.bak" "$CW/.gitguards.conf"
+HOME="$CFH" bash "$CF/scripts/wt-done.sh" cf2 --force >/dev/null 2>&1
 printf 'touch "%s/w1"\nGG_PROTECTED="wt/x"\nGG_RELEASE_GATE_SKIP="*"\n' "$EV" >> "$CW/.gitguards.conf"
 echo code > "$CW/code.ts"; nh -C "$CW" add code.ts; nh -C "$CW" commit -qm code
 ev_clear
@@ -1739,14 +1750,15 @@ out=$(bash "$CM/scripts/wt-status.sh" 2>"$TMP/ws.err"); rc=$?
 
 # No origin: the committed config of the local main branch; uncommitted edits ignored
 CN="$TMP/cn"; mkrepo "$CN"; git -C "$CN" branch -M main; kit_copy "$CN"
-printf 'GG_BRANCH_PREFIX="lb/"\nGG_WT_DIR="%s"\n' "$TMP/cn-wt" > "$CN/.gitguards.conf"
+printf 'GG_BRANCH_PREFIX="lb/"\nGG_WT_DIR="$HOME/cn-wt"\n' > "$CN/.gitguards.conf"
 nh -C "$CN" add -A; nh -C "$CN" commit -qm kit
 printf 'touch "%s/n1"\nGG_BRANCH_PREFIX="evil/"\n' "$EV" >> "$CN/.gitguards.conf"
 ev_clear
-out=$(bash "$CN/scripts/wt-new.sh" n1 2>&1); rc=$?
+out=$(HOME="$CFH" bash "$CN/scripts/wt-new.sh" n1 2>&1); rc=$?
 ev_none && ok "no origin: nothing in the config runs" || bad "no origin: executed the config" "$(ev_list)"
 [ $rc -eq 0 ] && git -C "$CN" rev-parse -q --verify refs/heads/lb/n1 >/dev/null && ! git -C "$CN" rev-parse -q --verify refs/heads/evil/n1 >/dev/null \
     && ok "no origin: the committed config of local main applies, the uncommitted edit does not" || bad "no origin: source of values" "rc=$rc $out"
+[ -d "$CFH/cn-wt/n1" ] && ok "no origin: GG_WT_DIR=\$HOME/… from the committed config of local main is expanded" || bad "no origin: \$HOME in GG_WT_DIR" "$out"
 
 # origin added but never fetched, no committed config: GG_PROTECTED from the main-tree
 # text may name the branch being deleted — wt-done refuses to delete the protected branch
@@ -1784,6 +1796,60 @@ out=$(bash "$CK/scripts/wt-new.sh" k1 2>&1); rc=$?
 out=$(bash "$CK/scripts/wt-status.sh" 2>"$TMP/ws.err"); rc=$?
 [ $rc -eq 0 ] && [ ! -s "$TMP/ws.err" ] && ok "wt-status without conf.sh: silent, exit 0" || bad "wt-status without conf.sh" "rc=$rc $(cat "$TMP/ws.err")"
 ev_none && ok "no evidence left by any run" || bad "evidence left" "$(ev_list)"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Empty policy values (vibe-flow 1.2.11): an empty value is not "invalid" — no false
+# warning — and it still means the DEFAULT, never "off". An independent fixture:
+# the PGR one restores itself by origin/main~1, an extra policy commit there breaks it.
+# ═════════════════════════════════════════════════════════════════════════════
+echo "== hooks: an empty policy value is silent and still means the default =="
+EPO="$TMP/ep-origin.git"; git init -q --bare "$EPO"; git -C "$EPO" symbolic-ref HEAD refs/heads/main
+EP="$TMP/ep"; git init -q "$EP"; git -C "$EP" symbolic-ref HEAD refs/heads/main
+git -C "$EP" config user.email t@t; git -C "$EP" config user.name t
+kit_copy "$EP"; cp "$ROOT/scripts/release-gate.sh" "$EP/scripts/"; echo a > "$EP/a.txt"
+cat > "$EP/.gitguards.conf" <<'CONF'
+GG_RELEASE_GATE=1
+GG_RELEASE_GATE_SKIP=""
+GG_DEV_READY_GLOBS=""
+GG_PLAN_REQUIRED_TYPES=""
+GG_PLAN_GATE_EXEMPT=""
+CONF
+nh -C "$EP" add -A; nh -C "$EP" commit -qm init
+git -C "$EP" remote add origin "$EPO"; nh -C "$EP" push -q origin main 2>/dev/null; git -C "$EP" fetch -q origin
+bash "$EP/scripts/install-git-guards.sh" >/dev/null 2>&1
+git -C "$EP" checkout -q -b wt/ep-md
+pg_mc "$EP" "[docs]: notes" notes.md n1 >/dev/null
+out=$(pg_push "$EP" wt/ep-md); rc=$?
+[ $rc -eq 0 ] && ! echo "$out" | grep -q 'ignoring invalid' \
+    && ok "pre-push: empty values in origin's policy — no false 'ignoring invalid' warning" || bad "pre-push: empty values warn" "rc=$rc $out"
+! echo "$out" | grep -q 'has not passed final review' && ok "pre-push: empty SKIP = default *.md — a docs-only push needs no review" || bad "pre-push: empty SKIP" "$out"
+out=$( cd "$EP" && bash scripts/release-gate.sh scope 2>&1 ); rc=$?
+[ $rc -eq 0 ] && echo "$out" | grep -q 'no files need review' \
+    && ok "release-gate: empty SKIP = default *.md, like pre-push" || bad "release-gate: empty SKIP" "rc=$rc $out"
+pg_mc "$EP" "[fix]: code" a.txt a2 >/dev/null
+out=$(pg_push "$EP" wt/ep-md); rc=$?
+[ $rc -ne 0 ] && echo "$out" | grep -q 'has not passed final review' \
+    && ok "pre-push: empty SKIP — code without a verdict is still refused" || bad "pre-push: empty SKIP lets code through" "rc=$rc $out"
+git -C "$EP" checkout -q -b wt/ep-feat origin/main
+pg_mc "$EP" "[feat]: a documented feature" feat.md f1 >/dev/null
+out=$(pg_push "$EP" wt/ep-feat); rc=$?
+[ $rc -ne 0 ] && echo "$out" | grep -q "no 'Plan: <file>.md' line" && ! echo "$out" | grep -q 'ignoring invalid' \
+    && ok "pre-push: empty GG_PLAN_REQUIRED_TYPES = default feat — [feat] without Plan: is refused, silently" || bad "pre-push: empty PLAN_REQUIRED_TYPES" "rc=$rc $out"
+out=$( cd "$EP" && sh githooks/plan-gate.sh --get GG_PLAN_GATE_EXEMPT 2>&1 >/dev/null ); rc=$?
+[ $rc -ne 0 ] && [ -z "$out" ] && ok "plan-gate.sh: an empty value is absent (rc 1) and silent" || bad "plan-gate.sh: empty value" "rc=$rc $out"
+EN="$TMP/en"; mkrepo "$EN"; printf 'GG_PLAN_GATE_EXEMPT="nope"\n' > "$EN/.gitguards.conf"
+out=$( cd "$EN" && sh "$ROOT/githooks/plan-gate.sh" --get GG_PLAN_GATE_EXEMPT 2>&1 >/dev/null )
+echo "$out" | grep -q 'ignoring invalid GG_PLAN_GATE_EXEMPT' && ok "plan-gate.sh: a non-empty invalid value is still named out loud" || bad "plan-gate.sh: invalid value warning" "$out"
+# " " = skip nothing: the documented way to review even *.md
+git -C "$EP" checkout -q main
+printf 'GG_RELEASE_GATE=1\nGG_RELEASE_GATE_SKIP=" "\n' > "$EP/.gitguards.conf"
+nh -C "$EP" commit -qam "skip nothing"; nh -C "$EP" push -q origin main 2>/dev/null; git -C "$EP" fetch -q origin
+git -C "$EP" checkout -q -b wt/ep-skip origin/main
+pg_mc "$EP" "[docs]: more" more.md m1 >/dev/null
+out=$( cd "$EP" && bash scripts/release-gate.sh scope 2>&1 ); rc=$?
+[ $rc -eq 0 ] && echo "$out" | grep -q 'files for review' && ok "release-gate: SKIP=\" \" — even a docs-only diff needs review" || bad "release-gate: SKIP space" "rc=$rc $out"
+out=$(pg_push "$EP" wt/ep-skip); rc=$?
+[ $rc -ne 0 ] && echo "$out" | grep -q 'has not passed final review' && ok "pre-push: SKIP=\" \" — a docs-only push needs a verdict" || bad "pre-push: SKIP space" "rc=$rc $out"
 
 # Project tests: scripts/git-guards/test-local-*.sh. They are added by the project
 # itself, not by install.sh — so updating the kit does not overwrite them. All helpers are visible to them.

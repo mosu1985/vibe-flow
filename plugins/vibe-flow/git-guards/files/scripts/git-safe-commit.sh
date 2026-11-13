@@ -78,7 +78,7 @@ conf_get() {       # allowlisted keys only, value shape checked
         GG_PLAN_GATE) printf '%s' "$v" | grep -Eq '^([A-Za-z0-9_][A-Za-z0-9_./-]*)?$' \
                           && ! printf '%s' "$v" | grep -q '\.\.' ;;
         *) false ;;
-    esac || { warn "ignoring invalid $1 in .gitguards.conf"; return 1; }
+    esac || { [ -z "$v" ] || warn "ignoring invalid $1 in .gitguards.conf"; return 1; }   # empty = absent, silent
     printf '%s\n' "$v"
 }
 
