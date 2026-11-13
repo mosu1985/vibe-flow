@@ -149,6 +149,10 @@ if not os.path.isdir(pdir):
     os.makedirs(pdir)
     print(u"+ %s/ created" % pd)
 ignore = "/%s/" % pd
+tracked = subprocess.run(["git", "-C", root, "ls-files", "--", pd], capture_output=True, text=True, timeout=10).stdout.strip()
+if tracked:
+    print(u"= %s/ is kept in git by the project — not ignored" % pd)
+    sys.exit(0)
 if add_line(os.path.join(root, ".gitignore"), ignore):
     print(u"+ %s in .gitignore" % ignore)
 try:

@@ -6,7 +6,9 @@
 #                                 git-guards files + the CLAUDE.md rules block, with its diff;
 #                                 compared with each project's origin (what prepare starts from)
 #   GG_ROLLOUT_SHA=<sha> rollout-projects.sh prepare
-#                                 worktree wt/gg-update-<sha8> per project, files, commit;
+#                                 worktree wt/gg-update-<sha8> per project, files, commit
+#                                 (+ settings-merge.py: hooks and plansDirectory in
+#                                 .claude/settings.json, the plans folder in .gitignore);
 #                                 Next route types for pre-push (typegen, or GG_DEV_CMD once)
 #   (run vibe-flow:release-gate on every prepared worktree — pre-push requires it)
 #   GG_ROLLOUT_SHA=<sha> rollout-projects.sh ship

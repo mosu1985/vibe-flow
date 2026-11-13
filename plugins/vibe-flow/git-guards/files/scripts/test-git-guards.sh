@@ -1165,6 +1165,8 @@ out=$(pa_run_nd pd5.md "$PA_GOOD" false "" "$TMP/pa-out/pd5.md")
 [ ! -f "$PAM/pd5.md" ] && ok "pd hook: plansDirectory '../pa-out' — not used" || bad "pd hook: .. dir" "$out"
 rm -f "$PAP/.claude/settings.json"
 # A plan for several repositories: the plan file is copied into each target's plans directory
+# — only targets that switched it on (plansDirectory in their settings.json)
+for t in e f; do mkdir -p "$PAH/dev/$t/.claude"; printf '{"plansDirectory": ".plans"}\n' > "$PAH/dev/$t/.claude/settings.json"; done
 echo plan > "$PAP/.plans/pd6.md"
 out=$(pa_run_nd pd6.md "$(pr_plan "Репозиторий: $PAH/dev/e")" false "" "$PAP/.plans/pd6.md")
 [ -f "$(mk "$PAH/dev/e" pd6.md)" ] && [ -f "$PAH/dev/e/.plans/pd6.md" ] && grep -q 'Репозиторий' "$PAH/dev/e/.plans/pd6.md" \
@@ -1176,6 +1178,14 @@ mkdir -p "$PAH/dev/f/.plans"; echo "someone else's plan" > "$PAH/dev/f/.plans/pd
 out=$(pa_run_nd pd7.md "$(pr_plan "Репозиторий: $PAH/dev/f")" false "" "$PAP/.plans/pd7.md")
 grep -qx "someone else's plan" "$PAH/dev/f/.plans/pd7.md" && echo "$out" | grep -q 'pd7.md' \
     && ok "pd hook: a different plan with the same name in the target — not overwritten, the user is told" || bad "pd hook: target conflict" "$out"
+echo plan > "$PAP/.plans/pd8.md"
+out=$(pa_run_nd pd8.md "$(pr_plan "Репозиторий: $PAH/dev/c")" false "" "$PAP/.plans/pd8.md")
+[ -f "$(mk "$PAH/dev/c" pd8.md)" ] && [ ! -e "$PAH/dev/c/.plans" ] \
+    && ok "pd hook: target without plansDirectory — mark written, no stray .plans folder created there" || bad "pd hook: target not switched on" "$out"
+mkdir -p "$PAH/.claude/plans"; echo plan > "$PAH/.claude/plans/pd9.md"
+out=$(pa_run_nd pd9.md "$(pr_plan "Репозиторий: $PAH/dev/e")" false "" "$PAH/.claude/plans/pd9.md")
+[ -f "$(mk "$PAH/dev/e" pd9.md)" ] && [ ! -e "$PAH/dev/e/.plans/pd9.md" ] \
+    && ok "pd hook: plan in the old ~/.claude/plans — the target finds it there, no copy" || bad "pd hook: legacy source copy" "$out"
 rm -rf "$PAP/.plans" "$PAP/planning"
 
 echo "== PreToolUse guard: unit cases (test_pretooluse_guard.py) =="
@@ -1338,7 +1348,15 @@ echo "plan B" > "$PDW/.plans/pdb.md"     # now the same text as in the main tree
 out=$(iw bash "$IW/scripts/wt-done.sh" pd-plans 2>&1); rc=$?
 [ $rc -eq 0 ] && [ ! -d "$PDW" ] && grep -qx "plan A" "$IW/.plans/pda.md" && grep -qx "plan B" "$IW/.plans/pdb.md" \
     && ok "wt-done: plans moved into the main tree (identical one deduplicated), tree removed" || bad "wt-done: plans moved" "$out"
-rm -rf "$IW/.plans" "$IW/.claude"
+# A plans folder the project keeps in git is the project's own business: not moved
+out=$(iw bash "$IW/scripts/wt-new.sh" pd-tracked 2>&1)
+PDT=$(git -C "$IW" worktree list --porcelain | awk '/^worktree /{p=substr($0,10)} /^branch refs\/heads\/wt\/pd-tracked$/{print p}')
+printf '{"plansDirectory": "docs/plans"}\n' > "$IW/.claude/settings.json"
+mkdir -p "$PDT/docs/plans"; echo "tracked plan" > "$PDT/docs/plans/t.md"
+git -C "$PDT" add docs/plans/t.md; git -C "$PDT" -c core.hooksPath=/dev/null commit -qm "tracked plan"
+out=$(iw bash "$IW/scripts/wt-done.sh" pd-tracked --force 2>&1); rc=$?
+[ ! -e "$IW/docs/plans/t.md" ] && ok "wt-done: a plans folder tracked in git is not moved" || bad "wt-done: tracked plans moved" "$out"
+rm -rf "$IW/.plans" "$IW/.claude" "$IW/docs"
 
 if [ -n "$KIT" ]; then
 echo "== settings-merge.py: plansDirectory and the plans folder =="
@@ -1358,6 +1376,11 @@ SM3="$TMP/sm3"; mkrepo "$SM3"; mkdir -p "$SM3/.claude"; printf '{"plansDirectory
 out=$(python3 "$KIT/settings-merge.py" "$SM3" 2>&1)
 [ "$(smv "$SM3")" = "../out" ] && [ ! -d "$TMP/out" ] && echo "$out" | grep -qi 'plansDirectory' \
     && ok "settings-merge: plansDirectory outside the project — left alone, nothing created, said out loud" || bad "settings-merge: bad dir" "$out"
+SM4="$TMP/sm4"; mkrepo "$SM4"; mkdir -p "$SM4/.claude" "$SM4/docs/plans"; printf '{"plansDirectory": "docs/plans"}\n' > "$SM4/.claude/settings.json"
+echo plan > "$SM4/docs/plans/p.md"; git -C "$SM4" add docs/plans/p.md; git -C "$SM4" commit -qm plans
+out=$(python3 "$KIT/settings-merge.py" "$SM4" 2>&1)
+! grep -q 'docs/plans' "$SM4/.gitignore" 2>/dev/null && ! grep -q 'docs/plans' "$SM4/.git/info/exclude" \
+    && ok "settings-merge: a plans folder the project keeps in git — not ignored" || bad "settings-merge: tracked dir ignored" "$out"
 fi
 
 echo "== post-edit-tests: related tests right after an edit (PostToolUse) =="

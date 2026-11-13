@@ -61,6 +61,9 @@ ok = isinstance(v, str) and re.fullmatch(r"\.?[A-Za-z0-9_][A-Za-z0-9_./-]*", v) 
 print(v.rstrip("/") if ok else "")
 PY
 )
+if [ -n "$PD" ] && [ -n "$(git -C "$DIR" ls-files -- "$PD" 2>/dev/null)" ]; then
+    PD=""     # a plans folder the project keeps in git travels with the branch, not by us
+fi
 if [ -n "$PD" ] && [ -d "$DIR/$PD" ] && [ ! -L "$DIR/$PD" ] && [ "$DIR" != "$MAIN" ]; then
     PSRC="$DIR/$PD"; PDST="$MAIN/$PD"
     if [ -L "$PDST" ]; then
@@ -85,7 +88,11 @@ if [ -n "$PD" ] && [ -d "$DIR/$PD" ] && [ ! -L "$DIR/$PD" ] && [ "$DIR" != "$MAI
             if [ -e "$PDST/$(basename "$f")" ]; then
                 rm -f "$f"                                   # the same text is already there
             else
-                cp -p "$f" "$PDST/$(basename "$f")" && rm -f "$f" && PMOVED=$((PMOVED + 1))
+                if ! cp -p "$f" "$PDST/$(basename "$f")"; then
+                    echo "🔴 could not copy $f into $PDST — the tree is kept."
+                    exit 1
+                fi
+                rm -f "$f"; PMOVED=$((PMOVED + 1))
             fi
         fi
     done

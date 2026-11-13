@@ -71,8 +71,8 @@ the tree, said out loud (`monitorex-hooks/.source` = `origin@<sha>` or `bootstra
 ## Acceptance
 
 ```bash
-bash files/scripts/test-git-guards.sh     # from this directory: 347 checks
-bash scripts/test-git-guards.sh           # in a project: 340 (settings-merge, detect, install.sh are not copied there)
+bash files/scripts/test-git-guards.sh     # from this directory: 377 checks
+bash scripts/test-git-guards.sh           # in a project: fewer (settings-merge, detect, install.sh are not copied there)
 ```
 
 Everything runs in temporary repositories; the plans directories (`~/.claude/plans`,

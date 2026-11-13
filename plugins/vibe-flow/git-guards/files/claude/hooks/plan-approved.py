@@ -260,11 +260,26 @@ def plans_dirs(proj):
     return out
 
 
-def copy_plan(common, name, text):
+def copy_plan(common, name, text, source_dir):
     """A plan for several repositories: put the approved plan text into the target's plans
     directory, so its pre-push finds the file. → a note for the user, or None when all is well.
+    Only for a plan from a project's plans directory (one in ~/.claude/plans or $GG_PLANS_DIR
+    is found by the target as it is) and only into a target that switched the folder on
+    (plansDirectory in its settings.json) — elsewhere a stray, un-ignored folder would appear.
     A different file with the same name is never overwritten."""
+    shared = {os.path.realpath(os.path.expanduser("~/.claude/plans"))}
+    if os.environ.get("GG_PLANS_DIR"):
+        shared.add(os.path.realpath(os.path.expanduser(os.environ["GG_PLANS_DIR"])))
+    if source_dir in shared:
+        return None
     main = os.path.dirname(os.path.realpath(common))
+    try:
+        with open(os.path.join(main, ".claude", "settings.json"), encoding="utf-8") as fh:
+            switched_on = "plansDirectory" in json.load(fh)
+    except Exception:
+        switched_on = False
+    if not switched_on:
+        return None
     d = project_plans_dir(main)
     if d is None:
         return "%s: its plansDirectory is unusable — %s not copied there" % (main, name)
@@ -404,7 +419,7 @@ def main():
                         if common not in written:
                             write_mark(common, name, body)
                             written.add(common)
-                        cp_note = copy_plan(common, name, plan)
+                        cp_note = copy_plan(common, name, plan, os.path.dirname(real))
                         if cp_note:
                             not_copied.append(_CTRL.sub(" ", cp_note)[:300])
                         if os.path.dirname(common) not in ok_list:
