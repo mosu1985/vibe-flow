@@ -184,7 +184,21 @@ view_ref() {
 rb() { python3 "$RB" "$1" "$TPL" "$VERSION" "${@:2}"; }
 claude_in_git() { git -C "$1" ls-files --error-unmatch CLAUDE.md >/dev/null 2>&1; }
 
-conf() { (GG_PROTECTED=main; . "$1/.gitguards.conf" >/dev/null 2>&1; eval "printf '%s' \"\${$2:-}\""); }
+# A project's .gitguards.conf is read as TEXT from its protected branch by the kit's
+# reader — never sourced: a hostile line in one project's main folder used to run
+# here, in the owner's run across every project. The reader is the one next to THIS
+# script, not the pinned snapshot: conf() calls its API, so the two must be the same
+# version, and an older pinned release may not have it at all (Codex C1).
+GG_CONF_LIB="$SELF_DIR/../plugins/vibe-flow/git-guards/files/scripts/git-guards/conf.sh"
+[ -f "$GG_CONF_LIB" ] || die "no $GG_CONF_LIB — this vibe-flow checkout is incomplete"
+conf() {   # $1 project, $2 key → value ("" if absent); GG_PROTECTED → the protected branch
+    ( . "$GG_CONF_LIB"
+      if ! gg_conf_init "$1" >/dev/null 2>&1; then [ "$2" = GG_PROTECTED ] && printf 'main'; exit 0; fi
+      if [ "$2" = GG_PROTECTED ]; then printf '%s' "$GG_PROT"; else gg_get "$2" ""; fi )
+}
+policy_source() { # $1 project → origin | local-branch | main-text | none (Codex C2: its own subshell)
+    ( . "$GG_CONF_LIB"; gg_conf_init "$1" >/dev/null 2>&1 && printf '%s' "$GG_POLICY_SOURCE" )
+}
 
 wt_dir() {   # worktree directory of project $1, the same rule as wt-new.sh
     local P="$1" base; base="$(conf "$P" GG_WT_DIR)"
@@ -241,6 +255,12 @@ types_found() { # $1 tree, $2 globs
 dev_types() {
     local P="$1" T="$2" globs="$3" cmd var port pid i log
     cmd="$(conf "$P" GG_DEV_CMD)"; [ -n "$cmd" ] || return 1
+    # The owner's run starts only a command the project merged into its protected
+    # branch on origin — never one from the main folder's uncommitted text.
+    if [ "$(policy_source "$P")" != origin ]; then
+        warn "GG_DEV_CMD is not run: the project's .gitguards.conf is not on origin/$(conf "$P" GG_PROTECTED)"
+        return 1
+    fi
     var="$(conf "$P" GG_DEV_PORT_ENV)"; var="${var:-PORT}"
     case "$var" in *[!A-Za-z0-9_]*|[0-9]*) return 1 ;; esac
     port=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])') || return 1

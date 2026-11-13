@@ -365,6 +365,37 @@ out="$(GG_ROLLOUT_SHA="$SHA6" GG_ROLLOUT_ROOTS="$R6" rollout ship 2>&1)"
     && ok "ship: a typecheck-rewritten build cache does not keep the worktree" \
     || bad "worktree kept because of tsconfig.tsbuildinfo"
 
+echo "== a project's .gitguards.conf is read as text, never run"
+R7="$TMP/roots7"; EV7="$TMP/ev7"; H7="$TMP/home7"; mkdir -p "$EV7" "$H7"
+# pe: origin holds the config (GG_WT_DIR via $HOME); the main folder adds hostile lines, uncommitted
+mkrepo "$R7/pe"; cp "$TMP/old-wt-new.sh" "$R7/pe/scripts/wt-new.sh"; git -C "$R7/pe" commit -qam old; mkorigin "$R7/pe"
+printf 'GG_PROTECTED="main"\nGG_WT_DIR="$HOME/wt7"\n' > "$R7/pe/.gitguards.conf"
+git -C "$R7/pe" commit -qam homewt; git -C "$R7/pe" push -q origin main
+printf 'touch "%s/r1"\nGG_WT_DIR="%s"\n' "$EV7" "$TMP/evil7" >> "$R7/pe/.gitguards.conf"
+# pf: origin has NO config; only the main folder's text asks for a dev run
+mkrepo "$R7/pf"; cp "$TMP/old-wt-new.sh" "$R7/pf/scripts/wt-new.sh"; printf '.next/\n' > "$R7/pf/.gitignore"
+rm -f "$R7/pf/.gitguards.conf"; git -C "$R7/pf" add -A; git -C "$R7/pf" commit -qm old
+git clone -q --bare "$R7/pf" "$R7/pf.origin.git"; git -C "$R7/pf" remote add origin "$R7/pf.origin.git"; git -C "$R7/pf" fetch -q origin
+cat > "$R7/pf/.gitguards.conf" <<CONF
+GG_WT_DIR="$TMP/wt/pf"
+GG_REQUIRE_DEV_READY=1
+GG_DEV_READY_GLOBS=".next/types"
+GG_DEV_CMD="touch $EV7/r2"
+CONF
+# the vibe-flow checkout lacks the library: rollout must load it next to itself (Codex C1)
+VFLIB="plugins/vibe-flow/git-guards/files/scripts/git-guards/conf.sh"
+rm -f "$VF/$VFLIB"
+out="$(HOME="$H7" GG_ROLLOUT_ROOTS="$R7" GG_ROLLOUT_KNOWN="$KNOWN6" rollout list 2>&1)"; SHA7="$(vf_sha)"
+[ -z "$(ls -A "$EV7")" ] && ok "list: nothing in a project's config runs" || bad "list executed a project's config: $(ls "$EV7")"
+out="$(HOME="$H7" GG_ROLLOUT_SHA="$SHA7" GG_ROLLOUT_ROOTS="$R7" GG_ROLLOUT_KNOWN="$KNOWN6" rollout prepare 2>&1)"
+[ -z "$(ls -A "$EV7")" ] && hasp "$out" 'is not on origin' \
+    && ok "prepare: GG_DEV_CMD from a config that is not on origin is not run, and it says so" \
+    || bad "prepare ran a main-folder GG_DEV_CMD or kept quiet: $(ls "$EV7") $(printf '%s' "$out" | grep -A4 '== pf')"
+[ -d "$H7/wt7/gg-update-${SHA7:0:8}" ] && [ ! -e "$TMP/evil7" ] \
+    && ok "prepare: origin's GG_WT_DIR=\$HOME/… expanded, the main-folder edit ignored (library from the running script)" \
+    || bad "prepare: worktree not where origin's config says: $(printf '%s' "$out" | grep -A4 '== pe')"
+git -C "$VF" checkout -q -- "$VFLIB" 2>/dev/null
+
 echo "== plugins"
 R5="$TMP/roots5"
 for d in "p1" "p2" "loc" "Vibe school" 'x$(touch pwned)`touch pwned2`' "$(printf 'tab\there')"; do kit "$R5/$d"; done

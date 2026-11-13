@@ -31,7 +31,7 @@ A nested subagent cannot reliably launch another agent and cannot leave a live b
 ## 🚦 Before the push
 
 1. **Gate verdict.** In projects with git-guards, a push needs a `vibe-flow:release-gate` verdict for the tree's current content: `cd "<tree>" && scripts/release-gate.sh status`. No verdict → do not try to push, return: "a vibe-flow:release-gate verdict is needed". Only the gate agent itself sets the verdict; only a human bypasses the gate (`! cd "<tree>" && scripts/release-gate.sh override --yes`), never you.
-2. **Branch.** Push the tree's current branch (`git -C "<tree>" rev-parse --abbrev-ref HEAD`) to the same-named branch on `origin`. You **do not push** the production branch (`GG_PROTECTED` from `.gitguards.conf`, `main` by default) directly: it is updated only by merging a PR (below). Other branches only if they are named explicitly.
+2. **Branch.** Push the tree's current branch (`git -C "<tree>" rev-parse --abbrev-ref HEAD`) to the same-named branch on `origin`. You **do not push** the production branch (the `base:` line of `scripts/release-gate.sh scope`, i.e. `origin/HEAD` → `main` → `master`; not the tree's `.gitguards.conf`) directly: it is updated only by merging a PR (below). Other branches only if they are named explicitly.
 3. **The remote has no production branch yet** (a new repository: `git ls-remote --heads origin <GG_PROTECTED>` is empty): the barriers and the gate have nothing to compare against. Do not push, return: "⏸️ the remote has no production branch yet. The first push of the main branch is done by a human: `! git push -u origin <GG_PROTECTED> --no-verify`".
 
 ## 🪝 The pre-push hook

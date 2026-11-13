@@ -23,9 +23,16 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" 2>/dev/null || exit 0
 git rev-parse --git-dir >/dev/null 2>&1 || exit 0
 
+# Project configuration: read as TEXT from the protected branch (conf.sh), never
+# sourced. SessionStart must stay quiet: a missing library or a broken config
+# leaves the defaults.
 GG_BRANCH_PREFIX="wt/"
 GG_PROTECTED="main"
-[ -f "$ROOT/.gitguards.conf" ] && . "$ROOT/.gitguards.conf"
+GG_CONF_LIB="$ROOT/scripts/git-guards/conf.sh"
+if [ -f "$GG_CONF_LIB" ] && . "$GG_CONF_LIB" 2>/dev/null && gg_conf_init "$ROOT" 2>/dev/null; then
+    GG_PROTECTED=$GG_PROT
+    GG_BRANCH_PREFIX=$(gg_get GG_BRANCH_PREFIX "wt/" 2>/dev/null)
+fi
 
 # Comparison base: both the local main branch and its remote snapshot. Work that
 # reached main by any route counts as finished — including when it landed with a

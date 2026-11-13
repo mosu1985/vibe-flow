@@ -56,7 +56,7 @@ Reply in the user's language. Your final text is a report for the main session, 
 ```bash
 cd "<tree>" && git remote get-url origin && git fetch -q origin && git rev-parse --verify -q "origin/<GG_PROTECTED>"
 ```
-(`GG_PROTECTED` comes from `.gitguards.conf`, default `main`.) No `origin` remote or no `origin/<GG_PROTECTED>` → return "⏸️ the repository has no production branch on the remote yet. The first push of the main branch is done by a human: `! git push -u origin <branch> --no-verify`; review after that". Without a base on the remote the diff is undefined and the gate has nothing to compare against.
+(The protected branch follows the kit rule — `origin/HEAD` → `main` → `master`; `scripts/release-gate.sh scope` prints it in its `base:` line. The tree's own `.gitguards.conf` does not decide it.) No `origin` remote or no `origin/<GG_PROTECTED>` → return "⏸️ the repository has no production branch on the remote yet. The first push of the main branch is done by a human: `! git push -u origin <branch> --no-verify`; review after that". Without a base on the remote the diff is undefined and the gate has nothing to compare against.
 
 ```bash
 cd "<tree>" && scripts/release-gate.sh scope
@@ -65,7 +65,7 @@ cd "<tree>" && scripts/release-gate.sh scope
 
 **Remember the full HEAD SHA now** (`cd "<tree>" && git rev-parse HEAD`): the verdict is set on exactly that. If a new commit arrives in the tree during the review, `pass` will refuse, and that is correct: you did not read its content.
 
-**No script** (git-guards is not installed in the project): take the base yourself. The protected branch is `GG_PROTECTED` from `.gitguards.conf`, otherwise `main` (or `master` if there is no `main`). `cd "<tree>" && git merge-base origin/<branch> HEAD`, then proceed the same way; at the end the **verdict is text only**, since there is nowhere to record it, and say so.
+**No script** (git-guards is not installed in the project): take the base yourself. The protected branch is `origin/HEAD` (`git symbolic-ref refs/remotes/origin/HEAD`), otherwise `main` (or `master` if there is no `main`); not the tree's `.gitguards.conf`. `cd "<tree>" && git merge-base origin/<branch> HEAD`, then proceed the same way; at the end the **verdict is text only**, since there is nowhere to record it, and say so.
 
 If the tree has uncommitted code changes (`cd "<tree>" && git status --porcelain`), return "⏸️ commit first, then review" at once: the verdict applies to what is committed.
 

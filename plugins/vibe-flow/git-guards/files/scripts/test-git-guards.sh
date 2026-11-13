@@ -417,8 +417,9 @@ echo "== wt-new: the new branch's base is a fresh origin =="
 WO="$TMP/wo.git"; git init -q --bare "$WO"
 W="$TMP/w"; mkrepo "$W"; git -C "$W" branch -M main
 git -C "$W" remote add origin "$WO"; git -C "$W" push -q origin main 2>/dev/null
-mkdir -p "$W/scripts" "$W/githooks"
+mkdir -p "$W/scripts/git-guards" "$W/githooks"
 cp "$ROOT/scripts/wt-new.sh" "$ROOT/scripts/install-git-guards.sh" "$W/scripts/"
+cp "$ROOT/scripts/git-guards/conf.sh" "$W/scripts/git-guards/"
 cp "$ROOT/githooks/pre-commit" "$ROOT/githooks/pre-push" "$W/githooks/"
 WINIT=$(git -C "$W" rev-parse HEAD)
 WN="$TMP/wn"; git clone -q "$WO" "$WN" 2>/dev/null
@@ -466,8 +467,9 @@ D="$TMP/d"; mkrepo "$D"; git -C "$D" branch -M main
 echo '{"name":"t","version":"1.0.0"}' > "$D/package.json"; echo '{"lock":1}' > "$D/package-lock.json"
 git -C "$D" add -A; git -C "$D" commit -qm deps
 git -C "$D" remote add origin "$DO"; git -C "$D" push -q origin main 2>/dev/null
-mkdir -p "$D/scripts" "$D/githooks"
+mkdir -p "$D/scripts/git-guards" "$D/githooks"
 cp "$ROOT/scripts/wt-new.sh" "$ROOT/scripts/install-git-guards.sh" "$ROOT/scripts/wt-status.sh" "$D/scripts/"
+cp "$ROOT/scripts/git-guards/conf.sh" "$D/scripts/git-guards/"
 cp "$ROOT/githooks/pre-commit" "$ROOT/githooks/pre-push" "$D/githooks/"
 # Install = a marker, so the test needs neither npm nor the network
 printf 'GG_DEPS_INSTALL_CMD="mkdir -p node_modules && touch node_modules/.installed"\n' > "$D/.gitguards.conf"
@@ -532,7 +534,7 @@ kit_copy() {     # $1 = repo: the kit in project layout
     for s in git-safe-commit.sh install-git-guards.sh wt-new.sh wt-done.sh wt-status.sh git-lock.sh git-confirm.sh; do
         cp "$ROOT/scripts/$s" "$1/scripts/"
     done
-    cp "$ROOT"/scripts/git-guards/*.py "$ROOT/scripts/git-guards/consumer-warn.sh" "$1/scripts/git-guards/"
+    cp "$ROOT"/scripts/git-guards/*.py "$ROOT/scripts/git-guards/consumer-warn.sh" "$ROOT/scripts/git-guards/conf.sh" "$1/scripts/git-guards/"
     cp "$CH/monitorex-git-guard.sh" "$CH/monitorex_git_guard.py" "$1/.claude/hooks/"
 }
 sha_of() { printf '%s' "$1" | shasum -a 256 | cut -d' ' -f1; }
@@ -1600,6 +1602,188 @@ printf 'own\n' > "$PM/.m"; echo y > "$PM/s.sh"; git -C "$PM" add s.sh; pmc s1 co
 [ "$(sid)" = "s1" ] && ok "plain commit in a worktree → Session-Id of the actor (one, not duplicated)" || bad "plain commit trailer" "$(sid)"
 echo z > "$PM/b.txt"; git -C "$PM" add b.txt; pmc "" commit -qm noactor
 [ -z "$(sid)" ] && ok "no actor → message untouched" || bad "no actor" "$(sid)"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# .gitguards.conf is READ as text — from the protected branch — and never
+# executed (13.11.2026). The five kit scripts used to `source` it: any line added
+# to an uncommitted copy ran inside a script the guard trusts by name, and a
+# branch's GG_PROTECTED moved the release-gate base.
+# ═════════════════════════════════════════════════════════════════════════════
+echo "== .gitguards.conf: read from the protected branch, never executed =="
+EV="$TMP/cf-evidence"; mkdir -p "$EV"
+CFH="$TMP/cf-home"; mkdir -p "$CFH"
+ev_clear() { rm -f "$EV"/*; }
+ev_none()  { [ -z "$(ls -A "$EV")" ]; }
+ev_list()  { ls "$EV" | tr '\n' ' '; }
+nh() { git -c core.hooksPath=/dev/null "$@"; }
+CL="$ROOT/scripts/git-guards/conf.sh"
+
+# Unit: the parser. Values come back exactly as the shell would see them inside
+# the quotes — and nothing is evaluated on the way.
+cv() {   # $1 = key, $2 = config text → value (rc 1 = absent, 2 = invalid); stderr to $TMP/cv.err
+    ( [ -f "$CL" ] || exit 9; . "$CL"; printf '%s\n' "$2" | HOME=/h gg_conf_value "$1" ) 2>"$TMP/cv.err"
+}
+cvis() { # $1 = label, $2 = key, $3 = text, $4 = expected
+    local got; got=$(cv "$2" "$3"); [ $? -eq 0 ] && [ "$got" = "$4" ] && ok "parser: $1" || bad "parser: $1" "got [$got] $(cat "$TMP/cv.err")"
+}
+cvbad() { # $1 = label, $2 = key, $3 = text → rejected with a warning that names the key
+    cv "$2" "$3" >/dev/null; local rc=$?
+    [ $rc -eq 2 ] && grep -q "ignoring invalid $2" "$TMP/cv.err" && ok "parser: $1 — rejected out loud" || bad "parser: $1" "rc=$rc $(cat "$TMP/cv.err")"
+}
+cvis 'GG_WT_DIR="$HOME/x" — $HOME expanded' GG_WT_DIR 'GG_WT_DIR="$HOME/x"' '/h/x'
+cvis 'GG_WT_DIR=~/x — ~ expanded' GG_WT_DIR 'GG_WT_DIR=~/x' '/h/x'
+cvis 'GG_WT_DIR="${HOME}/x y" — braces, spaces kept' GG_WT_DIR 'GG_WT_DIR="${HOME}/x y"' '/h/x y'
+cvis 'relative GG_WT_DIR kept as is' GG_WT_DIR 'GG_WT_DIR="../p-wt"' '../p-wt'
+cvbad 'GG_WT_DIR with `…` after $HOME' GG_WT_DIR "GG_WT_DIR=\"\$HOME/\`touch $EV/u0\`\""
+cvbad 'GG_WT_DIR with $(…)' GG_WT_DIR 'GG_WT_DIR="$(pwd)/x"'
+cvis 'Automall: \$PORT in double quotes → $PORT' GG_DEV_CMD \
+    'GG_DEV_CMD="cd frontend && { [ -d node_modules ] || npm ci --silent; } && exec npm run dev -- --port \$PORT --strictPort"' \
+    'cd frontend && { [ -d node_modules ] || npm ci --silent; } && exec npm run dev -- --port $PORT --strictPort'
+cvis "cloudcheff: single quotes are literal" GG_DEV_CMD "GG_DEV_CMD='npm run dev -- --port \$PORT'" 'npm run dev -- --port $PORT'
+cvis 'escaped quote inside double quotes' GG_DEV_CMD 'GG_DEV_CMD="echo \"a b\" done"' 'echo "a b" done'
+cvis 'escaped backslash; other \x kept' GG_DEV_CMD 'GG_DEV_CMD="a\\b \n c"' 'a\b \n c'
+cvis 'a command substitution stays text' GG_DEV_CMD "GG_DEV_CMD=\"\\\$(touch $EV/u1)\"" "\$(touch $EV/u1)"
+cvis 'unquoted value: comment cut, spaces trimmed' GG_DEV_PORT_BASE 'GG_DEV_PORT_BASE=3020   # dev port' '3020'
+cvis 'the last line wins' GG_DEV_PORT_BASE "$(printf 'GG_DEV_PORT_BASE=3000\nGG_DEV_PORT_BASE=3010')" '3010'
+cvis 'CRLF line endings' GG_DEV_PORT_BASE "$(printf 'GG_DEV_PORT_BASE=3000\r')" '3000'
+cvis 'GG_DEV_PROC_MATCH with a space' GG_DEV_PROC_MATCH 'GG_DEV_PROC_MATCH="next dev"' 'next dev'
+cvis 'empty value is a value' GG_BRANCH_PREFIX 'GG_BRANCH_PREFIX=""' ''
+cvbad 'unterminated quote' GG_DEV_CMD 'GG_DEV_CMD="npm run dev'
+cvbad 'GG_DEV_PORT_BASE=3e3' GG_DEV_PORT_BASE 'GG_DEV_PORT_BASE=3e3'
+cvbad 'GG_DEV_PORT_ENV="A;B"' GG_DEV_PORT_ENV 'GG_DEV_PORT_ENV="A;B"'
+cvbad 'GG_BRANCH_PREFIX="-x"' GG_BRANCH_PREFIX 'GG_BRANCH_PREFIX="-x"'
+cvbad 'GG_PROTECTED with ..' GG_PROTECTED 'GG_PROTECTED="a..b"'
+cvbad 'empty GG_PROTECTED' GG_PROTECTED 'GG_PROTECTED=""'
+cvbad 'GG_FETCH_TIMEOUT=forever' GG_FETCH_TIMEOUT 'GG_FETCH_TIMEOUT=forever'
+cvbad 'GG_RELEASE_GATE_SKIP with $(…)' GG_RELEASE_GATE_SKIP 'GG_RELEASE_GATE_SKIP="$(id)"'
+cv GG_DEV_PORT_BASE 'XGG_DEV_PORT_BASE=1' >/dev/null; rc=$?
+[ $rc -eq 1 ] && [ ! -s "$TMP/cv.err" ] && ok "parser: an absent key is silent (rc 1)" || bad "parser: absent key" "rc=$rc $(cat "$TMP/cv.err")"
+ev_none && ok "parser: nothing was executed while parsing" || bad "parser executed something" "$(ev_list)"
+# Code lines only (comments explain the rules and name the forbidden words)
+cl_code() { grep -v '^[[:space:]]*#' "$CL" | grep -nE '(^|[^A-Za-z_])(eval|source)([^A-Za-z_]|$)|printf[^|]*%b|\bread +[^-]|\$\{!'; }
+if [ -f "$CL" ] && ! cl_code >/dev/null; then
+    ok "conf.sh has no eval / source / printf %b / read without -r / \${!var}"
+else bad "conf.sh static check" "$(cl_code 2>&1)"; fi
+# The hooks' parser (pre-push conf_raw) and the library agree on values without backslashes
+eval "$(sed -n '/^conf_raw() {/,/^}/p' "$ROOT/githooks/pre-push")"
+agree=1
+for line in 'K="main"' "K='x y'" 'K=1 # c' 'K=""' 'K=plain' "$(printf 'K="crlf"\r')" 'K=  spaced  '; do
+    a=$(printf '%s\n' "$line" | conf_raw K); b=$( ( . "$CL" 2>/dev/null; printf '%s\n' "$line" | gg_conf_raw K ) 2>/dev/null )
+    [ "$a" = "$b" ] || { agree=0; bad "parser agrees with pre-push conf_raw on: $line" "[$a] vs [$b]"; }
+done
+[ $agree = 1 ] && ok "parser agrees with pre-push conf_raw on values without backslashes"
+unset -f conf_raw
+
+# A project with the kit committed and a HOSTILE policy on origin: the hostile
+# lines must not run even though this text IS the trusted, parsed one.
+CFO="$TMP/cf-origin.git"; git init -q --bare "$CFO"; git -C "$CFO" symbolic-ref HEAD refs/heads/main
+CF="$TMP/cf"; mkrepo "$CF"; git -C "$CF" branch -M main
+kit_copy "$CF"; cp "$ROOT/scripts/release-gate.sh" "$CF/scripts/"
+cat > "$CF/.gitguards.conf" <<CONF
+touch "$EV/o1"
+GG_WT_DIR="\$HOME/cfwt"
+GG_BRANCH_PREFIX="\$(touch "$EV/o2")"
+GG_DEV_PROC_MATCH=\`touch "$EV/o3"\`
+CONF
+nh -C "$CF" add -A; nh -C "$CF" commit -qm kit
+git -C "$CF" remote add origin "$CFO"; nh -C "$CF" push -q origin main 2>/dev/null; git -C "$CF" fetch -q origin
+# …and the main working tree adds its own lines on top, uncommitted
+cat >> "$CF/.gitguards.conf" <<CONF
+touch "$EV/m1"
+GG_WT_DIR="$TMP/cf-evil-wt"
+GG_PROTECTED="wt/x"
+GG_BRANCH_PREFIX="evil/"
+CONF
+ev_clear
+out=$(HOME="$CFH" bash "$CF/scripts/wt-new.sh" cf1 2>&1); rc=$?
+ev_none && ok "wt-new: nothing in the config runs (origin policy or uncommitted main-tree lines)" || bad "wt-new executed the config" "$(ev_list)"
+[ $rc -eq 0 ] && [ -d "$CFH/cfwt/cf1" ] && git -C "$CF" rev-parse -q --verify refs/heads/wt/cf1 >/dev/null && [ ! -e "$TMP/cf-evil-wt" ] \
+    && ok "wt-new: origin's GG_WT_DIR=\$HOME/… expanded; uncommitted main-tree values ignored" || bad "wt-new: values come from origin" "rc=$rc $out"
+echo "$out" | grep -q 'ignoring invalid GG_BRANCH_PREFIX' && ok "wt-new: an invalid value is named out loud, default used" || bad "wt-new: invalid value warning" "$out"
+ev_clear
+out=$(HOME="$CFH" bash "$CF/scripts/wt-status.sh" --names 2>&1)
+ev_none && ok "wt-status: nothing in the config runs" || bad "wt-status executed the config" "$(ev_list)"
+
+CW="$CFH/cfwt/cf1"
+printf 'touch "%s/w1"\nGG_PROTECTED="wt/x"\nGG_RELEASE_GATE_SKIP="*"\n' "$EV" >> "$CW/.gitguards.conf"
+echo code > "$CW/code.ts"; nh -C "$CW" add code.ts; nh -C "$CW" commit -qm code
+ev_clear
+out=$( cd "$CW" && HOME="$CFH" bash scripts/release-gate.sh scope 2>&1 ); rc=$?
+ev_none && ok "release-gate: nothing in the branch's config runs" || bad "release-gate executed the config" "$(ev_list)"
+[ $rc -eq 0 ] && echo "$out" | grep -q '(refs/remotes/origin/main)' && echo "$out" | grep -q 'files for review' \
+    && ok "release-gate: base and SKIP come from origin/main, not from the branch's GG_PROTECTED/SKIP" || bad "release-gate: branch config moved the base" "rc=$rc $out"
+nh -C "$CW" checkout -q -- .gitguards.conf
+printf 'GG_PROTECTED="wt/cf1"\n' >> "$CF/.gitguards.conf"
+ev_clear
+out=$(HOME="$CFH" bash "$CF/scripts/wt-done.sh" cf1 2>&1); rc=$?
+ev_none && ok "wt-done: nothing in the config runs" || bad "wt-done executed the config" "$(ev_list)"
+[ $rc -ne 0 ] && [ -d "$CW" ] && git -C "$CF" rev-parse -q --verify refs/heads/wt/cf1 >/dev/null && echo "$out" | grep -q 'not on any remote' \
+    && ok "wt-done: an uncommitted GG_PROTECTED does not unlock deleting unpushed work" || bad "wt-done: unpushed work" "rc=$rc $out"
+out=$(HOME="$CFH" bash "$CF/scripts/wt-done.sh" cf1 --force 2>&1); rc=$?
+[ $rc -eq 0 ] && [ ! -d "$CW" ] && ok "wt-done --force: removes the tree found by origin's GG_WT_DIR" || bad "wt-done --force" "rc=$rc $out"
+
+# Bootstrap: origin has NO config yet → the main working tree's text is used — read, not run
+CMO="$TMP/cm-origin.git"; git init -q --bare "$CMO"; git -C "$CMO" symbolic-ref HEAD refs/heads/main
+CM="$TMP/cm"; mkrepo "$CM"; git -C "$CM" branch -M main; kit_copy "$CM"
+nh -C "$CM" add -A; nh -C "$CM" commit -qm kit
+git -C "$CM" remote add origin "$CMO"; nh -C "$CM" push -q origin main 2>/dev/null; git -C "$CM" fetch -q origin
+printf 'touch "%s/t1"\nGG_BRANCH_PREFIX="mt/"\nGG_WT_DIR="%s"\n' "$EV" "$TMP/cm-wt" > "$CM/.gitguards.conf"
+ev_clear
+out=$(bash "$CM/scripts/wt-new.sh" m1 2>&1); rc=$?
+ev_none && ok "bootstrap (no config on origin): the main-tree text is read, not run" || bad "bootstrap executed the config" "$(ev_list)"
+[ $rc -eq 0 ] && git -C "$CM" rev-parse -q --verify refs/heads/mt/m1 >/dev/null && [ -d "$TMP/cm-wt/m1" ] \
+    && ok "bootstrap: main-tree values apply while origin has no config" || bad "bootstrap values" "rc=$rc $out"
+printf 'GG_BRANCH_PREFIX="unterminated\n' > "$CM/.gitguards.conf"
+out=$(bash "$CM/scripts/wt-status.sh" 2>"$TMP/ws.err"); rc=$?
+[ $rc -eq 0 ] && [ ! -s "$TMP/ws.err" ] && ok "wt-status: a broken config stays silent (SessionStart)" || bad "wt-status: broken config" "rc=$rc $(cat "$TMP/ws.err")"
+
+# No origin: the committed config of the local main branch; uncommitted edits ignored
+CN="$TMP/cn"; mkrepo "$CN"; git -C "$CN" branch -M main; kit_copy "$CN"
+printf 'GG_BRANCH_PREFIX="lb/"\nGG_WT_DIR="%s"\n' "$TMP/cn-wt" > "$CN/.gitguards.conf"
+nh -C "$CN" add -A; nh -C "$CN" commit -qm kit
+printf 'touch "%s/n1"\nGG_BRANCH_PREFIX="evil/"\n' "$EV" >> "$CN/.gitguards.conf"
+ev_clear
+out=$(bash "$CN/scripts/wt-new.sh" n1 2>&1); rc=$?
+ev_none && ok "no origin: nothing in the config runs" || bad "no origin: executed the config" "$(ev_list)"
+[ $rc -eq 0 ] && git -C "$CN" rev-parse -q --verify refs/heads/lb/n1 >/dev/null && ! git -C "$CN" rev-parse -q --verify refs/heads/evil/n1 >/dev/null \
+    && ok "no origin: the committed config of local main applies, the uncommitted edit does not" || bad "no origin: source of values" "rc=$rc $out"
+
+# origin added but never fetched, no committed config: GG_PROTECTED from the main-tree
+# text may name the branch being deleted — wt-done refuses to delete the protected branch
+CX="$TMP/cx"; mkrepo "$CX"; git -C "$CX" branch -M main; kit_copy "$CX"
+nh -C "$CX" add -A; nh -C "$CX" commit -qm kit
+git -C "$CX" remote add origin "$TMP/cx-nowhere.git"
+git -C "$CX" worktree add -q "$TMP/cx-wt/x" -b wt/x
+echo work > "$TMP/cx-wt/x/w.txt"; nh -C "$TMP/cx-wt/x" add w.txt; nh -C "$TMP/cx-wt/x" commit -qm work
+printf 'GG_PROTECTED="wt/x"\n' > "$CX/.gitguards.conf"
+out=$(bash "$CX/scripts/wt-done.sh" x 2>&1); rc=$?
+[ $rc -ne 0 ] && [ -d "$TMP/cx-wt/x" ] && git -C "$CX" rev-parse -q --verify refs/heads/wt/x >/dev/null && echo "$out" | grep -q 'protected branch' \
+    && ok "wt-done: the protected branch itself is never deleted" || bad "wt-done: protected branch" "rc=$rc $out"
+out=$(bash "$CX/scripts/wt-done.sh" x --force 2>&1); rc=$?
+[ $rc -ne 0 ] && [ -d "$TMP/cx-wt/x" ] && ok "wt-done --force: the protected branch is still not deleted" || bad "wt-done --force: protected branch" "rc=$rc $out"
+
+# origin without refs yet: the first read is the local branch; wt-new fetches, reads again,
+# and RECOMPUTES the tree directory from the fresh origin config
+CRO="$TMP/cr-origin.git"; git init -q --bare "$CRO"; git -C "$CRO" symbolic-ref HEAD refs/heads/main
+CR="$TMP/cr"; mkrepo "$CR"; git -C "$CR" branch -M main; kit_copy "$CR"
+printf 'GG_WT_DIR="%s"\n' "$TMP/cr-old-wt" > "$CR/.gitguards.conf"
+nh -C "$CR" add -A; nh -C "$CR" commit -qm kit
+git -C "$CR" remote add origin "$CRO"; nh -C "$CR" push -q origin main 2>/dev/null
+CRN="$TMP/crn"; git clone -q "$CRO" "$CRN" 2>/dev/null; git -C "$CRN" config user.email t@t; git -C "$CRN" config user.name t
+printf 'GG_WT_DIR="%s"\n' "$TMP/cr-new-wt" > "$CRN/.gitguards.conf"; nh -C "$CRN" commit -qam "new wt dir"; nh -C "$CRN" push -q origin HEAD:main 2>/dev/null
+git -C "$CR" update-ref -d refs/remotes/origin/main
+out=$(bash "$CR/scripts/wt-new.sh" r1 2>&1); rc=$?
+[ $rc -eq 0 ] && [ -d "$TMP/cr-new-wt/r1" ] && [ ! -e "$TMP/cr-old-wt/r1" ] \
+    && ok "wt-new: after its own fetch, the fresh origin config decides the tree directory" || bad "wt-new: re-read after fetch" "rc=$rc $out"
+
+# A tree whose kit lacks the library: a clear stop, wt-status silent
+CK="$TMP/ck"; mkrepo "$CK"; git -C "$CK" branch -M main; kit_copy "$CK"; rm -f "$CK/scripts/git-guards/conf.sh"
+out=$(bash "$CK/scripts/wt-new.sh" k1 2>&1); rc=$?
+[ $rc -ne 0 ] && echo "$out" | grep -q 'conf.sh missing' && echo "$out" | grep -q 'merge-main' \
+    && ok "wt-new without conf.sh: a clear stop that says how to restore the kit" || bad "wt-new without conf.sh" "rc=$rc $out"
+out=$(bash "$CK/scripts/wt-status.sh" 2>"$TMP/ws.err"); rc=$?
+[ $rc -eq 0 ] && [ ! -s "$TMP/ws.err" ] && ok "wt-status without conf.sh: silent, exit 0" || bad "wt-status without conf.sh" "rc=$rc $(cat "$TMP/ws.err")"
+ev_none && ok "no evidence left by any run" || bad "evidence left" "$(ev_list)"
 
 # Project tests: scripts/git-guards/test-local-*.sh. They are added by the project
 # itself, not by install.sh — so updating the kit does not overwrite them. All helpers are visible to them.
