@@ -134,6 +134,20 @@ known_blob() {   # $1 = canonical rel path (files/…), $2 = blob hash
 }
 
 # Sync files into tree $1. Prints changed paths to stdout, reports custom files.
+# Plans folder (Claude Code `plansDirectory`): settings-merge.py adds the key when absent,
+# creates the folder and lists it in .gitignore and .git/info/exclude. Prints the files to
+# commit. Uncommitted edits in those files → not touched (they would ride into our commit).
+plans_opt_in() {   # $1 = tree
+    local t="$1"
+    if [ -n "$(git -C "$t" status --porcelain -- .claude/settings.json .gitignore 2>/dev/null)" ]; then
+        printf '  ⚠️  %s\n' ".claude/settings.json or .gitignore has uncommitted edits — plans folder not switched on" >&2
+        return 0
+    fi
+    python3 "$GG/settings-merge.py" "$t" >/dev/null 2>&1 \
+        || { printf '  ⚠️  %s\n' "settings-merge.py failed — plans folder not switched on" >&2; return 0; }
+    git -C "$t" status --porcelain -- .claude/settings.json .gitignore 2>/dev/null | sed 's/^...//'
+}
+
 sync_files() {
     local T="$1" rel dst
     pairs | while IFS="$(printf '\t')" read -r rel dst; do
@@ -378,7 +392,7 @@ prepare)
         say "== $name"
         if ! has_origin "$P"; then
             # No remote: nothing to push and no PR — commit straight to the main folder
-            changed=$(sync_files "$P")
+            changed=$(sync_files "$P"; plans_opt_in "$P")
             st="$(rb "$P/CLAUDE.md" --check)"
             case "$st" in update*|edited*)
                 if claude_in_git "$P"; then
@@ -412,7 +426,7 @@ prepare)
         PROT=$(conf "$P" GG_PROTECTED)
         git -C "$P" fetch -q origin "$PROT" || { warn "fetch failed — skipped"; continue; }
         git -C "$P" worktree add -q --no-track -b "$BRANCH" "$W" "origin/$PROT" || { warn "worktree add failed — skipped"; continue; }
-        changed=$(sync_files "$W")
+        changed=$(sync_files "$W"; plans_opt_in "$W")
         ignored=no
         if claude_in_git "$W"; then
             st="$(rb "$W/CLAUDE.md" --check)"
@@ -501,6 +515,8 @@ $SESSION_URL"
             if [ "$(git -C "$P" branch --show-current)" = "$PROT" ] \
                && git -C "$P" merge -q --ff-only "origin/$PROT" 2>/dev/null; then
                 (cd "$P" && bash scripts/install-git-guards.sh >/dev/null 2>&1) && say "  main folder pulled, hooks reinstalled"
+                # the plans folder is git-ignored: create it in the main folder (and info/exclude)
+                python3 "$GG/settings-merge.py" "$P" >/dev/null 2>&1 || warn "plans folder not set up in the main folder"
             else
                 warn "main folder not fast-forwarded (other branch, divergence or conflicting local edits) — pull it by hand"
             fi

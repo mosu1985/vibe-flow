@@ -670,6 +670,50 @@ pg_mark p1.md
 out=$(pg_push "$PGR"); rc=$?
 [ $rc -eq 0 ] && ok "plan + fresh approval mark — push goes through" || bad "plan + mark — push" "$out"
 
+echo "== plan gate: the project's plans directory (plansDirectory) =="
+# GG_PLANS_DIR unset, HOME swapped: the real ~/.claude/plans never takes part.
+PGHOME="$TMP/pg-home"; mkdir -p "$PGHOME"
+pg_push_nd() { ( cd "$1" && env -u GG_PLANS_DIR HOME="$PGHOME" MONITOREX_ACTOR=tst CLAUDE_CODE_SESSION_ID= git push origin "HEAD:refs/heads/${2:-$PG_BR}" 2>&1 ); }
+pg_reset
+pg_mc "$PGR" "$(printf '[feat]: pd1\n\nPlan: pd1.md')" a.txt pd1 >/dev/null; pg_mark pd1.md
+out=$(pg_push_nd "$PGR"); rc=$?
+[ $rc -ne 0 ] && echo "$out" | grep -q 'plan file not found' && echo "$out" | grep -q "$PGHOME/.claude/plans" && echo "$out" | grep -q '\.plans' \
+    && ok "pd: the plan is nowhere — rejected, the message lists every checked directory" || bad "pd: nowhere" "$out"
+mkdir -p "$PGR/.plans"; echo plan > "$PGR/.plans/pd1.md"
+out=$(pg_push_nd "$PGR"); rc=$?
+[ $rc -eq 0 ] && ok "pd: plan in <tree>/.plans (default plansDirectory) — goes through" || bad "pd: .plans" "$out"
+pg_reset
+pg_mc "$PGR" "$(printf '[feat]: pd2\n\nPlan: pd2.md')" a.txt pd2 >/dev/null; pg_mark pd2.md
+echo plan > "$PGR/.plans/pd2.md"
+git -C "$PGR" worktree add -q --detach "$TMP/pd-wt" "$(git -C "$PGR" rev-parse HEAD)" 2>/dev/null
+out=$(pg_push_nd "$TMP/pd-wt" "$PG_BR"); rc=$?
+[ $rc -eq 0 ] && ok "pd: plan in the MAIN tree's .plans, push from a linked worktree — goes through" || bad "pd: main tree .plans from worktree" "$out"
+git -C "$PGR" worktree remove -f "$TMP/pd-wt"
+pg_reset
+mkdir -p "$PGR/.claude"; printf '{"plansDirectory": "planning"}\n' > "$PGR/.claude/settings.json"
+pg_mc "$PGR" "$(printf '[feat]: pd3\n\nPlan: pd3.md')" a.txt pd3 >/dev/null; pg_mark pd3.md
+echo plan > "$PGR/.plans/pd3.md"
+out=$(pg_push_nd "$PGR"); rc=$?
+[ $rc -ne 0 ] && ok "pd: own plansDirectory 'planning' — .plans no longer counts" || bad "pd: own dir, .plans" "$out"
+mkdir -p "$PGR/planning"; echo plan > "$PGR/planning/pd3.md"
+out=$(pg_push_nd "$PGR"); rc=$?
+[ $rc -eq 0 ] && ok "pd: own plansDirectory 'planning' — counts" || bad "pd: own dir" "$out"
+mkdir -p "$(dirname "$PGR")/pd-out"; echo plan > "$(dirname "$PGR")/pd-out/pd4.md"
+for v in '../pd-out' "$(dirname "$PGR")/pd-out" 'planning/../../pd-out'; do
+    pg_reset
+    printf '{"plansDirectory": "%s"}\n' "$v" > "$PGR/.claude/settings.json"
+    pg_mc "$PGR" "$(printf '[feat]: pd4\n\nPlan: pd4.md')" a.txt "pd4$PG_N" >/dev/null; pg_mark pd4.md
+    out=$(pg_push_nd "$PGR"); rc=$?
+    [ $rc -ne 0 ] && ok "pd: plansDirectory '$v' (outside / absolute / ..) — not used" || bad "pd: bad plansDirectory '$v'" "$out"
+done
+rm -f "$PGR/.claude/settings.json"
+pg_reset
+pg_mc "$PGR" "$(printf '[feat]: pd5\n\nPlan: pd5.md')" a.txt pd5 >/dev/null; pg_mark pd5.md
+mkdir -p "$PGHOME/.claude/plans"; echo plan > "$PGHOME/.claude/plans/pd5.md"
+out=$(pg_push_nd "$PGR"); rc=$?
+[ $rc -eq 0 ] && ok "pd: plan only in the old ~/.claude/plans — still goes through" || bad "pd: legacy dir" "$out"
+rm -rf "$PGR/.plans" "$PGR/planning"
+
 pg_reset
 pg_mc "$PGR" "[Feat]: upper case type" a.txt u1 >/dev/null
 out=$(pg_push "$PGR"); rc=$?
@@ -1097,6 +1141,43 @@ printf '[feat]: x\n\nPlan: rp1.md\n' > "$TMP/pr-m"
 out=$( cd "$PAH/dev/g" && sh githooks/plan-gate.sh "$TMP/pr-m" 2>&1 ); rc=$?
 [ $rc -eq 1 ] && echo "$out" | grep -q 'no approval mark' && ok "end to end: a repository the plan did not name — still rejected" || bad "end to end: unnamed repo" "$out"
 
+echo "== plan-approved.py: the project's plans directory (plansDirectory) =="
+# GG_PLANS_DIR unset, HOME = $PAH: only the project's directory and $PAH/.claude/plans count.
+pa_run_nd() { pa_in "$@" | env -u GG_PLANS_DIR HOME="$PAH" CLAUDE_PROJECT_DIR="${PA_SESSION:-$PA}" bash "$CH/plan-approved.sh"; }
+PAP=$(cd "$PA" && pwd -P)
+mkdir -p "$PAP/.plans"; echo plan > "$PAP/.plans/pd1.md"
+out=$(pa_run_nd pd1.md "$PA_GOOD" false "" "$PAP/.plans/pd1.md")
+[ -f "$PAM/pd1.md" ] && ok "pd hook: plan in <project>/.plans — mark written" || bad "pd hook: .plans" "$out"
+ln -s "$TMP/pa-out/evil.md" "$PAP/.plans/pdlink.md"
+out=$(pa_run_nd pdlink.md "$PA_GOOD" false "" "$PAP/.plans/pdlink.md")
+[ ! -f "$PAM/pdlink.md" ] && [ ! -f "$PAM/evil.md" ] && ok "pd hook: symlink in .plans pointing out — no mark" || bad "pd hook: symlink" "$out"
+echo p > "$TMP/pa-out/pd2.md"
+out=$(pa_run_nd pd2.md "$PA_GOOD" false "" "$TMP/pa-out/pd2.md")
+[ ! -f "$PAM/pd2.md" ] && echo "$out" | grep -q 'directly in' && ok "pd hook: plan outside every plans directory — no mark" || bad "pd hook: outside" "$out"
+mkdir -p "$PAP/.claude" "$PAP/planning"; printf '{"plansDirectory": "planning"}\n' > "$PAP/.claude/settings.json"
+echo plan > "$PAP/planning/pd3.md"; echo plan > "$PAP/.plans/pd4.md"
+out=$(pa_run_nd pd3.md "$PA_GOOD" false "" "$PAP/planning/pd3.md")
+[ -f "$PAM/pd3.md" ] && ok "pd hook: own plansDirectory 'planning' — mark written" || bad "pd hook: own dir" "$out"
+out=$(pa_run_nd pd4.md "$PA_GOOD" false "" "$PAP/.plans/pd4.md")
+[ ! -f "$PAM/pd4.md" ] && ok "pd hook: own plansDirectory — .plans no longer counts" || bad "pd hook: own dir, .plans" "$out"
+printf '{"plansDirectory": "../pa-out"}\n' > "$PAP/.claude/settings.json"; echo p > "$TMP/pa-out/pd5.md"
+out=$(pa_run_nd pd5.md "$PA_GOOD" false "" "$TMP/pa-out/pd5.md")
+[ ! -f "$PAM/pd5.md" ] && ok "pd hook: plansDirectory '../pa-out' — not used" || bad "pd hook: .. dir" "$out"
+rm -f "$PAP/.claude/settings.json"
+# A plan for several repositories: the plan file is copied into each target's plans directory
+echo plan > "$PAP/.plans/pd6.md"
+out=$(pa_run_nd pd6.md "$(pr_plan "Репозиторий: $PAH/dev/e")" false "" "$PAP/.plans/pd6.md")
+[ -f "$(mk "$PAH/dev/e" pd6.md)" ] && [ -f "$PAH/dev/e/.plans/pd6.md" ] && grep -q 'Репозиторий' "$PAH/dev/e/.plans/pd6.md" \
+    && ok "pd hook: target repository gets the mark AND the plan text in its .plans" || bad "pd hook: target copy" "$out"
+printf '[feat]: x\n\nPlan: pd6.md\n' > "$TMP/pd-m"
+( cd "$PAH/dev/e" && env -u GG_PLANS_DIR HOME="$PAH" sh githooks/plan-gate.sh "$TMP/pd-m" ) >/dev/null 2>&1 \
+    && ok "pd end to end: [feat] in the target repository passes without GG_PLANS_DIR" || bad "pd end to end: target repo"
+mkdir -p "$PAH/dev/f/.plans"; echo "someone else's plan" > "$PAH/dev/f/.plans/pd7.md"; echo plan > "$PAP/.plans/pd7.md"
+out=$(pa_run_nd pd7.md "$(pr_plan "Репозиторий: $PAH/dev/f")" false "" "$PAP/.plans/pd7.md")
+grep -qx "someone else's plan" "$PAH/dev/f/.plans/pd7.md" && echo "$out" | grep -q 'pd7.md' \
+    && ok "pd hook: a different plan with the same name in the target — not overwritten, the user is told" || bad "pd hook: target conflict" "$out"
+rm -rf "$PAP/.plans" "$PAP/planning"
+
 echo "== PreToolUse guard: unit cases (test_pretooluse_guard.py) =="
 if [ -d "$ROOT/.claude/hooks" ]; then
     out=$(python3 -B "$ROOT/scripts/git-guards/test_pretooluse_guard.py" 2>&1); rc=$?
@@ -1239,6 +1320,45 @@ mkdir -p "$CLM/issue-13"; printf 'issue=13\nbranch=wt/someone-else\ntree=x\ntime
 out=$(iw bash "$IW/scripts/wt-done.sh" 12-twelve 2>&1); rc=$?
 [ $rc -eq 0 ] && [ ! -e "$CLM/issue-12" ] && [ -d "$CLM/issue-13" ] && echo "$out" | grep -q 'issue #12 released' \
     && ok "wt-done releases its own claim and leaves someone else's" || bad "wt-done claim release" "$out"
+
+echo "== wt-new / wt-done: the project's plans directory =="
+mkdir -p "$IW/.claude"; printf '{"plansDirectory": ".plans"}\n' > "$IW/.claude/settings.json"
+grep -qx '/.plans/' "$IW/.git/info/exclude" 2>/dev/null || printf '/.plans/\n/.claude/\n' >> "$IW/.git/info/exclude"
+out=$(iw bash "$IW/scripts/wt-new.sh" pd-plans 2>&1); rc=$?
+PDW=$(git -C "$IW" worktree list --porcelain | awk '/^worktree /{p=substr($0,10)} /^branch refs\/heads\/wt\/pd-plans$/{print p}')
+[ $rc -eq 0 ] && [ -n "$PDW" ] && [ -d "$PDW/.plans" ] && ok "wt-new: the new tree gets the plans directory (plansDirectory)" || bad "wt-new: plans directory" "$out"
+echo "plan A" > "$PDW/.plans/pda.md"
+mkdir -p "$IW/.plans"; echo "plan B" > "$IW/.plans/pdb.md"; echo "plan B, other text" > "$PDW/.plans/pdb.md"
+out=$(iw bash "$IW/scripts/wt-done.sh" pd-plans 2>&1); rc=$?
+[ $rc -ne 0 ] && [ -d "$PDW" ] && [ -f "$PDW/.plans/pda.md" ] && echo "$out" | grep -q 'pdb.md' \
+    && ok "wt-done: a different plan with the same name in the main tree — nothing moved, the tree is NOT removed" || bad "wt-done: plan conflict" "$out"
+out=$(iw bash "$IW/scripts/wt-done.sh" pd-plans --force 2>&1); rc=$?
+[ -d "$PDW" ] && ok "wt-done --force: the plan conflict still keeps the tree" || bad "wt-done --force: plan conflict" "$out"
+echo "plan B" > "$PDW/.plans/pdb.md"     # now the same text as in the main tree
+out=$(iw bash "$IW/scripts/wt-done.sh" pd-plans 2>&1); rc=$?
+[ $rc -eq 0 ] && [ ! -d "$PDW" ] && grep -qx "plan A" "$IW/.plans/pda.md" && grep -qx "plan B" "$IW/.plans/pdb.md" \
+    && ok "wt-done: plans moved into the main tree (identical one deduplicated), tree removed" || bad "wt-done: plans moved" "$out"
+rm -rf "$IW/.plans" "$IW/.claude"
+
+if [ -n "$KIT" ]; then
+echo "== settings-merge.py: plansDirectory and the plans folder =="
+SM="$TMP/sm"; mkrepo "$SM"
+python3 "$KIT/settings-merge.py" "$SM" >/dev/null 2>&1
+smv() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("plansDirectory"))' "$1/.claude/settings.json"; }
+[ "$(smv "$SM")" = ".plans" ] && [ -d "$SM/.plans" ] && grep -qx '/.plans/' "$SM/.gitignore" && grep -qx '/.plans/' "$SM/.git/info/exclude" \
+    && ok "settings-merge: plansDirectory '.plans', the folder, .gitignore and info/exclude" || bad "settings-merge: plans" "$(cat "$SM/.claude/settings.json" "$SM/.gitignore" 2>&1)"
+python3 "$KIT/settings-merge.py" "$SM" >/dev/null 2>&1
+[ "$(grep -c '^/\.plans/$' "$SM/.gitignore")" = 1 ] && [ "$(grep -c '^/\.plans/$' "$SM/.git/info/exclude")" = 1 ] \
+    && ok "settings-merge: a re-run duplicates nothing" || bad "settings-merge: rerun" "$(cat "$SM/.gitignore")"
+SM2="$TMP/sm2"; mkrepo "$SM2"; mkdir -p "$SM2/.claude"; printf '{"plansDirectory": "planning", "x": 1}\n' > "$SM2/.claude/settings.json"
+python3 "$KIT/settings-merge.py" "$SM2" >/dev/null 2>&1
+[ "$(smv "$SM2")" = "planning" ] && [ -d "$SM2/planning" ] && grep -qx '/planning/' "$SM2/.gitignore" && [ ! -d "$SM2/.plans" ] \
+    && ok "settings-merge: the project's own plansDirectory is kept and set up" || bad "settings-merge: own dir" "$(cat "$SM2/.claude/settings.json")"
+SM3="$TMP/sm3"; mkrepo "$SM3"; mkdir -p "$SM3/.claude"; printf '{"plansDirectory": "../out"}\n' > "$SM3/.claude/settings.json"
+out=$(python3 "$KIT/settings-merge.py" "$SM3" 2>&1)
+[ "$(smv "$SM3")" = "../out" ] && [ ! -d "$TMP/out" ] && echo "$out" | grep -qi 'plansDirectory' \
+    && ok "settings-merge: plansDirectory outside the project — left alone, nothing created, said out loud" || bad "settings-merge: bad dir" "$out"
+fi
 
 echo "== post-edit-tests: related tests right after an edit (PostToolUse) =="
 PE="$TMP/pe"; mkrepo "$PE"; mkdir -p "$PE/lib" "$PE/dir x"

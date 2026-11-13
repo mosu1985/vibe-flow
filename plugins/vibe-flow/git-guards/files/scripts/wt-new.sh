@@ -542,6 +542,24 @@ else
 fi
 CLAIM_KEEP=1
 
+# ── Plans folder: a session started in this tree writes its plans here ───────
+# Claude Code `plansDirectory` (set by the kit) must exist; the folder is git-ignored,
+# so a fresh tree does not have it. Only when the main tree's .claude/settings.json sets
+# the key; read as JSON, never sourced; same rule as plans_dirs() in plan-gate.sh.
+PD=$(python3 - "$MAIN/.claude/settings.json" <<'PY' 2>/dev/null || true
+import json, os, re, sys
+try:
+    v = json.load(open(sys.argv[1], encoding="utf-8")).get("plansDirectory")
+except Exception:
+    v = None
+ok = isinstance(v, str) and re.fullmatch(r"\.?[A-Za-z0-9_][A-Za-z0-9_./-]*", v) and ".." not in v.split("/")
+print(v.rstrip("/") if ok else "")
+PY
+)
+if [ -n "$PD" ] && [ ! -e "$DIR/$PD" ]; then
+    mkdir -p "$DIR/$PD" && echo "  plans folder: $PD/"
+fi
+
 # ── --merge-main: bring an old branch up to date ─────────────────────────────
 if [ -n "$RESUME" ] && [ "$MERGE_MAIN" = "1" ] && has_ref "refs/remotes/origin/$PROT"; then
     echo "  merging origin/$PROT into ${BRANCH}…"

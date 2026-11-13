@@ -42,6 +42,56 @@ if [ -z "$BRANCH" ]; then
     exit 1
 fi
 
+# ── 0. Plans written in this tree go to the main tree ───────────────────────
+# The plans folder (Claude Code `plansDirectory`, default .plans) is git-ignored:
+# `git status` below does not see it, and `worktree remove --force` would erase the
+# plans approved in this tree. Move them first, with --force too. A DIFFERENT plan
+# with the same name in the main tree stops everything before anything is moved.
+# Same rule for the folder as plans_dirs() in plan-gate.sh; the value is read as
+# JSON, never sourced.
+PD=$(python3 - "$MAIN/.claude/settings.json" <<'PY' 2>/dev/null || true
+import json, os, re, sys
+v = ".plans"
+if os.path.isfile(sys.argv[1]):
+    try:
+        v = json.load(open(sys.argv[1], encoding="utf-8")).get("plansDirectory", ".plans")
+    except Exception:
+        v = ".plans"
+ok = isinstance(v, str) and re.fullmatch(r"\.?[A-Za-z0-9_][A-Za-z0-9_./-]*", v) and ".." not in v.split("/")
+print(v.rstrip("/") if ok else "")
+PY
+)
+if [ -n "$PD" ] && [ -d "$DIR/$PD" ] && [ ! -L "$DIR/$PD" ] && [ "$DIR" != "$MAIN" ]; then
+    PSRC="$DIR/$PD"; PDST="$MAIN/$PD"
+    if [ -L "$PDST" ]; then
+        echo "🔴 $PDST is a symlink — the plans of $NAME are not moved, the tree is kept."
+        exit 1
+    fi
+    PCONFLICT=""
+    for f in "$PSRC"/*.md; do
+        if [ -f "$f" ] && [ ! -L "$f" ] && [ -e "$PDST/$(basename "$f")" ] && ! cmp -s "$f" "$PDST/$(basename "$f")"; then
+            PCONFLICT="$PCONFLICT $(basename "$f")"
+        fi
+    done
+    if [ -n "$PCONFLICT" ]; then
+        echo "🔴 these plans already exist in $PDST with a different text:$PCONFLICT"
+        echo "   Nothing moved, the tree is kept. Rename or merge them, then run wt-done.sh again."
+        exit 1
+    fi
+    PMOVED=0
+    for f in "$PSRC"/*.md; do
+        if [ -f "$f" ] && [ ! -L "$f" ]; then
+            mkdir -p "$PDST"
+            if [ -e "$PDST/$(basename "$f")" ]; then
+                rm -f "$f"                                   # the same text is already there
+            else
+                cp -p "$f" "$PDST/$(basename "$f")" && rm -f "$f" && PMOVED=$((PMOVED + 1))
+            fi
+        fi
+    done
+    if [ "$PMOVED" -gt 0 ]; then echo "  plans moved to $PDST: $PMOVED"; fi
+fi
+
 # ── 1. Checks that no work will be lost ──────────────────────────────────────
 # 🔴 NO PIPES WHEN READING COUNTERS. The old form
 #     UNPUSHED=$(git log "@{upstream}..HEAD" 2>/dev/null | wc -l || echo "?")
