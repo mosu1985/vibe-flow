@@ -265,6 +265,12 @@ grep -q "vibe-flow:begin v$CUR" "$R3/pn/CLAUDE.md" && [ -z "$(git -C "$R3/pn" st
     && ok "no origin: committed straight to the main folder" || bad "no-origin project not committed"
 [ -f "$TMP/state/$SHA/projects/pt" ] && grep -q "^commit=$(git -C "$W" rev-parse HEAD)$" "$TMP/state/$SHA/projects/pt" \
     && ok "the run manifest records the prepared commit" || bad "manifest missing"
+pdv() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("plansDirectory"))' "$1/.claude/settings.json" 2>/dev/null; }
+[ "$(pdv "$W")" = ".plans" ] && git -C "$W" show --name-only --format= HEAD | grep -qx '.claude/settings.json' \
+    && git -C "$W" show --name-only --format= HEAD | grep -qx '.gitignore' && grep -qx '/.plans/' "$W/.gitignore" \
+    && ok "plans folder: plansDirectory and .gitignore ride in the prepared commit" || bad "plans folder not in the prepared commit: $(git -C "$W" show --stat --format= HEAD)"
+[ "$(pdv "$R3/pn")" = ".plans" ] && [ -z "$(git -C "$R3/pn" status --porcelain -- .claude/settings.json .gitignore)" ] && [ -d "$R3/pn/.plans" ] \
+    && ok "plans folder: no-origin project switched on and committed" || bad "plans folder: no-origin project"
 
 # a dirty worktree must survive ship (Codex C4)
 printf 'local edit\n' >> "$W/CLAUDE.md"

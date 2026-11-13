@@ -220,6 +220,97 @@ def accept_repo(raw, home):
     return common, ""
 
 
+_PLANS_DIR_RE = re.compile(r"\.?[A-Za-z0-9_][A-Za-z0-9_./-]*")
+
+
+def project_plans_dir(main_tree):
+    """plansDirectory from <main tree>/.claude/settings.json (default .plans); None — unusable
+    (absolute, `..`, odd characters). Keep in sync with project_plans_dir in plan-gate.sh."""
+    v = ".plans"
+    s = os.path.join(main_tree, ".claude", "settings.json")
+    if os.path.isfile(s):
+        try:
+            with open(s, encoding="utf-8") as fh:
+                v = json.load(fh).get("plansDirectory", ".plans")
+        except Exception:
+            v = ".plans"
+    if not isinstance(v, str) or not _PLANS_DIR_RE.fullmatch(v) or ".." in v.split("/"):
+        return None
+    return v.rstrip("/")
+
+
+def plans_dirs(proj):
+    """Plans directories the hook accepts, realpath'd: $GG_PLANS_DIR (if set), <project>/<dir>,
+    <main tree>/<dir>, ~/.claude/plans. Keep in sync with plans_dirs in plan-gate.sh."""
+    raw = []
+    if os.environ.get("GG_PLANS_DIR"):
+        raw.append(os.environ["GG_PLANS_DIR"])
+    if proj and os.path.isdir(proj):
+        common = _git_common(proj)
+        main = os.path.dirname(common) if common else proj
+        d = project_plans_dir(main)
+        if d:
+            raw += [os.path.join(proj, d), os.path.join(main, d)]
+    raw.append("~/.claude/plans")
+    out = []
+    for p in raw:
+        r = os.path.realpath(os.path.expanduser(p))
+        if r not in out:
+            out.append(r)
+    return out
+
+
+def copy_plan(common, name, text, source_dir):
+    """A plan for several repositories: put the approved plan text into the target's plans
+    directory, so its pre-push finds the file. → a note for the user, or None when all is well.
+    Only for a plan from a project's plans directory (one in ~/.claude/plans or $GG_PLANS_DIR
+    is found by the target as it is) and only into a target that switched the folder on
+    (plansDirectory in its settings.json) — elsewhere a stray, un-ignored folder would appear.
+    A different file with the same name is never overwritten."""
+    shared = {os.path.realpath(os.path.expanduser("~/.claude/plans"))}
+    if os.environ.get("GG_PLANS_DIR"):
+        shared.add(os.path.realpath(os.path.expanduser(os.environ["GG_PLANS_DIR"])))
+    if source_dir in shared:
+        return None
+    main = os.path.dirname(os.path.realpath(common))
+    try:
+        with open(os.path.join(main, ".claude", "settings.json"), encoding="utf-8") as fh:
+            switched_on = "plansDirectory" in json.load(fh)
+    except Exception:
+        switched_on = False
+    if not switched_on:
+        return None
+    d = project_plans_dir(main)
+    if d is None:
+        return "%s: its plansDirectory is unusable — %s not copied there" % (main, name)
+    dest_dir = os.path.join(main, d)
+    if os.path.islink(dest_dir):
+        return "%s: %s is a symlink — %s not copied there" % (main, d, name)
+    os.makedirs(dest_dir, exist_ok=True)
+    if os.path.realpath(dest_dir) != dest_dir:
+        return "%s: %s goes through a symlink — %s not copied there" % (main, d, name)
+    dest = os.path.join(dest_dir, name)
+    if os.path.lexists(dest):
+        try:
+            with open(dest, encoding="utf-8") as fh:
+                same = not os.path.islink(dest) and fh.read() == text
+        except Exception:
+            same = False
+        return None if same else "%s: a different %s already in %s — not overwritten" % (main, name, d)
+    fd, tmp = tempfile.mkstemp(dir=dest_dir, prefix=".tmp-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, dest)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return None
+
+
 def write_mark(common, name, body):
     """Atomic write of <common>/monitorex-locks/plan-approved/<name>; refuses symlinked dirs."""
     common = os.path.realpath(common)
@@ -268,18 +359,19 @@ def main():
     if not isinstance(fp, str) or not fp.strip() or not isinstance(plan, str) or not plan.strip():
         _tell("ExitPlanMode returned no plan file path or no plan text.")
     try:
-        plans = os.path.realpath(os.path.expanduser(os.environ.get("GG_PLANS_DIR") or "~/.claude/plans"))
+        proj = os.environ.get("CLAUDE_PROJECT_DIR") or ""
+        plans = plans_dirs(proj)
         real = os.path.realpath(os.path.expanduser(fp))
         name = os.path.basename(real)
-        if (os.path.dirname(real) != plans or ".." in name
+        if (os.path.dirname(real) not in plans or ".." in name
                 or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9._-]*\.md", name)):
-            _tell("the plan file is not a <name>.md directly in " + plans + ".")
+            _tell("the plan file is not a <name>.md directly in any of the plans directories: "
+                  + ", ".join(plans) + ".")
         found = codex_found(os.environ.get("PATH", ""),
                             search_dirs(os.environ.get("GG_CODEX_SEARCH_PATHS", "")))
         ok, kind, reason = decide(plan, found)
         if not ok:
             _tell("for " + name + ": " + reason)
-        proj = os.environ.get("CLAUDE_PROJECT_DIR") or ""
         sid = _CTRL.sub(" ", str(p.get("session_id") or ""))
         body = "ts=%d\nsha256=%s\nsession=%s\nplan=%s\ncritic=%s\nsource=%s\n" % (
             int(time.time()), hashlib.sha256(plan.encode("utf-8")).hexdigest(), sid, name, kind,
@@ -306,7 +398,7 @@ def main():
             else:
                 home = os.environ.get("HOME") or ""
                 deadline = time.monotonic() + TARGETS_DEADLINE
-                ok_list, refused = [], []
+                ok_list, refused, not_copied = [], [], []
                 for i, raw in enumerate(targets):
                     shown = _CTRL.sub(" ", raw)[:200]
                     if i >= MAX_TARGETS:
@@ -327,6 +419,9 @@ def main():
                         if common not in written:
                             write_mark(common, name, body)
                             written.add(common)
+                        cp_note = copy_plan(common, name, plan, os.path.dirname(real))
+                        if cp_note:
+                            not_copied.append(_CTRL.sub(" ", cp_note)[:300])
                         if os.path.dirname(common) not in ok_list:
                             ok_list.append(os.path.dirname(common))
                     except Exception as e:
@@ -335,6 +430,9 @@ def main():
                     notes.append("Plan approval mark for " + name + " was also written to: " + ", ".join(ok_list) + ".")
                 if refused:
                     notes.append("NOT written for: " + "; ".join(refused) + ".")
+                if not_copied:
+                    notes.append("The plan file was NOT copied for: " + "; ".join(not_copied)
+                                 + ". A [feat] push there needs the plan file in its plans directory.")
         if kind != "section" and written:
             why = ("the user decided to go without it" if kind == "user-decision"
                    else "codex is not installed")

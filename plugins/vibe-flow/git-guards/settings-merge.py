@@ -18,8 +18,15 @@ wipe its content.
 The two PostToolUse hooks are registered only when their script exists in
 .claude/hooks/ (install.sh copies the files before calling this): a registration
 pointing at a missing file would print an error after every matching tool call.
+
+Plans directory: Claude Code confirms with a human every edit inside ~/.claude/ — even in
+auto mode — so an autonomous session stalls on its own plan. `plansDirectory` moves plans
+into the project. Added as ".plans" only when the key is absent (a project's own value is
+kept); then the folder is created and listed in .gitignore and in .git/info/exclude (the
+latter does not depend on the branch). A value outside the project (absolute, `..`) is left
+alone and reported — Claude Code refuses it anyway.
 """
-import json, os, sys
+import json, os, re, subprocess, sys
 
 root = sys.argv[1]
 path = os.path.join(root, ".claude", "settings.json")
@@ -92,13 +99,70 @@ for event, matcher, script, timeout, needs_file in WANTED:
     changed = True
     print(u"+ %s" % label)
 
-if not changed:
-    sys.exit(0)
+if "plansDirectory" not in data:
+    data["plansDirectory"] = ".plans"
+    changed = True
+    print(u"+ plansDirectory = .plans (plans in the project, not in ~/.claude/plans)")
+else:
+    print(u"= plansDirectory already set: %s" % data.get("plansDirectory"))
 
-os.makedirs(os.path.dirname(path), exist_ok=True)
-tmp = path + ".tmp"
-with open(tmp, "w", encoding="utf-8") as fh:
-    json.dump(data, fh, ensure_ascii=False, indent=2)
-    fh.write("\n")
-os.replace(tmp, path)          # atomic swap
-print(u"  .claude/settings.json updated (other content preserved)")
+if changed:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, ensure_ascii=False, indent=2)
+        fh.write("\n")
+    os.replace(tmp, path)          # atomic swap
+    print(u"  .claude/settings.json updated (other content preserved)")
+
+
+def add_line(file, line):
+    """Append `line` to `file` unless an identical line is there. → True if appended."""
+    try:
+        with open(file, encoding="utf-8") as fh:
+            if line in (l.rstrip("\r\n") for l in fh):
+                return False
+    except FileNotFoundError:
+        pass
+    with open(file, "a+", encoding="utf-8") as fh:
+        fh.seek(0, os.SEEK_END)
+        if fh.tell() > 0:
+            fh.seek(fh.tell() - 1)
+            if fh.read(1) != "\n":
+                fh.write("\n")
+        fh.write(line + "\n")
+    return True
+
+
+# Plans directory: same rule as plans_dirs() in plan-gate.sh and plan-approved.py.
+pd = data.get("plansDirectory")
+if not isinstance(pd, str) or not re.fullmatch(r"\.?[A-Za-z0-9_][A-Za-z0-9_./-]*", pd) or ".." in pd.split("/"):
+    print(u"! plansDirectory %r is outside the project or unusable — left alone; the plan gate "
+          u"only looks in ~/.claude/plans for this project" % (pd,))
+    sys.exit(0)
+pd = pd.rstrip("/")
+pdir = os.path.join(root, pd)
+if os.path.islink(pdir):
+    print(u"! %s is a symlink — plans folder not set up" % pd)
+    sys.exit(0)
+if not os.path.isdir(pdir):
+    os.makedirs(pdir)
+    print(u"+ %s/ created" % pd)
+ignore = "/%s/" % pd
+tracked = subprocess.run(["git", "-C", root, "ls-files", "--", pd], capture_output=True, text=True, timeout=10).stdout.strip()
+if tracked:
+    print(u"= %s/ is kept in git by the project — not ignored" % pd)
+    sys.exit(0)
+if add_line(os.path.join(root, ".gitignore"), ignore):
+    print(u"+ %s in .gitignore" % ignore)
+try:
+    common = subprocess.run(["git", "-C", root, "rev-parse", "--git-common-dir"],
+                            capture_output=True, text=True, timeout=10).stdout.strip()
+    if common:
+        common = common if os.path.isabs(common) else os.path.join(root, common)
+        info = os.path.join(common, "info")
+        os.makedirs(info, exist_ok=True)
+        if add_line(os.path.join(info, "exclude"), ignore):
+            print(u"+ %s in .git/info/exclude" % ignore)
+except Exception as exc:
+    print(u"! .git/info/exclude not updated (%s)" % exc)

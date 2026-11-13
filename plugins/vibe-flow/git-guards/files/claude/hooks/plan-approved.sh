@@ -16,8 +16,10 @@
 # is never read. All of the following must hold:
 #   - no agent_id in the hook input and tool_response.isAgent === false (a
 #     teammate's plan approved by a lead agent is not a human approval);
-#   - realpath(tool_response.filePath) lies directly in ${GG_PLANS_DIR:-~/.claude/plans}
-#     (a symlink pointing out of it does not count) and is a bare <name>.md;
+#   - realpath(tool_response.filePath) lies directly in one of the plans directories —
+#     $GG_PLANS_DIR (if set), <project>/<plansDirectory>, <main tree>/<plansDirectory>,
+#     ~/.claude/plans (a symlink pointing out does not count) — and is a bare <name>.md;
+#     a plan naming other repositories is also copied into their plans directory;
 #   - tool_response.plan — the text the user approved, with their edits — has the
 #     `Гейт: ✅ пройден` / `Gate: ✅ passed` line and the external critic is settled:
 #     a `## … Codex` section, OR the `| Codex …` gate row says `❌ unavailable —

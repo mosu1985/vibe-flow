@@ -71,12 +71,12 @@ the tree, said out loud (`monitorex-hooks/.source` = `origin@<sha>` or `bootstra
 ## Acceptance
 
 ```bash
-bash files/scripts/test-git-guards.sh     # from this directory: 347 checks
-bash scripts/test-git-guards.sh           # in a project: 340 (settings-merge, detect, install.sh are not copied there)
+bash files/scripts/test-git-guards.sh     # from this directory: 377 checks
+bash scripts/test-git-guards.sh           # in a project: fewer (settings-merge, detect, install.sh are not copied there)
 ```
 
-Everything runs in temporary repositories; `~/.claude/plans` is replaced by a
-temporary `GG_PLANS_DIR`, `gh` and the test runner by stubs. The PreToolUse guard's
+Everything runs in temporary repositories; the plans directories (`~/.claude/plans`,
+the project's `plansDirectory`) are replaced by a temporary `GG_PLANS_DIR` and a swapped `HOME`, `gh` and the test runner by stubs. The PreToolUse guard's
 224 unit cases (`scripts/git-guards/test_pretooluse_guard.py`) count as one check.
 
 Idempotent: re-running updates the code and leaves `.gitguards.conf` alone.

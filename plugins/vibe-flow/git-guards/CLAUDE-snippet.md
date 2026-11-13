@@ -50,7 +50,9 @@ Paste into the project's CLAUDE.md ("Git" section).
 
 - **A `[feat]` commit, or one adding a new file matching `GG_PLAN_REQUIRED_NEW`
   (e.g. a migration), needs a line `Plan: <plan-file>.md`** — a bare file name from
-  `~/.claude/plans`. `pre-push` checks the approval mark written by the
+  the plans directory: the project's `plansDirectory` (the kit sets `.plans`; Claude
+  Code confirms every edit inside `~/.claude/` with a human, which stalls an autonomous
+  session) or the old `~/.claude/plans`. `pre-push` checks the approval mark written by the
   `plan-approved.sh` hook when the user approves `ExitPlanMode`; the plan must have
   a `Gate: ✅ passed` line and a `## … Codex` section — or, without Codex, the
   `| Codex …` gate-table row `⚪️ not installed` / `❌ unavailable — user's decision`. No mark → push refused

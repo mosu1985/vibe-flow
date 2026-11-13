@@ -20,7 +20,8 @@
 # A required plan means:
 #   - a line `Plan: <name>.md` in the message (a bare file name: no `/`, no `..`,
 #     no leading dot);
-#   - the file exists in ${GG_PLANS_DIR:-$HOME/.claude/plans};
+#   - the file exists in one of the plans directories (see plans_dirs below:
+#     the project's plansDirectory, $GG_PLANS_DIR, the old ~/.claude/plans);
 #   - an approval mark $GIT_COMMON_DIR/monitorex-locks/plan-approved/<name>, no
 #     older than GG_PLAN_APPROVAL_TTL_DAYS (30). The mark is written by the Claude
 #     Code hook on an approved ExitPlanMode, never by the model (the PreToolUse
@@ -137,8 +138,38 @@ TYPES=$(printf '%s' "$TYPES" | tr 'A-Z,' 'a-z ')
 NEWMASKS=$(pol GG_PLAN_REQUIRED_NEW) || NEWMASKS=""
 TTL_DAYS=$(pol GG_PLAN_APPROVAL_TTL_DAYS) || TTL_DAYS=30
 EXEMPT=$(pol GG_PLAN_GATE_EXEMPT) || EXEMPT=""
-PLANS_DIR=${GG_PLANS_DIR:-$HOME/.claude/plans}
 CONFIRM="$COMMON/monitorex-locks/CONFIRM"
+
+# ── Plans directories (keep in sync with plans_dirs() in .claude/hooks/plan-approved.py) ──
+# Claude Code confirms with a human every edit inside ~/.claude/ — even in auto mode — so
+# projects keep plans in the project (Claude Code setting `plansDirectory`, default `.plans`).
+# The plan file counts in any of: $GG_PLANS_DIR (if set), <this tree>/<plansDirectory>,
+# <main tree>/<plansDirectory>, ~/.claude/plans (old plans, projects without the setting).
+# plansDirectory comes from the main tree's .claude/settings.json; only a relative path
+# without `..` counts. Several directories do not weaken the gate: what decides is the
+# approval mark, which only the hook writes on the user's ExitPlanMode.
+project_plans_dir() {
+    _s="$(dirname "$COMMON")/.claude/settings.json"
+    [ -f "$_s" ] && command -v python3 >/dev/null 2>&1 || { echo .plans; return 0; }
+    python3 - "$_s" <<'PY' 2>/dev/null || return 1
+import json, re, sys
+try:
+    v = json.load(open(sys.argv[1], encoding="utf-8")).get("plansDirectory", ".plans")
+except Exception:
+    v = ".plans"
+ok = isinstance(v, str) and re.fullmatch(r"\.?[A-Za-z0-9_][A-Za-z0-9_./-]*", v) and ".." not in v.split("/")
+print(v.rstrip("/") if ok else "")
+PY
+}
+plans_dirs() {   # one per line
+    [ -n "${GG_PLANS_DIR:-}" ] && printf '%s\n' "$GG_PLANS_DIR"
+    _pd=$(project_plans_dir) || _pd=""
+    if [ -n "$_pd" ]; then
+        printf '%s\n' "$TOP/$_pd"
+        [ "$(dirname "$COMMON")" != "$TOP" ] && printf '%s\n' "$(dirname "$COMMON")/$_pd"
+    fi
+    printf '%s\n' "$HOME/.claude/plans"
+}
 
 # ── Pieces of the decision ───────────────────────────────────────────────────
 commit_type() {  # first line → lower-case type, or nothing
@@ -210,8 +241,15 @@ plan_problem() {   # $1 full message
     if ! printf '%s' "$_name" | grep -Eq '^[A-Za-z0-9_][A-Za-z0-9._-]*\.md$'; then
         echo "invalid Plan: line '$_name' — expected <name>.md"; return 1
     fi
-    if [ ! -f "$PLANS_DIR/$_name" ]; then
-        echo "plan file not found: $_name is not in the plans directory ($PLANS_DIR)"; return 1
+    _found=""
+    _dirs=$(plans_dirs)
+    while IFS= read -r _d; do
+        [ -n "$_d" ] && [ -f "$_d/$_name" ] && { _found=1; break; }
+    done <<EOF
+$_dirs
+EOF
+    if [ -z "$_found" ]; then
+        echo "plan file not found: $_name is in none of the plans directories: $(printf '%s' "$_dirs" | tr '\n' ' ')"; return 1
     fi
     _mark="$COMMON/monitorex-locks/plan-approved/$_name"
     if [ ! -f "$_mark" ]; then
