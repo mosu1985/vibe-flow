@@ -91,7 +91,8 @@ conf_valid() {   # $1 key, $2 value
 }
 conf_get() {     # $1 key; stdin — config text
     _cv=$(conf_raw "$1") || return 1
-    conf_valid "$1" "$_cv" || { echo "⚠️  plan gate: ignoring invalid $1 in the policy" >&2; return 1; }
+    # Empty = absent: rc 1 and the caller's default, without a false warning (1.2.11).
+    conf_valid "$1" "$_cv" || { [ -z "$_cv" ] || echo "⚠️  plan gate: ignoring invalid $1 in the policy" >&2; return 1; }
     printf '%s\n' "$_cv"
 }
 

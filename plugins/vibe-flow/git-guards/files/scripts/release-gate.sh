@@ -67,6 +67,8 @@ else
     GG_POLICY=""
 fi
 GG_RELEASE_GATE_SKIP=$(gg_get GG_RELEASE_GATE_SKIP "*.md")
+# Empty = the default, exactly as in pre-push (" " is the way to skip nothing).
+[ -n "$GG_RELEASE_GATE_SKIP" ] || GG_RELEASE_GATE_SKIP="*.md"
 HEAD_SHA=$(git rev-parse HEAD)
 TREE=$(git rev-parse 'HEAD^{tree}')
 

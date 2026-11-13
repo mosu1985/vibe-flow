@@ -70,7 +70,8 @@ conf_valid() {
 }
 conf_get() {
     _cv=$(conf_raw "$1") || return 1
-    conf_valid "$1" "$_cv" || { echo "⚠️  pre-push: ignoring invalid $1 in the policy" >&2; return 1; }
+    # Empty = absent: rc 1 and the caller's default, without a false warning (1.2.11).
+    conf_valid "$1" "$_cv" || { [ -z "$_cv" ] || echo "⚠️  pre-push: ignoring invalid $1 in the policy" >&2; return 1; }
     printf '%s\n' "$_cv"
 }
 

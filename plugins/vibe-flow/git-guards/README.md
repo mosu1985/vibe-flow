@@ -71,7 +71,7 @@ the tree, said out loud (`monitorex-hooks/.source` = `origin@<sha>` or `bootstra
 ## Acceptance
 
 ```bash
-bash files/scripts/test-git-guards.sh     # from this directory: 425 checks
+bash files/scripts/test-git-guards.sh     # from this directory: 438 checks
 bash scripts/test-git-guards.sh           # in a project: fewer (settings-merge, detect, install.sh are not copied there)
 ```
 
@@ -111,6 +111,7 @@ ignored with a warning, and the default is used. The reader for the scripts is
 | `GG_DEV_CMD` · `GG_DEV_PORT_BASE` · `GG_DEV_PORT_ENV` | Dev server of a new worktree |
 | `GG_DEV_READY_GLOBS` · `GG_REQUIRE_DEV_READY` | "Build is warmed up" marker. For Next it is `.next/types` — without them `tsc` silently checks less and still says "ok" |
 | `GG_DEV_PROC_MATCH` | Part of the dev process name — so cleanup can kill an orphan |
+| `GG_RELEASE_GATE` · `GG_RELEASE_GATE_SKIP` | The final gate before push (`1` = on); masks of files that need no review, default `*.md`. An empty value means the default. To skip nothing — `GG_RELEASE_GATE_SKIP=" "` |
 | `GG_FETCH_TIMEOUT` | Seconds `wt-new.sh` waits for `git fetch` before falling back to local refs. Default 20 |
 | `GG_PLAN_REQUIRED_TYPES` · `GG_PLAN_REQUIRED_NEW` · `GG_PLAN_GATE` | Plan gate: commit types that need a plan (default `feat`), masks of new files that need one (e.g. `supabase/migrations/*.sql`), the early check for `git-safe-commit.sh`. Any of these keys on origin turns the gate on |
 | `GG_PLAN_APPROVAL_TTL_DAYS` · `GG_PLAN_GATE_EXEMPT` | Age limit of an approval mark (30 days); full SHAs of old commits let through once at rollout (not a date — `GIT_COMMITTER_DATE` is easy to fake) |

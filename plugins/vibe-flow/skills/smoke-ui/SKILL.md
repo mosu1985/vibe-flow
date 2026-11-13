@@ -26,7 +26,7 @@ The extension is **optional**. No connection (`Browser extension is not connecte
 **Where to get the list of sections if the user didn't name any:**
 1. `docs/codemap/pages.md` (if there is an index from `vibe-flow:architecture-map`) — the page routes.
 2. The app's navigation: the menu/sidebar/header component, the router (`app/**/page.*`, `pages/`, `routes.*`, `urls.py`, templates).
-3. Propose a short list to the user (5–8 sections: login, home, the 2–3 most important, the recently changed one) and **start with those changed in the current branch**: `cd "<worktree>" && git diff --name-only <prod-branch>...HEAD`, where the prod branch is `GG_PROTECTED` from `.gitguards.conf` (if absent — `main`).
+3. Propose a short list to the user (5–8 sections: login, home, the 2–3 most important, the recently changed one) and **start with those changed in the current branch**: `cd "<worktree>" && git diff --name-only <prod-branch>...HEAD`, where the prod branch is `origin/HEAD` → `main` → `master` (the `base:` line of `scripts/release-gate.sh scope`), not the tree's `.gitguards.conf`.
 
 Skip parameterized pages (`/orders/[id]`) or take a real id from the data — do not make one up.
 
