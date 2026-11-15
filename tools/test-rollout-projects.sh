@@ -19,6 +19,11 @@ has()  { printf '%s\n' "$1" | grep -qxF -- "$2"; }      # exact line
 hasp() { printf '%s\n' "$1" | grep -qF -- "$2"; }       # substring
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 export GIT_CONFIG_NOSYSTEM=1
+# Identity for git-safe-commit.sh, set explicitly: the run must not depend on being
+# launched inside a Claude Code session (CI has no CLAUDE_CODE_SESSION_ID, and
+# without an identity safe-commit refuses, so prepare silently commits nothing).
+unset CLAUDE_CODE_SESSION_ID
+export MONITOREX_ACTOR=rollout-test
 
 # ── A vibe-flow source repository with a local origin ───────────────────────
 # A clone keeps the full history (the history fallback needs it); the code under
