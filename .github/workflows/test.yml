@@ -15,7 +15,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  # The event is part of the key: a push run and the pull_request run of the same
+  # branch must not cancel each other (the PR run skips its jobs for own branches).
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
