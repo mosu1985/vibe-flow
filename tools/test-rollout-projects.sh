@@ -296,7 +296,9 @@ W4="$TMP/wt/pr/gg-update-${SHA4:0:8}"
 git clone -q "$R4/pr.origin.git" "$TMP/other" && git -C "$TMP/other" checkout -qb "wt/gg-update-${SHA4:0:8}" \
     && printf 'A\n' > "$TMP/other/a.txt" && git -C "$TMP/other" add a.txt && git -C "$TMP/other" commit -qm A \
     && git -C "$TMP/other" push -q origin HEAD
-sed -i '' 's/^ignored_claude=no$/ignored_claude=yes/' "$TMP/state/$SHA4/projects/pr"
+# Portable in-place edit: `sed -i ''` is BSD-only and GNU sed reads '' as the script.
+sed 's/^ignored_claude=no$/ignored_claude=yes/' "$TMP/state/$SHA4/projects/pr" > "$TMP/pr.state" \
+    && mv "$TMP/pr.state" "$TMP/state/$SHA4/projects/pr"
 pr_before="$(cksum < "$R4/pr/CLAUDE.md")"
 out="$(GG_ROLLOUT_SHA="$SHA4" GG_ROLLOUT_ROOTS="$R4" rollout ship 2>&1)"; rc=$?
 grep -q 'pr merge' "$GH_LOG" && bad "a PR was merged after a failed push" || ok "a failed push stops the project: no merge"

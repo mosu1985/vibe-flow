@@ -608,6 +608,9 @@ if [ -d "$MAIN/node_modules" ] && [ -f "$DIR/package.json" ]; then
         if cp -Rc "$MAIN/node_modules" "$DIR/node_modules" 2>/dev/null; then
             echo "  node_modules → APFS clone (copy-on-write)"
         else
+            # GNU cp has no clonefile flag and may copy part of the tree before failing:
+            # start the regular copy clean, or it nests into node_modules/node_modules.
+            rm -rf "$DIR/node_modules"
             cp -R "$MAIN/node_modules" "$DIR/node_modules"
             echo "  node_modules → regular copy (clonefile unavailable)"
         fi

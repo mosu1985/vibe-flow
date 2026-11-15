@@ -266,9 +266,12 @@ EOF
 }
 confirm_fresh() {   # human bypass: git-confirm.sh feat, younger than 15 minutes
     [ -f "$CONFIRM" ] && grep -qx 'target=feat' "$CONFIRM" 2>/dev/null || return 1
-    _mt=$(stat -f %m "$CONFIRM" 2>/dev/null || stat -c %Y "$CONFIRM" 2>/dev/null) || return 1
+    # GNU stat first: GNU `stat -f %m` prints filesystem info instead of failing,
+    # which turned the value into junk and silently voided the mark on Linux/WSL.
+    _mt=$(stat -c %Y "$CONFIRM" 2>/dev/null || stat -f %m "$CONFIRM" 2>/dev/null) || return 1
     case "$_mt" in ''|*[!0-9]*) return 1 ;; esac
-    [ $((NOW - _mt)) -lt 900 ]
+    _cage=$((NOW - _mt))
+    [ "$_cage" -ge -300 ] && [ "$_cage" -lt 900 ]   # a future mtime (clock skew) is not fresh
 }
 hint() {
     cat >&2 <<'TXT'

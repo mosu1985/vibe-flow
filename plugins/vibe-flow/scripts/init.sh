@@ -12,6 +12,31 @@
 # but leaves an existing .gitguards.conf and the CLAUDE.md text outside the markers alone.
 set -eu
 
+# ── Native Windows (Git Bash / MSYS / Cygwin): stop before touching anything ──
+# The protection relies on POSIX paths and tools: on these shells git returns
+# C:/… while the shell works with /c/…, and an install would only half-work.
+# GG_ALLOW_UNSUPPORTED_OS exists for the kit's own CI probe and its maintainers
+# and is honored only together with GITHUB_ACTIONS=true. An agent must NEVER set
+# it: when this stop fires, relay the WSL steps to the user instead.
+case "$(uname -s 2>/dev/null)" in
+  MINGW*|MSYS*|CYGWIN*)
+    if [ "${GG_ALLOW_UNSUPPORTED_OS:-}" = 1 ] && [ "${GITHUB_ACTIONS:-}" = true ]; then
+        printf '\n🔴 unsupported OS: protection NOT verified — the PreToolUse guard may be inert\n\n' >&2
+    else
+        cat >&2 <<'TXT'
+
+🔴 Native Windows (Git Bash / MSYS / Cygwin) is not supported yet: git protection
+   relies on Linux tools and paths. Use WSL 2 (Windows 10 2004+ / Windows 11):
+     1. PowerShell as administrator: wsl --install   → reboot
+     2. In the Ubuntu terminal: install git, python3, Node.js, then Claude Code
+     3. Keep the project inside WSL (~/projects/...), not under /mnt/c
+     4. Open Claude Code in that folder and run /vibe-flow:init again
+   The plugin's agents and skills work without this step.
+TXT
+        exit 1
+    fi ;;
+esac
+
 PLUGIN="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET="$PWD"; GATE=1
 for a in "$@"; do

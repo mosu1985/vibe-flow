@@ -7,6 +7,31 @@
 # .gitguards.conf (a human edits it).
 set -eu
 
+# ── Native Windows (Git Bash / MSYS / Cygwin): stop before touching anything ──
+# The protection relies on POSIX paths and tools: on these shells git returns
+# C:/… while the shell works with /c/…, and an install would only half-work.
+# GG_ALLOW_UNSUPPORTED_OS exists for the kit's own CI probe and its maintainers
+# and is honored only together with GITHUB_ACTIONS=true. An agent must NEVER set
+# it: when this stop fires, relay the WSL steps to the user instead.
+case "$(uname -s 2>/dev/null)" in
+  MINGW*|MSYS*|CYGWIN*)
+    if [ "${GG_ALLOW_UNSUPPORTED_OS:-}" = 1 ] && [ "${GITHUB_ACTIONS:-}" = true ]; then
+        printf '\n🔴 unsupported OS: protection NOT verified — the PreToolUse guard may be inert\n\n' >&2
+    else
+        cat >&2 <<'TXT'
+
+🔴 Native Windows (Git Bash / MSYS / Cygwin) is not supported yet: git protection
+   relies on Linux tools and paths. Use WSL 2 (Windows 10 2004+ / Windows 11):
+     1. PowerShell as administrator: wsl --install   → reboot
+     2. In the Ubuntu terminal: install git, python3, Node.js, then Claude Code
+     3. Keep the project inside WSL (~/projects/...), not under /mnt/c
+     4. Open Claude Code in that folder and run /vibe-flow:init again
+   The plugin's agents and skills work without this step.
+TXT
+        exit 1
+    fi ;;
+esac
+
 GG="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET="${1:-$PWD}"
 TARGET="$(cd "$TARGET" && pwd -P)"
@@ -64,7 +89,11 @@ head_ "2. Configuration"
 if [ -f "$TARGET/.gitguards.conf" ]; then
     say "= .gitguards.conf already exists — leaving it alone"
 else
-    python3 "$GG/detect.py" "$TARGET" > "$TARGET/.gitguards.conf"
+    # Through a temp file: a failed detect must not leave an empty or partial
+    # config that the "already exists" check above would keep on every rerun.
+    python3 "$GG/detect.py" "$TARGET" > "$TARGET/.gitguards.conf.tmp" \
+        || { rm -f "$TARGET/.gitguards.conf.tmp"; die "stack detection failed (detect.py) — nothing written"; }
+    mv "$TARGET/.gitguards.conf.tmp" "$TARGET/.gitguards.conf"
     say "+ .gitguards.conf created from stack auto-detection:"
     grep -E '^GG_' "$TARGET/.gitguards.conf" | sed 's/^/      /'
 fi

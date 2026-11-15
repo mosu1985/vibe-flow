@@ -26,9 +26,15 @@ mkdir -p "$(dirname "$F")"
 case "${1:-status}" in
   status)
     if [ -f "$F" ]; then
-      age=$(( $(date +%s) - $(stat -f %m "$F") ))
-      [ "$age" -lt "$TTL" ] && echo "mark: $(cat "$F"), age ${age}s (lives ${TTL}s)" \
-                            || echo "mark expired (${age}s) — treated as absent"
+      # GNU stat first, then BSD (GNU `stat -f %m` prints filesystem info instead of failing)
+      mt=$(stat -c %Y "$F" 2>/dev/null || stat -f %m "$F" 2>/dev/null || true)
+      case "$mt" in
+        ''|*[!0-9]*) echo "mark age unknown — treated as absent" ;;
+        *) age=$(( $(date +%s) - mt ))
+           if [ "$age" -lt -300 ]; then echo "mark time is in the future (${age}s) — treated as absent"
+           elif [ "$age" -lt "$TTL" ]; then echo "mark: $(cat "$F"), age ${age}s (lives ${TTL}s)"
+           else echo "mark expired (${age}s) — treated as absent"; fi ;;
+      esac
     else echo "no mark"; fi ;;
   clear) rm -f "$F"; echo "removed" ;;
   *)
