@@ -30,8 +30,17 @@ while [ $# -gt 0 ]; do
 done
 set -- ${ARGS[@]+"${ARGS[@]}"}
 
+# Path and policy-blob helpers (gg_is_abs, gg_path, gg_blob): git prints C:/… on
+# Windows, which `case … in /*)` took for a relative path.
+GG_PATHS_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/git-guards/paths.sh"
+if [ ! -f "$GG_PATHS_LIB" ]; then
+    echo "🔴 scripts/git-guards/paths.sh missing — the kit in this tree is incomplete: merge the protected branch into it" >&2
+    echo "   (scripts/wt-new.sh --resume <branch> --merge-main from the main folder) or reinstall the kit (/vibe-flow:init)" >&2
+    exit 1
+fi
+. "$GG_PATHS_LIB"
 COMMON=$(git rev-parse --git-common-dir)
-case "$COMMON" in /*) ;; *) COMMON="$(cd "$COMMON" && pwd -P)" ;; esac
+gg_is_abs "$COMMON" || COMMON=$(gg_path "$COMMON")
 DIR="$COMMON/monitorex-locks/release-gate"
 mkdir -p "$DIR"
 
@@ -47,7 +56,8 @@ if [ ! -f "$GG_CONF_LIB" ]; then
     exit 1
 fi
 . "$GG_CONF_LIB"
-gg_conf_init "$TOP" || { echo "🔴 cannot read the repository at $TOP" >&2; exit 1; }
+# rc 2: the protected branch's policy is unreadable — conf.sh has said so; stop (K8).
+gg_conf_init "$TOP" || { [ "$?" = 2 ] || echo "🔴 cannot read the repository at $TOP" >&2; exit 1; }
 GG_PROTECTED=$GG_PROT
 
 # origin if it exists: pre-push gets the remote explicitly, and with a second remote
@@ -58,14 +68,16 @@ BASE_REF="refs/remotes/$REMOTE/$GG_PROTECTED"
 # The "no review needed" masks are repository policy, as in pre-push: taken from
 # the protected branch's config on the remote, or, if absent, from the main working
 # tree. The branch's own config does not affect the mask, otherwise SKIP="*" in it
-# would disable the gate.
-if gpol=$(git show "$BASE_REF:.gitguards.conf" 2>/dev/null); then
-    GG_POLICY=$gpol
-elif [ -f "$GG_MAIN_CONF" ]; then
-    GG_POLICY=$(cat "$GG_MAIN_CONF")
-else
-    GG_POLICY=""
+# would disable the gate. A read ERROR is not "absent": stop (K8), never the tree's copy.
+gprc=1
+if git rev-parse -q --verify "$BASE_REF^{commit}" >/dev/null 2>&1; then
+    gprc=0; gpol=$(gg_blob "$BASE_REF" .gitguards.conf) || gprc=$?
 fi
+case "$gprc" in
+    0) GG_POLICY=$gpol ;;
+    1) if [ -f "$GG_MAIN_CONF" ]; then GG_POLICY=$(cat "$GG_MAIN_CONF"); else GG_POLICY=""; fi ;;
+    *) gg_conf_unreadable "$BASE_REF"; exit 1 ;;
+esac
 GG_RELEASE_GATE_SKIP=$(gg_get GG_RELEASE_GATE_SKIP "*.md")
 # Empty = the default, exactly as in pre-push (" " is the way to skip nothing).
 [ -n "$GG_RELEASE_GATE_SKIP" ] || GG_RELEASE_GATE_SKIP="*.md"

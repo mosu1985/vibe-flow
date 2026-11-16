@@ -403,6 +403,36 @@ out="$(HOME="$H7" GG_ROLLOUT_SHA="$SHA7" GG_ROLLOUT_ROOTS="$R7" GG_ROLLOUT_KNOWN
     || bad "prepare: worktree not where origin's config says: $(printf '%s' "$out" | grep -A4 '== pe')"
 git -C "$VF" checkout -q -- "$VFLIB" 2>/dev/null
 
+echo "== prepare: the .gitattributes block and the guard self-test (Codex C3)"
+# install.sh is not the only delivery path: a project updated by rollout and then
+# cloned on Windows must get LF scripts too, and a project whose guard cannot deny
+# must be reported, not shipped as healthy. Both projects keep the kit in the main
+# folder with the guard registered in a committed .claude/settings.json.
+R8="$TMP/roots8"
+ga_block() {
+    printf '%s\n' '# vibe-flow:git-guards:begin (managed by vibe-flow, do not edit inside)' \
+        'scripts/*.sh text eol=lf' 'scripts/git-guards/** text eol=lf' 'githooks/** text eol=lf' \
+        '.claude/hooks/** text eol=lf' '.gitguards.conf text eol=lf' '# vibe-flow:git-guards:end'
+}
+mkrepo "$R8/ga"; printf '*.png binary\n' > "$R8/ga/.gitattributes"
+python3 "$GG/settings-merge.py" "$R8/ga" >/dev/null 2>&1
+git -C "$R8/ga" add -A; git -C "$R8/ga" commit -qm "attributes, settings"; mkorigin "$R8/ga"
+mkrepo "$R8/gx"; printf '#!/usr/bin/env bash\nexit 0\n' > "$R8/gx/.claude/hooks/monitorex-git-guard.sh"
+python3 "$GG/settings-merge.py" "$R8/gx" >/dev/null 2>&1
+git -C "$R8/gx" add -A; git -C "$R8/gx" commit -qm "an inert guard (a project edit: rollout keeps it)"; mkorigin "$R8/gx"
+out="$(GG_ROLLOUT_ROOTS="$R8" rollout list 2>&1)"; SHA8="$(vf_sha)"
+out="$(GG_ROLLOUT_SHA="$SHA8" GG_ROLLOUT_ROOTS="$R8" rollout prepare 2>&1)"; rc=$?
+W8="$TMP/wt/ga/gg-update-${SHA8:0:8}"
+{ printf '*.png binary\n'; ga_block; } > "$TMP/ga8.want"
+git -C "$W8" cat-file blob "$(git -C "$W8" ls-tree HEAD -- .gitattributes 2>/dev/null | awk '{print $3}')" > "$TMP/ga8.got" 2>/dev/null
+[ -d "$W8" ] && git -C "$W8" show --name-only --format= HEAD | grep -qx '.gitattributes' && cmp -s "$TMP/ga8.got" "$TMP/ga8.want" \
+    && ok "prepare: the eol=lf block rides in the prepared commit, the project's own line kept" \
+    || bad "prepare: .gitattributes not in the prepared commit: $(printf '%s' "$out" | grep -A6 '^== ga$')"
+gx_out="$(printf '%s\n' "$out" | awk '/^== gx$/ {f = 1; next} /^== / {f = 0} f')"
+[ "$rc" != 0 ] && printf '%s\n' "$gx_out" | grep -Eqi 'self-test|does not block' \
+    && ok "prepare: a project whose guard does not block fails the self-test and the run (exit 1)" \
+    || bad "prepare: an inert guard was not reported by the self-test (rc=$rc): $gx_out"
+
 echo "== plugins"
 R5="$TMP/roots5"
 for d in "p1" "p2" "loc" "Vibe school" 'x$(touch pwned)`touch pwned2`' "$(printf 'tab\there')"; do kit "$R5/$d"; done

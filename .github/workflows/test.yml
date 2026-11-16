@@ -1,6 +1,7 @@
 # CI for vibe-flow: the git-guards acceptance suite and the Node tests on Linux
-# and macOS (green on both is required before a merge), plus an informational
-# native-Windows probe that collects the facts for Git Bash support.
+# and macOS, the same suite on native Windows (Git Bash), the guard under the
+# Python 3.9 floor, and the rollout tool test. posix (ubuntu), posix (macos),
+# windows and floor must all be green before a merge.
 #
 # Keep it this way: read-only token, no secrets, no caches, no pull_request_target,
 # actions pinned to commit SHAs, and never interpolate ${{ github.event.* }} or
@@ -49,12 +50,88 @@ jobs:
           git config --global user.name ci
           git config --global user.email ci@example.invalid
 
+      # The suite also runs test_pretooluse_guard.py (the guard unit cases) inside.
       - name: git-guards acceptance suite
         working-directory: plugins/vibe-flow/git-guards
         run: bash files/scripts/test-git-guards.sh
 
       - name: Node tests
         run: node --test tools/measure-plan-cost.test.mjs plugins/vibe-flow-vercel/scripts/wait-vercel-deploy.test.mjs
+
+      - name: Guard latency (informational, never fails)
+        working-directory: plugins/vibe-flow/git-guards
+        run: |
+          set +e
+          B="$BASH"; H="$PWD/files/claude/hooks/monitorex-git-guard.sh"
+          if command -v cygpath >/dev/null 2>&1; then B=$(cygpath -m "$BASH"); H=$(cygpath -m "$H"); fi
+          GG_BASH="$B" GG_HOOK="$H" python3 - <<'PY'
+          # 20 guard runs per payload through the registered wrapper; p50 and max.
+          # bash is passed by absolute path: on Windows a bare "bash" can be the WSL launcher.
+          import json, os, statistics, subprocess, tempfile, time
+          repo = tempfile.mkdtemp(prefix="gg-latency-")
+          subprocess.run(["git", "init", "-q", repo], check=True)
+          subprocess.run(["git", "-C", repo, "-c", "user.email=t@t", "-c", "user.name=t",
+                          "commit", "-q", "--allow-empty", "-m", "init"], check=True)
+          env = dict(os.environ, CLAUDE_PROJECT_DIR=repo)
+          def once(cmd):
+              body = json.dumps({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": repo}).encode()
+              t0 = time.perf_counter()
+              subprocess.run([os.environ["GG_BASH"], os.environ["GG_HOOK"]], input=body,
+                             capture_output=True, env=env, timeout=60)
+              return (time.perf_counter() - t0) * 1000
+          for label, cmd in (("ls", "ls -la"), ("git add", "git add x")):
+              ms = sorted(once(cmd) for _ in range(20))
+              print(f"guard latency, {label:7s}: p50 {statistics.median(ms):6.0f} ms   max {ms[-1]:6.0f} ms   (20 runs)")
+          PY
+          true
+
+  floor:
+    # The guard must work on the oldest Python the kit supports (3.9): macOS
+    # /usr/bin/python3 is 3.9.6, and Claude Code started from the Dock may find it first.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
+    strategy:
+      fail-fast: false
+      matrix:
+        # Ubuntu pinned: ubuntu-latest moved to 26.04, where setup-python has no 3.9
+        # build ("The version '3.9' with architecture 'x64' was not found").
+        os: [ubuntu-24.04, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Python 3.9 (setup-python)
+        if: matrix.os == 'ubuntu-24.04'
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.9'
+
+      - name: Python 3.9 (macOS /usr/bin/python3 first on PATH)
+        if: matrix.os == 'macos-latest'
+        run: |
+          mkdir -p "$RUNNER_TEMP/py39"
+          ln -s /usr/bin/python3 "$RUNNER_TEMP/py39/python3"
+          echo "$RUNNER_TEMP/py39" >> "$GITHUB_PATH"
+
+      - name: The interpreter is 3.9
+        run: |
+          command -v python3
+          python3 -c 'import sys; print(sys.version); assert sys.version_info[:2] == (3, 9), "not the 3.9 floor"'
+
+      - name: Git identity for the test repositories
+        run: |
+          git config --global user.name ci
+          git config --global user.email ci@example.invalid
+
+      - name: Guard unit cases under 3.9
+        working-directory: plugins/vibe-flow/git-guards
+        run: python3 files/scripts/git-guards/test_pretooluse_guard.py
+
+      - name: Guard cases of the suite under 3.9
+        working-directory: plugins/vibe-flow/git-guards
+        run: GG_SUITE_ONLY=guard GG_TEST_PY39="$(command -v python3)" bash files/scripts/test-git-guards.sh
 
   rollout:
     # Its own job: the rollout test runs the whole git-guards suite inside every
@@ -76,18 +153,14 @@ jobs:
       - name: Rollout tool test
         run: bash tools/test-rollout-projects.sh
 
-  windows-probe:
-    # Informational: native Windows (Git Bash) is not supported yet and init stops
-    # there. The log is the fact base for that work; red here is expected.
+  windows:
+    # Native Windows through Git for Windows (Git Bash) — supported from 1.3.0.
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: windows-latest
-    continue-on-error: true
-    timeout-minutes: 50
+    timeout-minutes: 20
     defaults:
       run:
         shell: bash
-    env:
-      GG_ALLOW_UNSUPPORTED_OS: "1"    # honored only together with GITHUB_ACTIONS=true (set by the runner)
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -102,11 +175,12 @@ jobs:
           echo "git --show-toplevel:    $(git rev-parse --show-toplevel)"
           echo "git --git-common-dir:   $(git rev-parse --git-common-dir)"
           echo "git --absolute-git-dir: $(git rev-parse --absolute-git-dir)"
-          for t in python3 python py cygpath lsof netstat uuidgen shasum sha256sum stat mktemp; do
+          for t in python3 python py cygpath lsof netstat uuidgen shasum sha256sum stat mktemp timeout tasklist taskkill; do
             printf '%-10s %s\n' "$t" "$(command -v "$t" || echo '- missing')"
           done
           python3 -c ''; echo "python3 -c '' -> exit $?"
           python -c 'import sys; print("python:", sys.version.split()[0], "stdout encoding:", sys.stdout.encoding)'
+          cmd //c exit 9009; echo "cmd //c exit 9009 -> \$? as Git Bash sees it: $?"
           cygpath --version 2>&1 | head -1
           stat --version 2>&1 | head -1
           git --version
@@ -116,25 +190,53 @@ jobs:
             plugins/vibe-flow/git-guards/files/githooks/pre-push plugins/vibe-flow/scripts/init.sh
           d=$(mktemp -d); echo x > "$d/target"; ln -s "$d/target" "$d/link"
           if [ -L "$d/link" ]; then echo "ln -s: real symlink"; else echo "ln -s: copy, not a symlink"; fi
-          idx=$(mktemp "${TMPDIR:-/tmp}/probe-idx.XXXXXX"); echo "mktemp -> $idx"
-          if GIT_INDEX_FILE="$idx" git read-tree HEAD; then
-            echo "GIT_INDEX_FILE round-trip: ok ($(GIT_INDEX_FILE="$idx" git ls-files | wc -l) files)"
-          else echo "GIT_INDEX_FILE round-trip: FAILED"; fi
-          sleep 2 & p=$!; kill -0 "$p" && echo "kill -0 on a bash child: ok"; wait
+          sleep 30 & p=$!; echo "msys pid $p -> /proc/$p/winpid: $(cat "/proc/$p/winpid" 2>/dev/null || echo '- missing')"; kill "$p"
           true
 
-      - name: git-guards suite (baseline for native Windows support)
-        working-directory: plugins/vibe-flow/git-guards
-        timeout-minutes: 45
+      - name: Git identity for the test repositories
         run: |
           git config --global user.name ci
           git config --global user.email ci@example.invalid
-          bash files/scripts/test-git-guards.sh 2>&1 | tee "$RUNNER_TEMP/windows-probe-suite.log"
+
+      - name: git-guards suite
+        working-directory: plugins/vibe-flow/git-guards
+        run: bash files/scripts/test-git-guards.sh 2>&1 | tee "$RUNNER_TEMP/windows-suite.log"
+
+      - name: Guard unit cases (test_pretooluse_guard.py)
+        working-directory: plugins/vibe-flow/git-guards
+        run: python3 files/scripts/git-guards/test_pretooluse_guard.py
+
+      - name: Guard latency (informational, never fails)
+        working-directory: plugins/vibe-flow/git-guards
+        run: |
+          set +e
+          B="$BASH"; H="$PWD/files/claude/hooks/monitorex-git-guard.sh"
+          if command -v cygpath >/dev/null 2>&1; then B=$(cygpath -m "$BASH"); H=$(cygpath -m "$H"); fi
+          GG_BASH="$B" GG_HOOK="$H" python3 - <<'PY'
+          # 20 guard runs per payload through the registered wrapper; p50 and max.
+          # bash is passed by absolute path: on Windows a bare "bash" can be the WSL launcher.
+          import json, os, statistics, subprocess, tempfile, time
+          repo = tempfile.mkdtemp(prefix="gg-latency-")
+          subprocess.run(["git", "init", "-q", repo], check=True)
+          subprocess.run(["git", "-C", repo, "-c", "user.email=t@t", "-c", "user.name=t",
+                          "commit", "-q", "--allow-empty", "-m", "init"], check=True)
+          env = dict(os.environ, CLAUDE_PROJECT_DIR=repo)
+          def once(cmd):
+              body = json.dumps({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": repo}).encode()
+              t0 = time.perf_counter()
+              subprocess.run([os.environ["GG_BASH"], os.environ["GG_HOOK"]], input=body,
+                             capture_output=True, env=env, timeout=60)
+              return (time.perf_counter() - t0) * 1000
+          for label, cmd in (("ls", "ls -la"), ("git add", "git add x")):
+              ms = sorted(once(cmd) for _ in range(20))
+              print(f"guard latency, {label:7s}: p50 {statistics.median(ms):6.0f} ms   max {ms[-1]:6.0f} ms   (20 runs)")
+          PY
+          true
 
       - name: Keep the suite log
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: windows-probe-suite-log
-          path: ${{ runner.temp }}/windows-probe-suite.log
+          name: windows-suite-log
+          path: ${{ runner.temp }}/windows-suite.log
           if-no-files-found: warn

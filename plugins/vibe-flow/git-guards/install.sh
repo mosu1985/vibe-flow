@@ -7,38 +7,36 @@
 # .gitguards.conf (a human edits it).
 set -eu
 
-# ── Native Windows (Git Bash / MSYS / Cygwin): stop before touching anything ──
-# The protection relies on POSIX paths and tools: on these shells git returns
-# C:/… while the shell works with /c/…, and an install would only half-work.
-# GG_ALLOW_UNSUPPORTED_OS exists for the kit's own CI probe and its maintainers
-# and is honored only together with GITHUB_ACTIONS=true. An agent must NEVER set
-# it: when this stop fires, relay the WSL steps to the user instead.
+# ── OS gate: stop before touching anything ──────────────────────────────────
+# Native Windows through Git for Windows (Git Bash, uname MINGW*) is supported — it
+# is also the shell Claude Code runs hooks with there. MSYS2 and Cygwin shells bring
+# their own POSIX Python and path rules and are not tested: they stop. There is no
+# switch to force them through (the old override variable is gone).
 case "$(uname -s 2>/dev/null)" in
-  MINGW*|MSYS*|CYGWIN*)
-    if [ "${GG_ALLOW_UNSUPPORTED_OS:-}" = 1 ] && [ "${GITHUB_ACTIONS:-}" = true ]; then
-        printf '\n🔴 unsupported OS: protection NOT verified — the PreToolUse guard may be inert\n\n' >&2
-    else
-        cat >&2 <<'TXT'
+  MSYS*|CYGWIN*)
+    cat >&2 <<'TXT'
 
-🔴 Native Windows (Git Bash / MSYS / Cygwin) is not supported yet: git protection
-   relies on Linux tools and paths. Use WSL 2 (Windows 10 2004+ / Windows 11):
-     1. PowerShell as administrator: wsl --install   → reboot
-     2. In the Ubuntu terminal: install git, python3, Node.js, then Claude Code
-     3. Keep the project inside WSL (~/projects/...), not under /mnt/c
-     4. Open Claude Code in that folder and run /vibe-flow:init again
+🔴 This shell (MSYS2 / Cygwin) is not supported: use Git for Windows (Git Bash) or WSL 2.
+   Git Bash: install Git for Windows and Python 3.9+ from python.org (not the
+   Microsoft Store alias), open Claude Code from it and run /vibe-flow:init again.
    The plugin's agents and skills work without this step.
 TXT
-        exit 1
-    fi ;;
+    exit 1 ;;
 esac
 
 GG="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Path and Python helpers of the kit: gg_path / gg_is_abs (Windows spells one
+# directory C:/…, /c/… and C:\…) and gg_python (the first real Python 3.9+).
+. "$GG/files/scripts/git-guards/paths.sh"
+. "$GG/files/scripts/git-guards/pyenv.sh"
 TARGET="${1:-$PWD}"
 TARGET="$(cd "$TARGET" && pwd -P)"
 
 say()  { printf '  %s\n' "$*"; }
 head_() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 die()  { printf '\n🔴 %s\n' "$*" >&2; exit 1; }
+
+gg_python || die "Python 3.9+ is required (see above) — install it and run again"
 
 # ── 0. Target checks ─────────────────────────────────────────────────────────
 git -C "$TARGET" rev-parse --git-dir >/dev/null 2>&1 || die "$TARGET is not a git repository"
@@ -48,7 +46,8 @@ GITDIR=$(cd "$(git -C "$TARGET" rev-parse --absolute-git-dir)" && pwd -P)
 COMMON=$(cd "$TARGET" && cd "$(git rev-parse --git-common-dir)" && pwd -P)
 [ "$GITDIR" = "$COMMON" ] || die "this is a linked worktree. Install into the main working tree: $COMMON/.."
 TOP=$(git -C "$TARGET" rev-parse --show-toplevel)
-[ "$TOP" = "$TARGET" ] || die "run from the repository root ($TOP)"
+# Normalized: git prints C:/… on Windows while `pwd -P` says /c/… — one directory.
+[ "$(gg_path "$TOP")" = "$(gg_path "$TARGET")" ] || die "run from the repository root ($TOP)"
 
 head_ "Target: $TARGET"
 
@@ -71,6 +70,7 @@ done
 # that installs without errors and fails on the very first commit.
 mkdir -p "$TARGET/scripts/git-guards"
 for f in "$GG"/files/scripts/git-guards/*; do
+    [ -f "$f" ] || continue     # e.g. __pycache__ left by a direct test run in a checkout
     n=$(basename "$f"); cp "$f" "$TARGET/scripts/git-guards/$n"
     case "$n" in *.sh|verify_staged.py) chmod +x "$TARGET/scripts/git-guards/$n";; esac
     say "+ scripts/git-guards/$n"
@@ -91,7 +91,7 @@ if [ -f "$TARGET/.gitguards.conf" ]; then
 else
     # Through a temp file: a failed detect must not leave an empty or partial
     # config that the "already exists" check above would keep on every rerun.
-    python3 "$GG/detect.py" "$TARGET" > "$TARGET/.gitguards.conf.tmp" \
+    "$GG_PY" "$GG/detect.py" "$TARGET" > "$TARGET/.gitguards.conf.tmp" \
         || { rm -f "$TARGET/.gitguards.conf.tmp"; die "stack detection failed (detect.py) — nothing written"; }
     mv "$TARGET/.gitguards.conf.tmp" "$TARGET/.gitguards.conf"
     say "+ .gitguards.conf created from stack auto-detection:"
@@ -100,14 +100,32 @@ fi
 
 # ── 3. Claude Code harness hook ──────────────────────────────────────────────
 head_ "3. Claude Code hook (blocks git add)"
-python3 "$GG/settings-merge.py" "$TARGET" | sed 's/^/  /'
+"$GG_PY" "$GG/settings-merge.py" "$TARGET" | sed 's/^/  /'
+
+# ── 3b. Line endings of the kit (.gitattributes) ─────────────────────────────
+# A marked eol=lf block for the kit's paths: a clone on Windows (core.autocrlf=true)
+# would otherwise check the scripts out with CRLF, and bash fails on $'\r'.
+head_ "3b. .gitattributes (kit scripts stay LF on every OS)"
+"$GG_PY" "$GG/attributes.py" "$TARGET" || die "could not write the kit's block into .gitattributes (see above)"
+say "= .gitattributes: vibe-flow block up to date"
 
 # ── 4. Install git hooks outside the working tree ────────────────────────────
 head_ "4. git hooks"
 bash "$TARGET/scripts/install-git-guards.sh" | sed 's/^/  /'
 
-# ── 5. Acceptance ────────────────────────────────────────────────────────────
-head_ "5. Acceptance"
+# ── 5. The guard really blocks (self-test) ───────────────────────────────────
+# Fail-open stays (the owner's decision), silence goes: an install whose guard cannot
+# deny on this machine (no / too old / fake Python, a missing registration) fails here
+# instead of claiming success. No switch to skip it.
+head_ "5. Guard self-test"
+# Not through a pipe: `| sed` would report sed's exit code, and a failed test would pass.
+if ! ST_OUT=$(bash "$GG/selftest.sh" "$TARGET"); then
+    die "the install FAILED: the PreToolUse guard does not block on this machine (reason above). Fix it and run again"
+fi
+say "$ST_OUT"
+
+# ── 6. Acceptance ────────────────────────────────────────────────────────────
+head_ "6. Acceptance"
 if bash "$TARGET/scripts/test-git-guards.sh" > /tmp/gg-accept.log 2>&1; then
     tail -3 /tmp/gg-accept.log | sed 's/^/  /'
     say "✅ acceptance passed"

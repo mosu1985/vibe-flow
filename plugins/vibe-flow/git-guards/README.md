@@ -45,7 +45,7 @@ the next `install.sh`, and the work is lost.
 | `scripts/wt-status.sh` | What's unfinished: branches with work outside the main branch, and separately — work that exists nowhere else. Run by the `SessionStart` hook, so every session sees the list before its first action |
 | `scripts/git-lock.sh` · `git-recovery.sh` | Locks and recovery of commits that didn't land on the branch |
 | `scripts/git-confirm.sh` · `git-allow-push.sh` · `git-allow-delete.sh` | Deliberate bypasses: a commit in the main working tree, foreign commits, intentional file deletion from the protected branch |
-| `scripts/git-guards/` | 🔴 A dependency, not "utilities": `verify_staged.py` and `consumer-warn.sh` are called by safe-commit, `shell_segments.py` is imported by the harness hook |
+| `scripts/git-guards/` | 🔴 A dependency, not "utilities": `verify_staged.py` and `consumer-warn.sh` are called by safe-commit, `shell_segments.py` is imported by the harness hook. `pyenv.sh` (finds a real Python 3.9+: `gg_python`, `gg_hook_exec`), `paths.sh` (`gg_path`, `gg_is_abs`, `gg_blob` for Windows path spellings and reading a file at a revision) and `gg_paths.py` (the same for Python) are the Windows layer; the Claude hook wrappers and the git hooks (`pre-push`, `plan-gate.sh`) carry byte-identical inlined copies of the first two where they cannot source them |
 | `.claude/hooks/monitorex-git-guard.sh` | PreToolUse: forbids Claude Code from running `git add` (git has no hook of its own for `add`), any write into `.git/` (Write/Edit/NotebookEdit, redirections, `rm`/`cp`/`mv` into `monitorex-locks/` and `monitorex-hooks/`), `git -c url.*/remote.*`, moving `refs/remotes/*`, and `git push` while the installed hooks differ from origin |
 | `.claude/hooks/plan-approved.sh` + `plan-approved.py` | PostToolUse on an approved `ExitPlanMode`: writes the plan approval mark. Trusts only `tool_response` (file inside the plans directory, `isAgent: false`, a `Gate: ✅ passed` line in the approved text). The external critic is settled by a `## … Codex` section, or — **without Codex** — by the `\| Codex …` gate-table row saying `⚪️ not installed` (and codex is really absent: PATH and the standard locations) or `❌ unavailable — user's decision`; then the user also gets a notice. Without Codex the gate goes by the Claude reviewers. The mark goes to the session's repository and to every repository the plan names in its header (`Репозиторий: ~/dev/x` / `Repository: …`, one per line, above the first `## `) — main working trees inside `$HOME` with the kit installed, at most 5; the user is told where (1.2.5) |
 | `.claude/hooks/post-edit-tests.{sh,py}` | PostToolUse on Edit/Write: runs the tests related to the edited file and hands a red result back to the model at once. Fail-open; one run per repository, pauses, a time ceiling that kills the whole process group, secrets masked in the output |
@@ -71,13 +71,17 @@ the tree, said out loud (`monitorex-hooks/.source` = `origin@<sha>` or `bootstra
 ## Acceptance
 
 ```bash
-bash files/scripts/test-git-guards.sh     # from this directory: 483 checks
+bash files/scripts/test-git-guards.sh     # from this directory: ≈540 checks on macOS and Ubuntu; ≈550 on Windows, with the Windows-only cases
 bash scripts/test-git-guards.sh           # in a project: fewer (settings-merge, detect, install.sh are not copied there)
 ```
 
 Everything runs in temporary repositories; the plans directories (`~/.claude/plans`,
 the project's `plansDirectory`) are replaced by a temporary `GG_PLANS_DIR` and a swapped `HOME`, `gh` and the test runner by stubs. The PreToolUse guard's
-224 unit cases (`scripts/git-guards/test_pretooluse_guard.py`) count as one check.
+≈400 unit cases (`scripts/git-guards/test_pretooluse_guard.py`) count as one check.
+
+**Python 3.9+** (not 3.8) is required; CI also runs the guard cases under a 3.9 floor on Ubuntu and macOS. On native Windows (Git Bash, beta) the suite runs in CI too; Windows-only cases run only there, and the only allowed N/A cases are symlink, `shasum` and `noexec`.
+
+🔴 **Fail-open posture** (a deliberate decision): if Python breaks after the install, the PreToolUse guard lets the tool call through again (a missing or broken Python is not a deny). Two things mitigate it: the install ends with a self-test (`selftest.sh`) that really tries a forbidden command and fails loudly when the guard does not block, and rerunning `/vibe-flow:init` repeats that check. The guard's own deny is the opposite: it is ASCII JSON, and one that cannot be printed exits 2.
 
 Idempotent: re-running updates the code and leaves `.gitguards.conf` alone.
 

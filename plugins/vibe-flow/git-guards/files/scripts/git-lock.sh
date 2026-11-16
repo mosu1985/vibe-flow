@@ -12,17 +12,23 @@
 # lock is only needed so that a merge commit does not move refs at the same time as
 # someone else's safe-commit. Hold the lock only for the commit: take → commit → drop.
 set -eu
-COMMON=$(git rev-parse --git-common-dir); case "$COMMON" in /*) ;; *) COMMON="$(cd "$COMMON" && pwd -P)";; esac
+# Path helpers (gg_is_abs, gg_path): git prints C:/… on Windows, which `case … in /*)`
+# took for a relative path and glued a prefix onto.
+GG_PATHS_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/git-guards/paths.sh"
+[ -f "$GG_PATHS_LIB" ] || { echo "🔴 scripts/git-guards/paths.sh missing — reinstall the kit (/vibe-flow:init)"; exit 1; }
+. "$GG_PATHS_LIB"
+COMMON=$(git rev-parse --git-common-dir); gg_is_abs "$COMMON" || COMMON=$(gg_path "$COMMON")
 LOCKDIR="$COMMON/monitorex-locks"; LOCK="$LOCKDIR/commit"; JOURNAL="$LOCKDIR/journal"
-IDXPATH=$(git rev-parse --git-path index); case "$IDXPATH" in /*) ;; *) IDXPATH="$(pwd -P)/$IDXPATH";; esac
+IDXPATH=$(git rev-parse --git-path index); gg_is_abs "$IDXPATH" || IDXPATH="$(pwd -P)/$IDXPATH"
 IDXLOCK="$IDXPATH.lock"
 field() { sed -n "s/^$2=//p" "$1" 2>/dev/null | head -1; }
 alive() { [ -n "$1" ] && kill -0 "$1" 2>/dev/null && echo "alive" || echo "DEAD"; }
 # mtime: GNU stat first (Linux/WSL/Git Bash), then BSD (macOS). GNU `stat -f %m`
 # prints filesystem info instead of failing, so the order matters. Not a number → "?".
+# `|| true`: under set -e a failed stat chain used to end the whole script here.
 age()   {
   [ -f "$1" ] || { echo "-"; return; }
-  _m=$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null)
+  _m=$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || true)
   case "$_m" in ''|*[!0-9]*) echo "?" ;; *) echo "$(( $(date +%s) - _m ))s" ;; esac
 }
 
@@ -58,8 +64,8 @@ case "${1:-status}" in
     fi
     rm -f "$IDXLOCK"; rm -rf "$LOCK"; echo "locks released" ;;
   take)
-    GD=$(git rev-parse --git-dir); case "$GD" in /*) ;; *) GD="$(cd "$GD" && pwd -P)";; esac
-    [ "$GD" != "$COMMON" ] || { echo "🔴 take works only in a linked worktree (scripts/wt-new.sh); in the main working tree use git-safe-commit.sh"; exit 1; }
+    GD=$(git rev-parse --git-dir); gg_is_abs "$GD" || GD=$(gg_path "$GD")
+    [ "$(gg_path "$GD")" != "$(gg_path "$COMMON")" ] || { echo "🔴 take works only in a linked worktree (scripts/wt-new.sh); in the main working tree use git-safe-commit.sh"; exit 1; }
     [ ! -f "$JOURNAL" ] || { echo "🔴 unfinished transaction — run status / release first"; exit 1; }
     mkdir -p "$LOCKDIR"
     mkdir "$LOCK" 2>/dev/null || { show; echo; echo "🔴 commit lock is held — wait and retry"; exit 1; }

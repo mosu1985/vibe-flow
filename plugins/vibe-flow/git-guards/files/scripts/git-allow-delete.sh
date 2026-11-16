@@ -31,8 +31,12 @@ YES=0; ARGS=()
 for a in "$@"; do case "$a" in --yes) YES=1 ;; *) ARGS+=("$a") ;; esac; done
 set -- ${ARGS[@]+"${ARGS[@]}"}
 
+# Path and policy-blob helpers (gg_is_abs, gg_path, gg_blob — scripts/git-guards/paths.sh).
+GG_PATHS_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/git-guards/paths.sh"
+[ -f "$GG_PATHS_LIB" ] || { echo "🔴 scripts/git-guards/paths.sh missing — reinstall the kit (/vibe-flow:init)"; exit 1; }
+. "$GG_PATHS_LIB"
 COMMON=$(git rev-parse --git-common-dir)
-case "$COMMON" in /*) ;; *) COMMON="$(cd "$COMMON" && pwd -P)" ;; esac
+gg_is_abs "$COMMON" || COMMON=$(gg_path "$COMMON")
 ALLOW="$COMMON/monitorex-locks/delete-allow"
 TTL=900
 mkdir -p "$(dirname "$ALLOW")"
@@ -66,16 +70,32 @@ case "${1:-list}" in
   add)
     shift
     [ $# -gt 0 ] || { echo "at least one path is required"; exit 2; }
-    echo "These will disappear from the protected branch:"
+    # The protected branch by the kit-wide rule (origin/HEAD → origin/main → origin/master),
+    # not a hardcoded origin/main: a project on master was shown "no such path" for everything.
+    PROT_REF=""
+    h=$(git symbolic-ref -q refs/remotes/origin/HEAD 2>/dev/null) || h=""
+    for b in "${h#refs/remotes/origin/}" main master; do
+        [ -n "$b" ] || continue
+        if git rev-parse -q --verify "refs/remotes/origin/$b^{commit}" >/dev/null 2>&1; then
+            PROT_REF="refs/remotes/origin/$b"; break
+        fi
+    done
+    PLABEL=${PROT_REF#refs/remotes/}
+    echo "These will disappear from the protected branch${PLABEL:+ ($PLABEL)}:"
     for p in "$@"; do
         # Show whether the file exists on the remote: a mistyped path protects
         # nothing and creates a false sense that the deletion was confirmed.
-        if git cat-file -e "origin/main:$p" 2>/dev/null; then
-            printf '  %s  (%s lines on origin/main)\n' "$p" \
-                "$(git show "origin/main:$p" | wc -l | tr -d ' ')"
-        else
-            printf '  %s  ⚠️ no such path on origin/main — check for a typo\n' "$p"
-        fi
+        # gg_blob, not `git show <rev>:<path>` (MSYS rewrote that into a false "no such path").
+        brc=1; [ -z "$PROT_REF" ] || { brc=0; blob=$(gg_blob "$PROT_REF" "$p") || brc=$?; }
+        case "$brc" in
+            0) printf '  %s  (%s lines on %s)\n' "$p" "$(printf '%s\n' "$blob" | wc -l | tr -d ' ')" "$PLABEL" ;;
+            1) if [ -n "$PROT_REF" ]; then
+                   printf '  %s  ⚠️ no such path on %s — check for a typo\n' "$p" "$PLABEL"
+               else
+                   printf '  %s  ⚠️ no origin/<protected branch> fetched — cannot check the path\n' "$p"
+               fi ;;
+            *) printf '  %s  ⚠️ could not read it from %s (git fetch origin?)\n' "$p" "$PLABEL" ;;
+        esac
     done
     printf '\nIs this deletion intentional? [yes/no] '
     if [ "$YES" = 1 ]; then echo "yes (--yes)"

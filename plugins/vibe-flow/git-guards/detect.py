@@ -5,6 +5,11 @@
 An empty value always means "this project has no such thing". That is safer than
 a guess: a nonexistent command in GG_TYPECHECK_CMD would make push impossible,
 and the cause would look like a broken hook.
+
+The config goes out as UTF-8 bytes with LF line ends on every OS (install.sh
+redirects stdout into .gitguards.conf): a Windows text stdout is cp1252, where the
+🔴 in the comments raised, and it turns \\n into \\r\\n — a value would then end in
+\\r for every reader.
 """
 import json, os, subprocess, sys
 
@@ -13,7 +18,8 @@ pkg = {}
 p = os.path.join(root, "package.json")
 if os.path.isfile(p):
     try:
-        pkg = json.load(open(p, encoding="utf-8"))
+        with open(p, encoding="utf-8") as fh:
+            pkg = json.load(fh)
     except Exception:
         pkg = {}
 
@@ -24,7 +30,8 @@ scripts = pkg.get("scripts") or {}
 protected = "main"
 try:
     ref = subprocess.run(["git", "-C", root, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
-                         capture_output=True, text=True, timeout=5).stdout.strip()
+                         capture_output=True, encoding="utf-8", errors="surrogateescape",
+                         timeout=5, stdin=subprocess.DEVNULL).stdout.strip()
     if ref.startswith("origin/"):
         protected = ref.split("/", 1)[1]
 except Exception:
@@ -112,4 +119,5 @@ GG_PLAN_GATE="githooks/plan-gate.sh"
     "plan_new": ("GG_PLAN_REQUIRED_NEW=%s\n" % json.dumps(plan_new)) if plan_new else "",
     "post_edit": "GG_POST_EDIT_TESTS=1\n" if test_cmd else "",
 }
-sys.stdout.write(out)
+sys.stdout.buffer.write(out.encode("utf-8"))
+sys.stdout.buffer.flush()

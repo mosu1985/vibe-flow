@@ -12,29 +12,21 @@
 # but leaves an existing .gitguards.conf and the CLAUDE.md text outside the markers alone.
 set -eu
 
-# ── Native Windows (Git Bash / MSYS / Cygwin): stop before touching anything ──
-# The protection relies on POSIX paths and tools: on these shells git returns
-# C:/… while the shell works with /c/…, and an install would only half-work.
-# GG_ALLOW_UNSUPPORTED_OS exists for the kit's own CI probe and its maintainers
-# and is honored only together with GITHUB_ACTIONS=true. An agent must NEVER set
-# it: when this stop fires, relay the WSL steps to the user instead.
+# ── OS gate: stop before touching anything ──────────────────────────────────
+# Native Windows through Git for Windows (Git Bash, uname MINGW*) is supported — it
+# is also the shell Claude Code runs hooks with there. MSYS2 and Cygwin shells bring
+# their own POSIX Python and path rules and are not tested: they stop. There is no
+# switch to force them through (the old override variable is gone).
 case "$(uname -s 2>/dev/null)" in
-  MINGW*|MSYS*|CYGWIN*)
-    if [ "${GG_ALLOW_UNSUPPORTED_OS:-}" = 1 ] && [ "${GITHUB_ACTIONS:-}" = true ]; then
-        printf '\n🔴 unsupported OS: protection NOT verified — the PreToolUse guard may be inert\n\n' >&2
-    else
-        cat >&2 <<'TXT'
+  MSYS*|CYGWIN*)
+    cat >&2 <<'TXT'
 
-🔴 Native Windows (Git Bash / MSYS / Cygwin) is not supported yet: git protection
-   relies on Linux tools and paths. Use WSL 2 (Windows 10 2004+ / Windows 11):
-     1. PowerShell as administrator: wsl --install   → reboot
-     2. In the Ubuntu terminal: install git, python3, Node.js, then Claude Code
-     3. Keep the project inside WSL (~/projects/...), not under /mnt/c
-     4. Open Claude Code in that folder and run /vibe-flow:init again
+🔴 This shell (MSYS2 / Cygwin) is not supported: use Git for Windows (Git Bash) or WSL 2.
+   Git Bash: install Git for Windows and Python 3.9+ from python.org (not the
+   Microsoft Store alias), open Claude Code from it and run /vibe-flow:init again.
    The plugin's agents and skills work without this step.
 TXT
-        exit 1
-    fi ;;
+    exit 1 ;;
 esac
 
 PLUGIN="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -50,19 +42,24 @@ TARGET="$(cd "$TARGET" && pwd)"
 
 die() { printf '\n🔴 %s\n' "$*" >&2; exit 1; }
 
-for bin in git python3; do
-    command -v "$bin" >/dev/null 2>&1 || die "$bin is required — install it and run again"
-done
+# The kit's Python resolver: python3 / python / py -3, the first real one >= 3.9
+# (on Windows `python3` is often the Microsoft Store alias, which is not a Python).
+. "$PLUGIN/git-guards/files/scripts/git-guards/pyenv.sh"
+command -v git >/dev/null 2>&1 || die "git is required — install it and run again"
+gg_python || die "Python 3.9+ is required — install it from python.org and run again"
 git -C "$TARGET" rev-parse --git-dir >/dev/null 2>&1 \
     || die "$TARGET is not a git repository. First: git init && git add -A && git commit -m init"
 git -C "$TARGET" rev-parse --verify -q HEAD >/dev/null \
     || die "the repository has no commits — make a first commit and run again"
 
-VERSION=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("version","dev"))' \
+VERSION=$("$GG_PY" -c 'import json,sys;print(json.load(open(sys.argv[1], encoding="utf-8")).get("version","dev"))' \
     "$PLUGIN/.claude-plugin/plugin.json")
 
 # ── 1. git-guards ────────────────────────────────────────────────────────────
-GG_EMBEDDED=1 bash "$PLUGIN/git-guards/install.sh" "$TARGET"
+# install.sh ends with the guard self-test: on a miss it says why and fails, and so
+# does init — nothing below may claim a deployment whose guard cannot deny.
+GG_EMBEDDED=1 bash "$PLUGIN/git-guards/install.sh" "$TARGET" \
+    || die "git-guards were NOT installed (reason above) — vibe-flow is not deployed"
 
 # ── 2. final gate ────────────────────────────────────────────────────────────
 CONF="$TARGET/.gitguards.conf"
@@ -98,7 +95,7 @@ add_conf_key GG_POST_EDIT_TESTS "1" "Run related tests after each file edit (Pos
 # ── 3. CLAUDE.md ─────────────────────────────────────────────────────────────
 printf '\n\033[1m%s\033[0m\n' "vibe-flow: CLAUDE.md"
 # The block logic is shared with tools/rollout-projects.sh — one implementation.
-RB_STATUS=$(python3 "$PLUGIN/scripts/rules-block.py" "$TARGET/CLAUDE.md" \
+RB_STATUS=$("$GG_PY" "$PLUGIN/scripts/rules-block.py" "$TARGET/CLAUDE.md" \
     "$PLUGIN/templates/CLAUDE.flow.md" "$VERSION" --append-if-missing \
     "--follow-symlink-within=$TARGET") \
     || die "could not update the rules block in $TARGET/CLAUDE.md"

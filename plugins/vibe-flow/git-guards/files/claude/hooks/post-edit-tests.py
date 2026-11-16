@@ -12,9 +12,10 @@ Output: nothing when tests pass, there are none, or anything is off; on a red ru
     `git -C $CLAUDE_PROJECT_DIR worktree list` — git is never run in the file's own
     directory (a foreign repository's .git/config could run code via core.fsmonitor);
   * the command and every GG_POST_EDIT_* key come from the protected branch on
-    origin (`git show origin/<protected>:.gitguards.conf`), parsed as text — never
-    sourced. A branch cannot swap the command by editing its own config. Without an
-    origin remote, the MAIN working tree's config is used;
+    origin (.gitguards.conf read with `ls-tree` + `cat-file`, --no-replace-objects),
+    parsed as text — never sourced. A branch cannot swap the command by editing its
+    own config. Without an origin remote, the MAIN working tree's config is used;
+    with one, an absent or unreadable policy means no run (never the tree copy);
   * paths are passed as separate arguments ("$@"), never pasted into the string;
     no control characters; a leading "-" gets "./" so it cannot become an option.
 
@@ -25,8 +26,24 @@ per tree (GG_POST_EDIT_DEBOUNCE, 20 s) and per repository (GG_POST_EDIT_REPO_GAP
 killed — test runners fork workers, and killing only the top process leaves them
 running as orphans.
 
+WINDOWS (vibe-flow 1.3.0). A liveness check is never os.kill(pid, 0): every signal
+there is TerminateProcess, and the check killed the lock's owner. Windows has no
+SIGHUP/SIGKILL and no process groups by session: the run gets its own process group
+and a job object (WinJob) and is stopped by ending the job — `taskkill /T /F` only
+when no job could be made, since Git Bash's exec chains break the parent-pid tree.
+Queue paths are relative with forward slashes, so `src/*.ts` globs match there too.
+POSIX behaviour is unchanged.
+
 FAIL-OPEN: any error → exit 0 without output.
 """
+from __future__ import annotations
+
+import sys
+
+if sys.version_info < (3, 9):
+    # Internal status for the hook wrapper: "too old, try the next interpreter" (K2).
+    sys.exit(86)
+
 import fnmatch
 import json
 import os
@@ -34,10 +51,20 @@ import re
 import shutil
 import signal
 import subprocess
-import sys
 import tempfile
 import time
 import unicodedata
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "..", "..", "scripts", "git-guards"))
+try:
+    import gg_paths as gp
+except Exception:                    # noqa: BLE001 — fail-open: no helper, no run
+    gp = None
+
+WINDOWS = sys.platform == "win32"
+SIGHUP = getattr(signal, "SIGHUP", None)        # absent on Windows
+SIGKILL = getattr(signal, "SIGKILL", None)      # absent on Windows
 
 DEFAULT_GLOBS = "*.ts *.tsx *.mts *.cts *.js *.jsx *.mjs *.cjs *.vue *.svelte"
 POLICY_KEYS = {
@@ -50,10 +77,27 @@ POLICY_KEYS = {
 # workers stay alive. After the ceiling: TERM + 3 s, KILL + 5 s, then cleanup.
 HOOK_TIMEOUT = 120
 MAX_CEILING = HOOK_TIMEOUT - 15
+TERM_GRACE = 3
+KILL_GRACE = 5
+TASKKILL_TIMEOUT = 10
 TAIL_LINES = 40
 MAX_QUEUE = 50
 NO_TESTS = ("No test files found", "No tests found")
 CMD_NOT_FOUND = re.compile(r": command not found\s*$")
+BLOB_FOUND, BLOB_ABSENT, BLOB_ERROR = 0, 1, 2
+
+# Windows process API (liveness without killing; the run's job, see WinJob)
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+PROCESS_TERMINATE = 0x0001
+PROCESS_SET_QUOTA = 0x0100
+THREAD_SUSPEND_RESUME = 0x0002
+CREATE_SUSPENDED = 0x00000004
+TH32CS_SNAPTHREAD = 0x00000004
+INVALID_HANDLE_VALUE = -1
+RESUME_FAILED = 0xFFFFFFFF
+STILL_ACTIVE = 259
+ERROR_ACCESS_DENIED = 5
+MAX_PID = 0xFFFFFFFF
 
 # ── secret masking: whatever a test prints ends up in the session transcript ──
 SECRET_PATTERNS = [re.compile(p) for p in (
@@ -86,9 +130,26 @@ def clean_text(s):
 def git(args, cwd, timeout=10):
     env = {k: v for k, v in os.environ.items()
            if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")}
-    r = subprocess.run(["git", "-C", cwd] + args, capture_output=True, text=True,
-                       timeout=timeout, env=env, stdin=subprocess.DEVNULL)
+    r = subprocess.run(["git", "-C", cwd] + args, capture_output=True, encoding="utf-8",
+                       errors="surrogateescape", timeout=timeout, env=env, stdin=subprocess.DEVNULL)
     return r.returncode, r.stdout
+
+
+def read_blob(cwd, rev, path):
+    """A file at a revision the K7 way: `ls-tree` + `cat-file blob`, never a
+    `<rev>:<path>` argument, --no-replace-objects (`git replace` cannot swap it).
+    → (BLOB_FOUND, text) | (BLOB_ABSENT, "") | (BLOB_ERROR, "")."""
+    rc, listed = git(["--no-replace-objects", "ls-tree", "-z", "--full-tree", rev, "--", path], cwd)
+    if rc != 0:
+        return BLOB_ERROR, ""
+    entry = listed.split("\0", 1)[0]
+    if not entry:
+        return BLOB_ABSENT, ""
+    meta = entry.split("\t", 1)[0].split()
+    if len(meta) != 3 or meta[1] != "blob":
+        return BLOB_ERROR, ""
+    rc, text = git(["--no-replace-objects", "cat-file", "blob", meta[2]], cwd)
+    return (BLOB_FOUND, text) if rc == 0 else (BLOB_ERROR, "")
 
 
 def parse_conf(text):
@@ -123,8 +184,10 @@ def read_policy(proj, common):
                     branch = b
                     break
         if branch:
-            rc, text = git(["show", "refs/remotes/origin/%s:.gitguards.conf" % branch], proj)
-            return parse_conf(text) if rc == 0 else {}
+            state, text = read_blob(proj, "refs/remotes/origin/%s" % branch, ".gitguards.conf")
+            # Absent or unreadable on origin → no policy, no run: never the tree copy
+            # while origin exists (H2, K8).
+            return parse_conf(text) if state == BLOB_FOUND else {}
     path = os.path.join(os.path.dirname(common), ".gitguards.conf")
     try:
         with open(path, encoding="utf-8") as fh:
@@ -162,7 +225,39 @@ def touch(path):
     os.utime(path, None)
 
 
+def _pid_alive_windows(pid):
+    """OpenProcess + GetExitCodeProcess == STILL_ACTIVE. Never os.kill(pid, 0):
+    on Windows every signal is TerminateProcess. Cannot tell → alive (the lock
+    then ages out by stale_after instead of being stolen)."""
+    if pid <= 0 or pid > MAX_PID:
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            # Access denied: the process exists and belongs to someone else.
+            return ctypes.get_last_error() == ERROR_ACCESS_DENIED
+        try:
+            code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return True
+            return code.value == STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:                # noqa: BLE001 — cannot tell → alive
+        return True
+
+
 def pid_alive(pid):
+    if WINDOWS:
+        return _pid_alive_windows(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -197,7 +292,7 @@ class Lock(object):
             os.mkdir(self.path)
         except FileExistsError:
             return False
-        with open(os.path.join(self.path, "owner"), "w", encoding="utf-8") as fh:
+        with open(os.path.join(self.path, "owner"), "w", encoding="utf-8", newline="\n") as fh:
             fh.write("pid=%d\ntime=%d\n" % (os.getpid(), int(time.time())))
         self.held = True
         return True
@@ -255,49 +350,250 @@ def take_queue(queue):
     return out
 
 
-def main():
+def _kernel32():
+    """kernel32 with the signatures the job code below uses (Windows only)."""
+    import ctypes
+    from ctypes import wintypes
+    k = ctypes.WinDLL("kernel32", use_last_error=True)
+    k.CreateJobObjectW.restype = wintypes.HANDLE
+    k.CreateJobObjectW.argtypes = (ctypes.c_void_p, wintypes.LPCWSTR)
+    k.OpenProcess.restype = wintypes.HANDLE
+    k.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    k.AssignProcessToJobObject.restype = wintypes.BOOL
+    k.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
+    k.TerminateJobObject.restype = wintypes.BOOL
+    k.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
+    k.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    k.CreateToolhelp32Snapshot.argtypes = (wintypes.DWORD, wintypes.DWORD)
+    k.Thread32First.restype = wintypes.BOOL
+    k.Thread32First.argtypes = (wintypes.HANDLE, ctypes.c_void_p)
+    k.Thread32Next.restype = wintypes.BOOL
+    k.Thread32Next.argtypes = (wintypes.HANDLE, ctypes.c_void_p)
+    k.OpenThread.restype = wintypes.HANDLE
+    k.OpenThread.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    k.ResumeThread.restype = wintypes.DWORD
+    k.ResumeThread.argtypes = (wintypes.HANDLE,)
+    k.CloseHandle.restype = wintypes.BOOL
+    k.CloseHandle.argtypes = (wintypes.HANDLE,)
+    return ctypes, wintypes, k
+
+
+class WinJob(object):
+    """Windows: a job object that holds the run's whole process tree.
+
+    `taskkill /T` follows parent pids, and Git Bash breaks that chain: an MSYS
+    process that execs another MSYS program exits, so the new one's parent pid points
+    at nobody. A test runner's forked worker outlived the ceiling that way (CI,
+    1.3.0). Membership in a job is inherited by every descendant regardless of the
+    parent pid, and TerminateJobObject ends all of them. The job allows no breakaway,
+    so Cygwin's own CREATE_BREAKAWAY_FROM_JOB (taken only when the job permits it)
+    keeps the children inside. No kill-on-close: a finished run is left as on POSIX."""
+
+    def __init__(self):
+        self._api = None
+        self.handle = None
+        try:
+            self._api = _kernel32()
+            self.handle = self._api[2].CreateJobObjectW(None, None) or None
+        except Exception:            # noqa: BLE001 — no job: the taskkill fallback stays
+            self.handle = None
+
+    def adopt(self, pid):
+        """Put the (still suspended) run into the job. → True on success."""
+        if self.handle is None:
+            return False
+        k = self._api[2]
+        proc = k.OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, False, pid)
+        if not proc:
+            return False
+        try:
+            return bool(k.AssignProcessToJobObject(self.handle, proc))
+        finally:
+            k.CloseHandle(proc)
+
+    def terminate(self):
+        """End every process in the job. → True when the call succeeded."""
+        return self.handle is not None and bool(self._api[2].TerminateJobObject(self.handle, 1))
+
+    def close(self):
+        if self.handle is not None:
+            self._api[2].CloseHandle(self.handle)
+            self.handle = None
+
+
+def _resume_process(pid):
+    """Resume the threads of a process started with CREATE_SUSPENDED (Popen keeps no
+    thread handle). → True when at least one thread was resumed."""
+    ctypes, wintypes, k = _kernel32()
+
+    class THREADENTRY32(ctypes.Structure):
+        _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+                    ("th32ThreadID", wintypes.DWORD), ("th32OwnerProcessID", wintypes.DWORD),
+                    ("tpBasePri", wintypes.LONG), ("tpDeltaPri", wintypes.LONG),
+                    ("dwFlags", wintypes.DWORD)]
+
+    snap = k.CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)
+    if not snap or snap == ctypes.c_void_p(INVALID_HANDLE_VALUE).value:
+        return False
+    resumed = 0
     try:
-        payload = json.loads(sys.stdin.read())
-    except Exception:
+        entry = THREADENTRY32()
+        entry.dwSize = ctypes.sizeof(THREADENTRY32)
+        more = k.Thread32First(snap, ctypes.byref(entry))
+        while more:
+            if entry.th32OwnerProcessID == pid:
+                th = k.OpenThread(THREAD_SUSPEND_RESUME, False, entry.th32ThreadID)
+                if th:
+                    if k.ResumeThread(th) != RESUME_FAILED:
+                        resumed += 1
+                    k.CloseHandle(th)
+            more = k.Thread32Next(snap, ctypes.byref(entry))
+    finally:
+        k.CloseHandle(snap)
+    return resumed > 0
+
+
+def start_run(argv, cwd, env, log):
+    """Start the test command in its own process group. → (proc, job).
+
+    Windows: started suspended, put into a WinJob, then resumed — so not one
+    grandchild is created outside the job. No job (or it cannot be joined) → the
+    taskkill fallback. A run that cannot be resumed is killed: it would only hang
+    until the ceiling."""
+    job = WinJob() if WINDOWS else None
+    if job is not None and job.handle is None:
+        job = None
+    if WINDOWS:
+        flags = subprocess.CREATE_NEW_PROCESS_GROUP
+        if job is not None:
+            flags |= CREATE_SUSPENDED
+        opts = {"creationflags": flags}
+    else:
+        opts = {"start_new_session": True}
+    proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=log,
+                            stderr=subprocess.STDOUT, **opts)
+    if job is None:
+        return proc, None
+    adopted = job.adopt(proc.pid)
+    try:
+        resumed = _resume_process(proc.pid)
+    except Exception:                # noqa: BLE001 — treated as "not resumed"
+        resumed = False
+    if not resumed:
+        try:
+            proc.kill()
+            proc.wait(timeout=KILL_GRACE)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        job.close()
+        raise OSError("the test run could not be resumed")
+    if not adopted:
+        job.close()
+        return proc, None
+    return proc, job
+
+
+def kill_tree(proc, sig, job=None):
+    """Signal the run's whole process group; on Windows end its job, or (no job)
+    kill its process tree (taskkill /T /F — no gentler stage for console programs)."""
+    if WINDOWS:
+        if job is not None and job.terminate():
+            return
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True,
+                       timeout=TASKKILL_TIMEOUT, stdin=subprocess.DEVNULL)
         return
-    if not isinstance(payload, dict) or payload.get("tool_name") not in ("Edit", "Write", "MultiEdit"):
-        return
+    os.killpg(proc.pid, sig)
+
+
+def stop_tree(proc, job=None):
+    """After the ceiling: TERM + grace, KILL + grace (Windows: one job end / taskkill + grace)."""
+    stages = ((None, KILL_GRACE),) if WINDOWS else ((signal.SIGTERM, TERM_GRACE), (SIGKILL, KILL_GRACE))
+    for sig, grace in stages:
+        try:
+            kill_tree(proc, sig, job)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        try:
+            proc.wait(timeout=grace)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+
+
+def read_payload():
+    """The hook input as bytes, decoded as UTF-8 (K5); None unless a JSON object."""
+    try:
+        payload = json.loads(sys.stdin.buffer.read().decode("utf-8-sig", "surrogateescape"))
+    except Exception:                # noqa: BLE001 — broken input: nothing to do
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def edited_file(payload):
+    """realpath of the edited file, or None (relative paths need an absolute cwd)."""
     ti = payload.get("tool_input")
     fp = ti.get("file_path") if isinstance(ti, dict) else None
     if not isinstance(fp, str) or not fp or bad_chars(fp):
-        return
-    proj = os.environ.get("CLAUDE_PROJECT_DIR") or ""
-    if not proj or not os.path.isdir(proj):
-        return
-    proj = os.path.realpath(proj)
-    if not os.path.isabs(fp):
+        return None
+    fp = gp.to_native(fp)
+    if fp is None:
+        return None
+    if not gp.is_abs(fp):
         cwd = payload.get("cwd")
-        if not isinstance(cwd, str) or not os.path.isabs(cwd):
-            return
+        cwd = gp.to_native(cwd) if isinstance(cwd, str) else None
+        if not cwd or not gp.is_abs(cwd):
+            return None
         fp = os.path.join(cwd, fp)
     real = os.path.realpath(fp)
     if not os.path.isfile(real) or bad_chars(real):
-        return
+        return None
+    return real
 
-    # ── which worktree of THIS project holds the file (no git in foreign dirs) ──
+
+def owning_tree(proj, real):
+    """The deepest worktree of the project holding `real` (no git in foreign dirs)."""
     rc, out = git(["worktree", "list", "--porcelain"], proj)
     if rc != 0:
-        return
+        return None
     tree = None
     for line in out.splitlines():
         if not line.startswith("worktree "):
             continue
-        t = os.path.realpath(line[len("worktree "):])
-        if os.path.isdir(t) and real.startswith(t.rstrip(os.sep) + os.sep):
+        t = gp.to_native(line[len("worktree "):])
+        if not t:
+            continue
+        t = os.path.realpath(t)
+        rel = gp.posix_rel(real, t)
+        if os.path.isdir(t) and rel and rel != ".":
             if tree is None or len(t) > len(tree):
                 tree = t
+    return tree
+
+
+def main():
+    if gp is None:
+        return
+    payload = read_payload()
+    if payload is None or payload.get("tool_name") not in ("Edit", "Write", "MultiEdit"):
+        return
+    proj = gp.to_native(os.environ.get("CLAUDE_PROJECT_DIR") or "")
+    if not proj or not os.path.isdir(proj):
+        return
+    proj = os.path.realpath(proj)
+    real = edited_file(payload)
+    if real is None:
+        return
+
+    # ── which worktree of THIS project holds the file (no git in foreign dirs) ──
+    tree = owning_tree(proj, real)
     if tree is None:
         return
 
     rc, common = git(["rev-parse", "--git-common-dir"], proj)
-    if rc != 0 or not common.strip():
+    common = gp.to_native(common.strip()) if rc == 0 else None
+    if not common:
         return
-    common = os.path.realpath(os.path.join(proj, common.strip()))
+    common = os.path.realpath(common if gp.is_abs(common) else os.path.join(proj, common))
 
     pol = read_policy(proj, common)
     if pol.get("GG_POST_EDIT_TESTS") != "1":
@@ -310,18 +606,19 @@ def main():
     repo_gap = int_key(pol, "GG_POST_EDIT_REPO_GAP", 10, 0, 3600)
     ceiling = min(int_key(pol, "GG_POST_EDIT_MAX", 90, 1, 3600), MAX_CEILING)
 
-    rel = os.path.relpath(real, tree)
-    if not matches(rel, globs):
+    rel = gp.posix_rel(real, tree)
+    if not rel or not matches(rel, globs):
         return
 
     # ── queue (per tree), pauses, lock (per repository) ──
     rc, gitdir = git(["rev-parse", "--absolute-git-dir"], tree)
-    if rc != 0 or not gitdir.strip():
+    gitdir = gp.to_native(gitdir.strip()) if rc == 0 else None
+    if not gitdir:
         return
-    state = os.path.join(gitdir.strip(), "post-edit-tests")
+    state = os.path.join(gitdir, "post-edit-tests")
     os.makedirs(state, exist_ok=True)
     queue = os.path.join(state, "pending")
-    with open(queue, "a", encoding="utf-8") as fh:
+    with open(queue, "a", encoding="utf-8", newline="\n") as fh:
         fh.write(rel + "\n")
 
     tree_stamp = os.path.join(state, "last-run")
@@ -339,28 +636,31 @@ def main():
     if not lock.acquire():
         return                                      # busy: the path waits in the queue
     proc = None
+    job = None
     ran = False
 
     def on_term(signum, frame):
         if proc is not None and proc.poll() is None:
             try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except OSError:
+                kill_tree(proc, SIGKILL, job)
+            except (OSError, subprocess.SubprocessError):
                 pass
         lock.release()
         os._exit(0)
 
-    signal.signal(signal.SIGTERM, on_term)
-    signal.signal(signal.SIGHUP, on_term)
     try:
+        # Inside the try: whatever fails here, the lock is released below.
+        signal.signal(signal.SIGTERM, on_term)
+        if SIGHUP is not None:
+            signal.signal(SIGHUP, on_term)
         paths = []
         for q in take_queue(queue)[-MAX_QUEUE:]:
             if bad_chars(q):
                 continue
             r = os.path.realpath(os.path.join(tree, q))
-            if not r.startswith(tree.rstrip(os.sep) + os.sep) or not os.path.isfile(r):
+            q = gp.posix_rel(r, tree)
+            if not q or q == "." or not os.path.isfile(r):
                 continue
-            q = os.path.relpath(r, tree)
             if bad_chars(q) or not matches(q, globs):
                 continue
             arg = "./" + q if q.startswith("-") else q
@@ -372,30 +672,21 @@ def main():
         ran = True
         env = dict(os.environ, NO_COLOR="1", FORCE_COLOR="0")
         with tempfile.TemporaryFile() as log:
-            proc = subprocess.Popen(
-                ["sh", "-c", cmd + ' "$@"', "gg-post-edit"] + paths,
-                cwd=tree, env=env, stdin=subprocess.DEVNULL, stdout=log,
-                stderr=subprocess.STDOUT, start_new_session=True)
+            proc, job = start_run(["sh", "-c", cmd + ' "$@"', "gg-post-edit"] + paths,
+                                  tree, env, log)
             timed_out = False
             try:
                 rc = proc.wait(timeout=ceiling)
             except subprocess.TimeoutExpired:
                 timed_out = True
-                for sig, grace in ((signal.SIGTERM, 3), (signal.SIGKILL, 5)):
-                    try:
-                        os.killpg(proc.pid, sig)
-                    except OSError:
-                        pass
-                    try:
-                        proc.wait(timeout=grace)
-                        break
-                    except subprocess.TimeoutExpired:
-                        continue
+                stop_tree(proc, job)
                 rc = proc.returncode
             log.seek(0)
             output = log.read().decode("utf-8", errors="replace")
     finally:
         lock.release()
+        if job is not None:
+            job.close()
         if ran:
             for stamp in (tree_stamp, repo_stamp):
                 try:
@@ -418,7 +709,7 @@ def main():
         "Last %d lines of output:\n%s\n\n"
         "Fix the code (or the test, if the behavior change is intended) before going on."
         % (rc, " ".join(paths), TAIL_LINES, tail))
-    sys.stdout.write(json.dumps({"decision": "block", "reason": reason}) + "\n")
+    sys.stdout.write(json.dumps({"decision": "block", "reason": reason}, ensure_ascii=True) + "\n")
 
 
 if __name__ == "__main__":

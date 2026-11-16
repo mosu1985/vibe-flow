@@ -16,14 +16,51 @@ PASS=0; FAIL=0; FAILED=()
 ok()  { PASS=$((PASS+1)); echo "  ok   - $1"; }
 bad() { FAIL=$((FAIL+1)); FAILED+=("$1"); echo "  FAIL - $1: ${2:-}"; }
 
+case "${GG_SUITE_ONLY:-}" in
+    ""|guard) ;;
+    *) echo "GG_SUITE_ONLY: unknown value '${GG_SUITE_ONLY}' (allowed: guard)" >&2; exit 2 ;;
+esac
+case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) IS_WIN=1 ;; *) IS_WIN=0 ;; esac
+
+# N/A: a case that cannot run on this machine. Allowed ONLY on native Windows and
+# only for three reasons; anywhere else an N/A is a failure, so macOS and Linux
+# always run everything. Windows-only cases are not N/A on POSIX: they do not run.
+NA=0; NA_LIST=()
+na() {   # $1 = case, $2 = reason
+    NA=$((NA+1)); NA_LIST+=("$1 ($2)"); echo "  n/a  - $1: $2"
+    if [ "$IS_WIN" != 1 ]; then bad "N/A outside native Windows: $1" "$2"; return; fi
+    case "$2" in
+        "ln -s made a copy"|"no shasum"|"noexec") ;;
+        *) bad "N/A for a reason that is not allowed: $1" "$2" ;;
+    esac
+}
+# Git Bash without symlink rights makes `ln -s` a COPY: cases about symlinks go N/A there.
+mkdir -p "$TMP/ln-probe"; : > "$TMP/ln-probe/t"; ln -s "$TMP/ln-probe/t" "$TMP/ln-probe/l" 2>/dev/null
+if [ -L "$TMP/ln-probe/l" ]; then REAL_SYMLINKS=1; else REAL_SYMLINKS=0; fi
+
+# The real interpreter, resolved before any case puts stubs first on PATH.
+PYBIN=$(command -v python3)
+REALPY=$(python3 -c 'import sys; print(sys.executable)')
+if [ "$IS_WIN" = 1 ] && command -v cygpath >/dev/null 2>&1; then REALPY=$(cygpath -u "$REALPY"); fi
+# Per-case ceiling around cases that kill processes or wait on a watchdog: a hang
+# there must fail one case, not eat the CI job. GNU timeout only (macOS has none).
+TO=""; command -v timeout >/dev/null 2>&1 && TO="timeout 300"
+
+# A tiny exec wrapper standing in for a tool in a trimmed PATH. Not `ln -s`:
+# Git Bash copies instead of linking, and a copied .exe loses its DLLs.
+mkwrap() {   # $1 = dir, $2 = name, $3 = absolute path of the real tool
+    mkdir -p "$1"; printf '#!/bin/sh\nexec "%s" "$@"\n' "$3" > "$1/$2"; chmod +x "$1/$2"
+}
+
 # Shims placed first in PATH reproduce another platform's tools (GNU vs BSD,
-# Git Bash) on any machine. The body comes on stdin; @REAL_MKTEMP@ and
-# @REAL_CP@ are replaced with the real binaries so a shim can pass calls through.
-REAL_MKTEMP=$(command -v mktemp); REAL_CP=$(command -v cp)
+# Git Bash) on any machine. The body comes on stdin; @REAL_MKTEMP@, @REAL_CP@ and
+# @REAL_GIT@ are replaced with the real binaries so a shim can pass calls through.
+REAL_MKTEMP=$(command -v mktemp); REAL_CP=$(command -v cp); REAL_GIT=$(command -v git)
 mkshim() {   # $1 = shim set name, $2 = tool name; body on stdin → $TMP/shim-$1/$2
     # (not used inside $(...): bash 3.2 misparses a heredoc with `case` or `'` there)
     local d="$TMP/shim-$1"; mkdir -p "$d"
-    { echo '#!/bin/sh'; sed -e "s#@REAL_MKTEMP@#$REAL_MKTEMP#g" -e "s#@REAL_CP@#$REAL_CP#g"; } > "$d/$2"
+    { echo '#!/bin/sh'; sed -e "s#@REAL_MKTEMP@#$REAL_MKTEMP#g" -e "s#@REAL_CP@#$REAL_CP#g" \
+        -e "s#@REAL_GIT@#$REAL_GIT#g"; } > "$d/$2"
     chmod +x "$d/$2"
 }
 
@@ -35,8 +72,152 @@ mkrepo() {                     # $1 = path
     echo v1 > "$1/a.txt"; echo v1 > "$1/b.txt"
     printf '#!/bin/sh\necho hi\n' > "$1/s.sh"; chmod +x "$1/s.sh"
     mkdir -p "$1/dír"; echo "ünï" > "$1/dír/fïle with space.txt"
-    git -C "$1" add -A; git -C "$1" commit -qm init
+    git -C "$1" add -A
+    # The exec bit through the index: with core.filemode=false (Git for Windows)
+    # chmod never reaches git, and the mode cases would test nothing.
+    git -C "$1" update-index --chmod=+x s.sh
+    git -C "$1" commit -qm init
 }
+
+# Layout: the kit repository (files/claude/hooks, settings-merge.py one level up)
+# or a project (.claude/hooks; settings-merge.py and detect.py are not copied there).
+if [ -d "$ROOT/.claude/hooks" ]; then CH="$ROOT/.claude/hooks"; else CH="$ROOT/claude/hooks"; fi
+KIT=""; [ -f "$ROOT/../settings-merge.py" ] && KIT="$(cd "$ROOT/.." && pwd)"
+
+# ── The PreToolUse guard: payload, decision, runners ─────────────────────────
+gj() { python3 -c 'import json,sys; t,k,v,c=sys.argv[1:5]; print(json.dumps({"tool_name":t,"tool_input":{k:v},"cwd":c}))' "$@"; }
+# The hook protocol (K3): deny ⇔ rc 2, or rc 0 and stdout is JSON with
+# hookSpecificOutput.permissionDecision "deny"; allow ⇔ rc 0 and stdout empty or
+# JSON without a deny. Anything else (rc 1, garbage on stdout) is an ERROR — a
+# crashed guard is never counted as an allow.
+decide() {   # $1 = rc; stdin = the hook's stdout → deny | allow | error
+    "$PYBIN" -c 'import json,sys
+rc = int(sys.argv[1]); out = sys.stdin.read().strip()
+if rc == 2: print("deny"); sys.exit(0)
+if rc != 0: print("error"); sys.exit(0)
+if not out: print("allow"); sys.exit(0)
+try:
+    d = json.loads(out)
+except ValueError:
+    print("error"); sys.exit(0)
+h = d.get("hookSpecificOutput") if isinstance(d, dict) else None
+print("deny" if isinstance(h, dict) and h.get("permissionDecision") == "deny" else "allow")' "$1"
+}
+gcase() {   # label expect(deny|allow) project tool key value cwd
+    local lbl="$1" exp="$2" proj="$3" o rc got; shift 3
+    o=$(gj "$@" | CLAUDE_PROJECT_DIR="$proj" bash "$CH/monitorex-git-guard.sh" 2>/dev/null); rc=$?
+    got=$(printf '%s' "$o" | decide "$rc")
+    [ "$got" = "$exp" ] && ok "guard: $lbl — $exp" || bad "guard: $lbl — $exp" "got $got (rc $rc): $o"
+}
+gwrap() {   # label expect project VAR=value… -- tool key value cwd: the wrapper under an environment
+    local lbl="$1" exp="$2" proj="$3" o rc got envs=(); shift 3
+    while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do envs+=("$1"); shift; done; shift
+    o=$(gj "$@" | env ${envs[@]+"${envs[@]}"} CLAUDE_PROJECT_DIR="$proj" "$BASH" "$CH/monitorex-git-guard.sh" 2>"$TMP/gwrap.err"); rc=$?
+    got=$(printf '%s' "$o" | decide "$rc")
+    [ "$got" = "$exp" ] && ok "guard: $lbl — $exp" || bad "guard: $lbl — $exp" "got $got (rc $rc): $o $(head -3 "$TMP/gwrap.err")"
+}
+gbytes() {  # label expect project payload-file VAR=value…: raw payload bytes through the wrapper
+    local lbl="$1" exp="$2" proj="$3" f="$4" o rc got; shift 4
+    o=$(env "$@" CLAUDE_PROJECT_DIR="$proj" "$BASH" "$CH/monitorex-git-guard.sh" < "$f" 2>"$TMP/gwrap.err"); rc=$?
+    got=$(printf '%s' "$o" | decide "$rc")
+    [ "$got" = "$exp" ] && ok "guard: $lbl — $exp" || bad "guard: $lbl — $exp" "got $got (rc $rc): $o $(head -3 "$TMP/gwrap.err")"
+}
+
+# ── The guard as Claude Code runs it: encodings, interpreters, closed stdout ──
+# vibe-flow 1.3.0. Every case goes through the hook WRAPPER (what settings.json
+# registers), because that is where a missing / too old / fake Python decides
+# whether a deny ever reaches Claude Code. Also run alone: GG_SUITE_ONLY=guard.
+guard_wrapper_cases() {
+    echo "== guard through its wrapper: encodings, interpreters, closed stdout =="
+    local GM="$TMP/gw-main" GWT="$TMP/gw-main-wt" f p o rc err line
+    mkrepo "$GM"; mkdir -p "$GM/src" "$GM/.git/monitorex-locks"
+    git -C "$GM" worktree add -q "$GWT" -b wt/gw >/dev/null 2>&1
+    gcase "git add in the main tree (fixture)" deny "$GM" Bash command "git add a.txt" "$GM"
+    gcase "git add in a linked worktree (fixture)" allow "$GM" Bash command "git add a.txt" "$GWT"
+
+    # Windows' cp1252 stdio, reproduced: the deny must still be valid JSON
+    gwrap "PYTHONIOENCODING=cp1252: git add in the main tree" deny "$GM" PYTHONIOENCODING=cp1252 -- Bash command "git add a.txt" "$GM"
+    gwrap "PYTHONIOENCODING=cp1252: Cyrillic commit message" deny "$GM" PYTHONIOENCODING=cp1252 -- Bash command 'git commit -m "исправление"' "$GM"
+    gwrap "Cyrillic commit message (UTF-8)" deny "$GM" GG_T=1 -- Bash command 'git commit -m "исправление"' "$GM"
+    f="$TMP/gw-badutf8.json"
+    "$PYBIN" -c 'import json,sys; h=json.dumps({"tool_name":"Bash","cwd":sys.argv[1]}).encode()[:-1]
+sys.stdout.buffer.write(h + b", \"tool_input\": {\"command\": \"git add a.txt # \xff\xfe\xc3\"}}")' "$GM" > "$f"
+    gbytes "invalid UTF-8 bytes in the payload — no crash" deny "$GM" "$f" GG_T=1
+    gbytes "invalid UTF-8 bytes under cp1252 — no crash" deny "$GM" "$f" PYTHONIOENCODING=cp1252
+    # … and the guard run directly (a human, no wrapper): the code-level backstop
+    o=$(PYTHONIOENCODING=cp1252 CLAUDE_PROJECT_DIR="$GM" "$PYBIN" -B "$CH/monitorex_git_guard.py" < "$f" 2>/dev/null); rc=$?
+    [ "$(printf '%s' "$o" | decide "$rc")" = deny ] && ok "guard run directly, cp1252 + invalid UTF-8 — deny" \
+        || bad "guard run directly, cp1252 + invalid UTF-8 — deny" "rc $rc: $o"
+
+    # Python 3.9 is the floor (macOS /usr/bin/python3 is 3.9.6 and may come first)
+    local py39="" c
+    for c in "${GG_TEST_PY39:-}" /usr/bin/python3 python3.9 python3; do
+        [ -n "$c" ] || continue
+        c=$(command -v "$c" 2>/dev/null) || continue
+        case "$("$c" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null)" in 3.9) py39=$c; break ;; esac
+    done
+    if [ -n "$py39" ]; then
+        mkwrap "$TMP/gw-py39" python3 "$py39"
+        gwrap "Python 3.9 first on PATH ($py39) — a deny is still a deny" deny "$GM" PATH="$TMP/gw-py39:$PATH" -- Bash command "git add a.txt" "$GM"
+        gwrap "Python 3.9 first on PATH — git status still allowed" allow "$GM" PATH="$TMP/gw-py39:$PATH" -- Bash command "git status" "$GM"
+    else
+        echo "  note - no Python 3.9 on this machine: the 3.9 cases run in the CI floor job"
+    fi
+
+    # A candidate that is not a usable Python is skipped, the next one runs (K1/K2)
+    mkwrap "$TMP/gw-realpy" python "$REALPY"
+    mkdir -p "$TMP/gw-py86"; printf '#!/bin/sh\nexit 86\n' > "$TMP/gw-py86/python3"; chmod +x "$TMP/gw-py86/python3"
+    gwrap "python3 below the floor (exit 86), a supported python next — deny (Codex C2)" deny "$GM" PATH="$TMP/gw-py86:$TMP/gw-realpy:$PATH" -- Bash command "git add a.txt" "$GM"
+    p="$TMP/gw-wa/WindowsApps"; mkdir -p "$p"
+    printf '#!/bin/sh\ntouch "%s"\nexit 0\n' "$TMP/gw-wa-ran" > "$p/python3"; chmod +x "$p/python3"
+    rm -f "$TMP/gw-wa-ran"
+    gwrap "python3 under */WindowsApps/* is skipped unrun — the next interpreter denies" deny "$GM" PATH="$p:$TMP/gw-realpy:$PATH" -- Bash command "git add a.txt" "$GM"
+    [ ! -e "$TMP/gw-wa-ran" ] && ok "guard: the WindowsApps candidate was never executed" || bad "guard: the WindowsApps candidate was executed" ""
+
+    # stdout closed: the deny cannot be printed → exit 2 with an ASCII reason (K4)
+    err="$TMP/gw-closed.err"
+    gj Bash command "git add a.txt" "$GM" | CLAUDE_PROJECT_DIR="$GM" "$BASH" "$CH/monitorex-git-guard.sh" >&- 2>"$err"; rc=$?
+    line=$(grep 'vibe-flow guard: DENY:' "$err" | head -1)
+    { [ "$rc" = 2 ] && [ -n "$line" ] && [ -z "$(printf '%s' "$line" | LC_ALL=C tr -d '\011\040-\176')" ]; } \
+        && ok "guard: wrapper with stdout closed — rc 2, ASCII reason on stderr" || bad "guard: wrapper with stdout closed" "rc $rc: $(head -3 "$err")"
+    gj Bash command "git add a.txt" "$GM" | CLAUDE_PROJECT_DIR="$GM" "$PYBIN" -B "$CH/monitorex_git_guard.py" >&- 2>"$err"; rc=$?
+    line=$(grep 'vibe-flow guard: DENY:' "$err" | head -1)
+    { [ "$rc" = 2 ] && [ -n "$line" ] && [ -z "$(printf '%s' "$line" | LC_ALL=C tr -d '\011\040-\176')" ]; } \
+        && ok "guard: run directly with stdout closed — rc 2, ASCII reason on stderr" || bad "guard: run directly with stdout closed" "rc $rc: $(head -3 "$err")"
+}
+
+guard_unit_cases() {
+    echo "== PreToolUse guard: unit cases (test_pretooluse_guard.py) =="
+    local out rc summary GLY
+    if [ -d "$ROOT/.claude/hooks" ]; then
+        out=$(python3 -B "$ROOT/scripts/git-guards/test_pretooluse_guard.py" 2>&1); rc=$?
+    else                            # the kit: assemble the project layout the test expects
+        GLY="$TMP/guard-layout"; rm -rf "$GLY"; mkdir -p "$GLY/.claude/hooks" "$GLY/scripts/git-guards"
+        cp "$CH"/* "$GLY/.claude/hooks/"; cp "$ROOT"/scripts/git-guards/*.py "$ROOT"/scripts/git-guards/*.sh "$GLY/scripts/git-guards/"
+        out=$(cd "$GLY" && python3 -B "$GLY/scripts/git-guards/test_pretooluse_guard.py" 2>&1); rc=$?
+    fi
+    summary=$(printf '%s\n' "$out" | grep -E 'passed: [0-9]+' | tail -1 | sed 's/^ *//')
+    # No FAIL/passed line = the runner itself crashed: show its last lines (the traceback).
+    [ $rc -eq 0 ] && ok "guard unit cases — $summary" \
+        || bad "guard unit cases" "rc=$rc $(printf '%s\n' "$out" | grep -E 'FAIL|passed' | head -40)
+$(printf '%s\n' "$out" | grep -qE 'FAIL|passed' || printf '%s\n' "$out" | tail -15)"
+}
+
+finish() {
+    echo
+    echo "=========================================="
+    echo "  passed: $PASS   failed: $FAIL   n/a: $NA"
+    if [ "$NA" -gt 0 ]; then echo "  not applicable here:"; printf '    - %s\n' "${NA_LIST[@]}"; fi
+    [ $FAIL -gt 0 ] && { echo "  failures:"; printf '    - %s\n' "${FAILED[@]}"; exit 1; }
+    echo "=========================================="
+    exit 0
+}
+
+if [ "${GG_SUITE_ONLY:-}" = guard ]; then
+    guard_wrapper_cases
+    guard_unit_cases
+    finish
+fi
 
 commit() {                     # $1 = repo, $2 = message, then paths
     local repo="$1" msg="$2"; shift 2
@@ -432,7 +613,7 @@ W="$TMP/w"; mkrepo "$W"; git -C "$W" branch -M main
 git -C "$W" remote add origin "$WO"; git -C "$W" push -q origin main 2>/dev/null
 mkdir -p "$W/scripts/git-guards" "$W/githooks"
 cp "$ROOT/scripts/wt-new.sh" "$ROOT/scripts/install-git-guards.sh" "$W/scripts/"
-cp "$ROOT/scripts/git-guards/conf.sh" "$W/scripts/git-guards/"
+cp "$ROOT"/scripts/git-guards/*.sh "$W/scripts/git-guards/"
 cp "$ROOT/githooks/pre-commit" "$ROOT/githooks/pre-push" "$W/githooks/"
 WINIT=$(git -C "$W" rev-parse HEAD)
 WN="$TMP/wn"; git clone -q "$WO" "$WN" 2>/dev/null
@@ -482,7 +663,7 @@ git -C "$D" add -A; git -C "$D" commit -qm deps
 git -C "$D" remote add origin "$DO"; git -C "$D" push -q origin main 2>/dev/null
 mkdir -p "$D/scripts/git-guards" "$D/githooks"
 cp "$ROOT/scripts/wt-new.sh" "$ROOT/scripts/install-git-guards.sh" "$ROOT/scripts/wt-status.sh" "$D/scripts/"
-cp "$ROOT/scripts/git-guards/conf.sh" "$D/scripts/git-guards/"
+cp "$ROOT"/scripts/git-guards/*.sh "$D/scripts/git-guards/"
 cp "$ROOT/githooks/pre-commit" "$ROOT/githooks/pre-push" "$D/githooks/"
 # Install = a marker, so the test needs neither npm nor the network
 printf 'GG_DEPS_INSTALL_CMD="mkdir -p node_modules && touch node_modules/.installed"\n' > "$D/.gitguards.conf"
@@ -537,7 +718,7 @@ out=$(bash "$D/scripts/wt-new.sh" payment-fix 2>&1); rc=$?
 git -C "$D" config protocol.ext.allow always
 git -C "$D" remote set-url origin "ext::sleep 30"     # a remote that hangs
 printf 'GG_FETCH_TIMEOUT=2\nGG_DEPS_INSTALL_CMD="mkdir -p node_modules && touch node_modules/.installed"\n' > "$D/.gitguards.conf"
-T0=$SECONDS; out=$(bash "$D/scripts/wt-new.sh" d5 2>&1); rc=$?; T=$((SECONDS-T0))
+T0=$SECONDS; out=$($TO bash "$D/scripts/wt-new.sh" d5 2>&1); rc=$?; T=$((SECONDS-T0))
 [ $rc -eq 0 ] && [ $T -lt 15 ] && echo "$out" | grep -q 'within 2s' \
     && ok "hanging fetch is cut off by the timeout (${T}s)" || bad "fetch timeout" "rc=$rc ${T}s $out"
 
@@ -547,23 +728,27 @@ T0=$SECONDS; out=$(bash "$D/scripts/wt-new.sh" d5 2>&1); rc=$?; T=$((SECONDS-T0)
 # files/scripts/*, so no extra fixture files in the repository.
 # ═════════════════════════════════════════════════════════════════════════════
 
-# Layout: the kit repository (files/claude/hooks, settings-merge.py one level up)
-# or a project (.claude/hooks; settings-merge.py and detect.py are not copied there).
-if [ -d "$ROOT/.claude/hooks" ]; then CH="$ROOT/.claude/hooks"; else CH="$ROOT/claude/hooks"; fi
-KIT=""; [ -f "$ROOT/../settings-merge.py" ] && KIT="$(cd "$ROOT/.." && pwd)"
-
 kit_copy() {     # $1 = repo: the kit in project layout
     mkdir -p "$1/githooks" "$1/scripts/git-guards" "$1/.claude/hooks"
     cp "$ROOT/githooks/pre-commit" "$ROOT/githooks/pre-push" "$ROOT/githooks/plan-gate.sh" "$ROOT/githooks/prepare-commit-msg" "$1/githooks/"
     for s in git-safe-commit.sh install-git-guards.sh wt-new.sh wt-done.sh wt-status.sh git-lock.sh git-confirm.sh; do
         cp "$ROOT/scripts/$s" "$1/scripts/"
     done
-    cp "$ROOT"/scripts/git-guards/*.py "$ROOT/scripts/git-guards/consumer-warn.sh" "$ROOT/scripts/git-guards/conf.sh" "$1/scripts/git-guards/"
+    # every library file: the scripts source the shell helpers (conf.sh and, from
+    # 1.3.0, the path / interpreter helpers) and import the Python ones
+    cp "$ROOT"/scripts/git-guards/*.py "$ROOT"/scripts/git-guards/*.sh "$1/scripts/git-guards/"
     cp "$CH/monitorex-git-guard.sh" "$CH/monitorex_git_guard.py" "$1/.claude/hooks/"
 }
 sha_of() { { printf '%s' "$1" | sha256sum 2>/dev/null || printf '%s' "$1" | shasum -a 256; } | cut -d' ' -f1; }
 NOW_TS=$(date +%s)
 dead_pid() { sh -c 'exit 0' & local p=$!; wait "$p" 2>/dev/null; echo "$p"; }
+# Pids as a NATIVE program sees them (post-edit-tests.py writes os.getpid() into its
+# lock and checks liveness with OpenProcess). Git Bash numbers its processes itself:
+# the Windows pid of an MSYS pid is /proc/<pid>/winpid. Elsewhere the same number.
+native_pid() { if [ "$IS_WIN" = 1 ]; then cat "/proc/$1/winpid"; else echo "$1"; fi; }
+dead_native_pid() {   # a process of the native kind that has already exited
+    if [ "$IS_WIN" = 1 ]; then "$PYBIN" -c 'import os; print(os.getpid())'; else dead_pid; fi
+}
 
 echo "== plan gate: installer takes hooks from origin =="
 PGO="$TMP/pg-origin.git"; git init -q --bare "$PGO"; git -C "$PGO" symbolic-ref HEAD refs/heads/main
@@ -595,10 +780,13 @@ git -C "$PGR" checkout -q -- githooks/pre-push
 PGB="$TMP/pg-norefs"; git clone -q "$PGO" "$PGB" 2>/dev/null
 git -C "$PGB" update-ref -d refs/remotes/origin/main; git -C "$PGB" update-ref -d refs/remotes/origin/HEAD 2>/dev/null
 mkdir -p "$PGB/.git/monitorex-hooks"; printf '#!/bin/sh\n# installed earlier\n' > "$PGB/.git/monitorex-hooks/pre-push"
-git -C "$PGB" config core.hooksPath /some/where
+# MSYS_NO_PATHCONV: Git Bash would rewrite the literal /some/where into C:/Program Files/Git/some/where.
+# It switches off EVERY argument's conversion, so no `-C <msys path>` next to it: git.exe
+# would get /tmp/… literally and fail with "cannot change to" — a cd in a subshell instead.
+( cd "$PGB" && MSYS_NO_PATHCONV=1 git config core.hooksPath /some/where )
 out=$(bash "$PGB/scripts/install-git-guards.sh" 2>&1); rc=$?
 [ $rc -eq 0 ] && echo "$out" | grep -q 'hooks left untouched' && grep -q 'installed earlier' "$PGB/.git/monitorex-hooks/pre-push" \
-    && [ "$(git -C "$PGB" config core.hooksPath)" = /some/where ] && [ ! -f "$PGB/.git/monitorex-hooks/.source" ] \
+    && [ "$(cd "$PGB" && MSYS_NO_PATHCONV=1 git config core.hooksPath)" = /some/where ] && [ ! -f "$PGB/.git/monitorex-hooks/.source" ] \
     && ok "installer: origin without fetched refs — rc 0, warning, hooks and hooksPath untouched (no tree fallback)" \
     || bad "installer: origin without refs" "rc=$rc $out"
 # CI checkout of a PR: only refs/remotes/pull/N/merge, depth 1, no origin/main
@@ -832,13 +1020,6 @@ out=$(pg_push "$PGR"); rc=$?
 rm -f "$PGCONF"
 
 echo "== plan gate: barriers around it (PreToolUse guard) =="
-gj() { python3 -c 'import json,sys; t,k,v,c=sys.argv[1:5]; print(json.dumps({"tool_name":t,"tool_input":{k:v},"cwd":c}))' "$@"; }
-gcase() {   # label expect(deny|allow) project tool key value cwd
-    local lbl="$1" exp="$2" proj="$3" o got; shift 3
-    o=$(gj "$@" | CLAUDE_PROJECT_DIR="$proj" bash "$CH/monitorex-git-guard.sh" 2>/dev/null)
-    case "$o" in *'"deny"'*) got=deny ;; *) got=allow ;; esac
-    [ "$got" = "$exp" ] && ok "guard: $lbl — $exp" || bad "guard: $lbl — $exp" "got $got: $o"
-}
 PGL="$PGR/.git/monitorex-locks"
 gcase "Write into .git/monitorex-locks/release-gate/<tree>" deny "$PGR" Write file_path "$PGL/release-gate/abc" "$PGR"
 # A cwd outside the repository, resolved: /private/tmp on macOS, /tmp on Linux.
@@ -958,10 +1139,12 @@ out=$(pa_run agentid.md "$PA_GOOD" false '{"agent_id":"a1","agent_type":"x"}')
 echo p > "$TMP/pa-out/evil.md"
 out=$(pa_run evil.md "$PA_GOOD" false "" "$TMP/pa-out/evil.md")
 [ ! -f "$PAM/evil.md" ] && echo "$out" | grep -q 'directly in' && ok "plan file outside the plans directory — no mark" || bad "outside plans dir" "$out"
-ln -s "$TMP/pa-out/evil.md" "$GG_PLANS_DIR/link.md"
-out=$(pa_run link.md "$PA_GOOD" false)
-[ ! -f "$PAM/link.md" ] && [ ! -f "$PAM/evil.md" ] && ok "symlink in the plans directory pointing out — no mark" || bad "symlink out" "$out"
-rm -f "$GG_PLANS_DIR/link.md"
+if [ "$REAL_SYMLINKS" = 1 ]; then
+    ln -s "$TMP/pa-out/evil.md" "$GG_PLANS_DIR/link.md"
+    out=$(pa_run link.md "$PA_GOOD" false)
+    [ ! -f "$PAM/link.md" ] && [ ! -f "$PAM/evil.md" ] && ok "symlink in the plans directory pointing out — no mark" || bad "symlink out" "$out"
+    rm -f "$GG_PLANS_DIR/link.md"
+else na "symlink in the plans directory pointing out — no mark" "ln -s made a copy"; fi
 out=$(python3 -c 'import json,sys; print(json.dumps({"session_id":"s","tool_name":"ExitPlanMode","tool_input":{"planFilePath":sys.argv[1],"plan":sys.argv[2]},"tool_response":{"isAgent":False}}))' \
       "$GG_PLANS_DIR/only.md" "$PA_GOOD" | CLAUDE_PROJECT_DIR="$PA" bash "$CH/plan-approved.sh")
 [ ! -f "$PAM/only.md" ] && ok "only tool_input.planFilePath (set by the model) — no mark (M8)" || bad "planFilePath only" "$out"
@@ -988,7 +1171,9 @@ echo "== plan-approved.py: the gate without Codex (decide / codex_found) =="
 # environment: the hook always checks the standard Codex locations, so on a machine
 # with Codex installed an environment-based test would be red (plan C1/C3).
 pa_py() {   # pa_py <python expression over module m> [args…] — prints the result
-    python3 -B - "$CH/plan-approved.py" "$@" <<'PY2'
+    # utf-8 stdout: a helper of the suite, not the product — on Windows a pipe is cp1252,
+    # and printing a refusal reason with a dash or Cyrillic raised UnicodeEncodeError.
+    PYTHONIOENCODING=utf-8 python3 -B - "$CH/plan-approved.py" "$@" <<'PY2'
 import importlib.util, sys
 spec = importlib.util.spec_from_file_location("pa", sys.argv[1])
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
@@ -1039,16 +1224,22 @@ printf '#!/bin/sh\n' > "$TMP/pc-has/codex"; chmod +x "$TMP/pc-has/codex"; printf
 [ "$(pa_py 'm.codex_found(args[0], [args[1]])' "" "$TMP/pc-has")" = True ] && ok "codex_found: executable codex in a search dir — True (not on PATH)" || bad "codex_found search dir" ""
 [ "$(pa_py 'm.codex_found(args[0], [])' "$TMP/pc-has")" = True ] && ok "codex_found: codex on PATH — True" || bad "codex_found PATH" ""
 [ "$(pa_py 'm.codex_found(args[0], [args[1]])' "" "$TMP/pc-noexec")" = False ] && ok "codex_found: non-executable file — False" || bad "codex_found noexec" ""
-out=$(HOME=/h pa_py 'set(m.search_dirs(args[0])) >= {"/opt/homebrew/bin", "/usr/local/bin", "/h/.local/bin"}' "")
+# HOME as the interpreter got it: Git Bash hands a native Python /h and /extra/bin
+# rewritten to C:/Program Files/Git/h…; POSIX sees /h, and the check is the literal one.
+out=$(HOME=/h pa_py '(m.os.environ["HOME"] == "/h" or m.WINDOWS) and set(m.search_dirs(args[0])) >= {"/opt/homebrew/bin", "/usr/local/bin", m.os.environ["HOME"] + "/.local/bin"}' "")
 [ "$out" = True ] && ok "search_dirs: GG_CODEX_SEARCH_PATHS='' does NOT drop the standard locations (C3)" || bad "search_dirs C3" "$out"
-out=$(pa_py '"/extra/bin" in m.search_dirs(args[0])' "/extra/bin")
+out=$(pa_py '(lambda s: args[0] in s and set(m.search_dirs("")) <= set(s))(m.search_dirs(args[0]))' "/extra/bin")
 [ "$out" = True ] && ok "search_dirs: GG_CODEX_SEARCH_PATHS only adds directories" || bad "search_dirs extra" "$out"
 # Integration, deterministic in both environments:
 mkdir -p "$TMP/pa-bin-codex"
-for t in python3 git; do ln -sf "$(python3 -c 'import os,shutil,sys; print(os.path.realpath(shutil.which(sys.argv[1])))' "$t")" "$TMP/pa-bin-codex/$t"; done
+for t in python3 git; do mkwrap "$TMP/pa-bin-codex" "$t" "$(command -v "$t")"; done
 cp "$TMP/pc-has/codex" "$TMP/pa-bin-codex/codex"
 for n in ni.md ud.md; do echo plan > "$GG_PLANS_DIR/$n"; done
-out=$(pa_in ni.md "$(printf '| Codex | — | ⚪️ not installed |\n%s' "$PG_EN")" false | PATH="$TMP/pa-bin-codex" CLAUDE_PROJECT_DIR="$PA" "$BASH" "$CH/plan-approved.sh")
+# On Windows the hook is native Python: its subprocess git needs a real git.exe,
+# which a sh wrapper without .exe is not. The real git's directory holds no codex.
+PA_CODEX_PATH="$TMP/pa-bin-codex"
+[ "$IS_WIN" = 1 ] && PA_CODEX_PATH="$PA_CODEX_PATH:$(dirname "$(command -v git)")"
+out=$(pa_in ni.md "$(printf '| Codex | — | ⚪️ not installed |\n%s' "$PG_EN")" false | PATH="$PA_CODEX_PATH" CLAUDE_PROJECT_DIR="$PA" "$BASH" "$CH/plan-approved.sh")
 [ ! -f "$PAM/ni.md" ] && echo "$out" | grep -q 'codex-plan-critic' && echo "$out" | pa_block \
     && ok "hook: '⚪️ not installed' while codex is on PATH — no mark, block" || bad "hook: not installed + codex on PATH" "$out"
 out=$(pa_run ud.md "$(printf "| Codex | — | ❌ unavailable — user's decision |\n%s" "$PG_EN")" false)
@@ -1081,6 +1272,22 @@ pr_repo "$PAH/dev/fake"; rm -rf "$PAH/dev/fake/.git"; printf 'gitdir: %s/dev/c/.
 pr_repo "$PAH/dev/lockln"; mkdir -p "$PAH/dev/d/.git/monitorex-locks"; ln -s "$PAH/dev/d/.git/monitorex-locks" "$PAH/dev/lockln/.git/monitorex-locks"
 pr_repo "$PAH/dev/b2"   # $HOME prefix trap lives in the unit case below
 pa_run_h() { pa_in "$@" | HOME="$PAH" CLAUDE_PROJECT_DIR="${PA_SESSION:-$PA}" bash "$CH/plan-approved.sh"; }
+# A path in the hook's words. POSIX: the exact string, as before. Native Windows: the
+# hook speaks native paths (C:\Users\runneradmin\…), the suite MSYS ones (/tmp/… =
+# C:/Users/RUNNER~1/…) — both sides go through realpath + normcase there, nothing else.
+pa_msg_count() {   # stdin = hook JSON; $1 = path → how many times systemMessage names it
+    python3 -c 'import json, os, sys
+m = json.load(sys.stdin)["systemMessage"]; p = sys.argv[1]
+if os.name == "nt":
+    m, p = os.path.normcase(m), os.path.normcase(os.path.realpath(p))
+print(m.count(p))' "$1"
+}
+same_path() {      # A B → 0 when they name one directory (see pa_msg_count)
+    if [ "$IS_WIN" != 1 ]; then [ "$1" = "$2" ]; return; fi
+    "$PYBIN" -c 'import os, sys
+n = lambda p: os.path.normcase(os.path.realpath(p))
+sys.exit(0 if sys.argv[1] and n(sys.argv[1]) == n(sys.argv[2]) else 1)' "$1" "$2"
+}
 mk() { printf '%s/.git/monitorex-locks/plan-approved/%s' "$1" "$2"; }
 pr_plan() { printf '# P\n\n%s\n\n## 🧑‍⚖️ External review Codex\n\nГейт: ✅ пройден\n' "$1"; }
 
@@ -1112,6 +1319,7 @@ case "$(ar '~/dev/a' )" in OK) ok "accept_repo: '~' is HOME" ;; *) bad "accept_r
 for c in "dev/a|relative" "$TMP/outside-repo|outside" "$PAH/dev/nokit|kit" "$PAH/dev/plain|repository" "$PAH/dev/missing|exist" \
          "$PAH/dev/a-wt|main" "$PAH/dev/b-link|symlink" "$PAH/dev/fake|main" "$PAH/dev/../../outside-repo|outside" "$PAH/dev/a/a.txt|exist"; do
     path=${c%%|*}; want=${c##*|}
+    if [ "$want" = symlink ] && [ "$REAL_SYMLINKS" != 1 ]; then na "accept_repo: $(basename "$path") — refused ($want)" "ln -s made a copy"; continue; fi
     out=$(ar "$path")
     case "$out" in NO*"$want"*) ok "accept_repo: $(basename "$path") — refused ($want)" ;; *) bad "accept_repo $path" "$out" ;; esac
 done
@@ -1123,14 +1331,19 @@ case "$out" in NO*) ok "accept_repo: empty HOME — refused (fail-closed)" ;; *)
 # Integration
 for n in rp1.md rp2.md rp3.md rp4.md rp5.md rp6.md rp7.md rp8.md; do echo plan > "$GG_PLANS_DIR/$n"; done
 out=$(pa_run_h rp1.md "$(pr_plan "Репозиторий: \`$PAH/dev/a\` (основной)")" false)
-[ -f "$(mk "$PAH/dev/a" rp1.md)" ] && [ -f "$PAM/rp1.md" ] && grep -q "^source=$PA$" "$(mk "$PAH/dev/a" rp1.md)" \
+[ -f "$(mk "$PAH/dev/a" rp1.md)" ] && [ -f "$PAM/rp1.md" ] \
+    && [ "$(grep -c '^source=' "$(mk "$PAH/dev/a" rp1.md)")" = 1 ] && same_path "$(sed -n 's/^source=//p' "$(mk "$PAH/dev/a" rp1.md)")" "$PA" \
     && grep -q '^ts=[0-9]*$' "$(mk "$PAH/dev/a" rp1.md)" && grep -q '^critic=section$' "$(mk "$PAH/dev/a" rp1.md)" \
-    && echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); m=d["systemMessage"]; sys.exit(0 if sys.argv[1] in m and "decision" not in d else 1)' "$PAH/dev/a" \
+    && [ "$(printf '%s' "$out" | pa_msg_count "$PAH/dev/a")" -ge 1 ] \
+    && echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if "decision" not in d else 1)' \
     && ok "hook: named repository — mark there (source=, same format) and in the session repo; the user is told where" || bad "hook: named repository" "$out"
-out=$(pa_run_h rp2.md "$(pr_plan "$(printf 'Репозиторий: %s\nРепозиторий: %s\nРепозиторий: %s\nРепозиторий: %s\nРепозиторий: %s' "$TMP/outside-repo" "$PAH/dev/nokit" "$PAH/dev/a-wt" "$PAH/dev/lockln" "$PAH/dev/b")")" false)
+# Without real symlinks (Git Bash copies) the symlinked monitorex-locks target is N/A, the rest still runs.
+RP2_LN="$PAH/dev/lockln"; RP2_SYM=symlink
+if [ "$REAL_SYMLINKS" != 1 ]; then RP2_LN="$PAH/dev/b"; RP2_SYM=outside; na "hook: symlinked monitorex-locks target refused" "ln -s made a copy"; fi
+out=$(pa_run_h rp2.md "$(pr_plan "$(printf 'Репозиторий: %s\nРепозиторий: %s\nРепозиторий: %s\nРепозиторий: %s\nРепозиторий: %s' "$TMP/outside-repo" "$PAH/dev/nokit" "$PAH/dev/a-wt" "$RP2_LN" "$PAH/dev/b")")" false)
 [ ! -f "$(mk "$TMP/outside-repo" rp2.md)" ] && [ ! -f "$(mk "$PAH/dev/nokit" rp2.md)" ] && [ ! -f "$(mk "$PAH/dev/a" rp2.md)" ] \
     && [ ! -f "$PAH/dev/d/.git/monitorex-locks/plan-approved/rp2.md" ] && [ -f "$(mk "$PAH/dev/b" rp2.md)" ] \
-    && echo "$out" | grep -q 'outside' && echo "$out" | grep -q 'symlink' && echo "$out" | grep -q 'main' \
+    && echo "$out" | grep -q 'outside' && echo "$out" | grep -q "$RP2_SYM" && echo "$out" | grep -q 'main' \
     && ok "hook: refused targets (outside HOME, no kit, worktree, symlinked monitorex-locks) get no mark and a reason; the good one still does" || bad "hook: refused targets" "$out"
 out=$(pa_run_h rp3.md "$(pr_plan "$(for r in a b c d e f g; do printf 'Репозиторий: %s\n' "$PAH/dev/$r"; done)")" false)
 [ -f "$(mk "$PAH/dev/e" rp3.md)" ] && [ ! -f "$(mk "$PAH/dev/f" rp3.md)" ] && [ ! -f "$(mk "$PAH/dev/g" rp3.md)" ] && echo "$out" | grep -q '5' \
@@ -1154,7 +1367,7 @@ out=$(pa_run good.md "$PA_GOOD" false)
 [ -z "$out" ] && ok "hook: plan without 'Репозиторий:' — silent, as before" || bad "hook: silent without targets" "$out"
 echo plan > "$GG_PLANS_DIR/rp9.md"
 out=$(PA_SESSION="$TMP/pa-norepo" pa_run_h rp9.md "$(printf '# P\nРепозиторий: %s\nРепозиторий: %s\n\n| Codex | — | ❌ unavailable — user'"'"'s decision |\n\nГейт: ✅ пройден\n' "$PAH/dev/a" "~/dev/a")" false)
-[ "$(printf '%s' "$out" | grep -o "$PAH/dev/a" | wc -l | tr -d ' ')" = 1 ] && echo "$out" | grep -q 'WITHOUT' \
+[ "$(printf '%s' "$out" | pa_msg_count "$PAH/dev/a")" = 1 ] && echo "$out" | grep -q 'WITHOUT' \
     && ok "hook: same repository written twice — listed once; critic notice when a named repo got the mark" || bad "hook: dedup list" "$out"
 echo plan > "$GG_PLANS_DIR/rp10.md"
 out=$(PA_SESSION="$TMP/pa-norepo" pa_run_h rp10.md "$(printf '# P\n\n| Codex | — | ❌ unavailable — user'"'"'s decision |\n\nГейт: ✅ пройден\n')" false)
@@ -1177,9 +1390,11 @@ PAP=$(cd "$PA" && pwd -P)
 mkdir -p "$PAP/.plans"; echo plan > "$PAP/.plans/pd1.md"
 out=$(pa_run_nd pd1.md "$PA_GOOD" false "" "$PAP/.plans/pd1.md")
 [ -f "$PAM/pd1.md" ] && ok "pd hook: plan in <project>/.plans — mark written" || bad "pd hook: .plans" "$out"
-ln -s "$TMP/pa-out/evil.md" "$PAP/.plans/pdlink.md"
-out=$(pa_run_nd pdlink.md "$PA_GOOD" false "" "$PAP/.plans/pdlink.md")
-[ ! -f "$PAM/pdlink.md" ] && [ ! -f "$PAM/evil.md" ] && ok "pd hook: symlink in .plans pointing out — no mark" || bad "pd hook: symlink" "$out"
+if [ "$REAL_SYMLINKS" = 1 ]; then
+    ln -s "$TMP/pa-out/evil.md" "$PAP/.plans/pdlink.md"
+    out=$(pa_run_nd pdlink.md "$PA_GOOD" false "" "$PAP/.plans/pdlink.md")
+    [ ! -f "$PAM/pdlink.md" ] && [ ! -f "$PAM/evil.md" ] && ok "pd hook: symlink in .plans pointing out — no mark" || bad "pd hook: symlink" "$out"
+else na "pd hook: symlink in .plans pointing out — no mark" "ln -s made a copy"; fi
 echo p > "$TMP/pa-out/pd2.md"
 out=$(pa_run_nd pd2.md "$PA_GOOD" false "" "$TMP/pa-out/pd2.md")
 [ ! -f "$PAM/pd2.md" ] && echo "$out" | grep -q 'directly in' && ok "pd hook: plan outside every plans directory — no mark" || bad "pd hook: outside" "$out"
@@ -1217,16 +1432,7 @@ out=$(pa_run_nd pd9.md "$(pr_plan "Репозиторий: $PAH/dev/e")" false "
     && ok "pd hook: plan in the old ~/.claude/plans — the target finds it there, no copy" || bad "pd hook: legacy source copy" "$out"
 rm -rf "$PAP/.plans" "$PAP/planning"
 
-echo "== PreToolUse guard: unit cases (test_pretooluse_guard.py) =="
-if [ -d "$ROOT/.claude/hooks" ]; then
-    out=$(python3 -B "$ROOT/scripts/git-guards/test_pretooluse_guard.py" 2>&1); rc=$?
-else                            # the kit: assemble the project layout the test expects
-    GLY="$TMP/guard-layout"; mkdir -p "$GLY/.claude/hooks" "$GLY/scripts/git-guards"
-    cp "$CH"/* "$GLY/.claude/hooks/"; cp "$ROOT"/scripts/git-guards/*.py "$ROOT"/scripts/git-guards/*.sh "$GLY/scripts/git-guards/"
-    out=$(cd "$GLY" && python3 -B "$GLY/scripts/git-guards/test_pretooluse_guard.py" 2>&1); rc=$?
-fi
-summary=$(printf '%s\n' "$out" | grep -E 'passed: [0-9]+' | tail -1 | sed 's/^ *//')
-[ $rc -eq 0 ] && ok "guard unit cases — $summary" || bad "guard unit cases" "$(printf '%s\n' "$out" | grep -E 'FAIL|passed' | head -20)"
+guard_unit_cases
 
 echo "== wt-new --resume: an old branch brings old guards (M10) =="
 RSO="$TMP/rs.git"; git init -q --bare "$RSO"; git -C "$RSO" symbolic-ref HEAD refs/heads/main
@@ -1241,7 +1447,9 @@ out=$(bash "$RS/scripts/wt-new.sh" --resume wt/old 2>&1); rc=$?
 [ $rc -eq 1 ] && echo "$out" | grep -q 'carries outdated guards' && echo "$out" | grep -q 'scripts/install-git-guards.sh' \
     && [ ! -d "$TMP/rs-wt/old" ] && ok "--resume of a branch with an old installer — refused, no tree" || bad "--resume outdated guards" "$out"
 out=$(bash "$RS/scripts/wt-new.sh" --resume wt/old --merge-main 2>&1); rc=$?
-[ $rc -eq 0 ] && cmp -s "$TMP/rs-wt/old/scripts/install-git-guards.sh" "$RS/scripts/install-git-guards.sh" \
+# Blob ids, not bytes: a Windows checkout (core.autocrlf=true) has CRLF on disk for the same blob.
+RSB=$(git -C "$RS" hash-object scripts/install-git-guards.sh)
+[ $rc -eq 0 ] && [ -n "$RSB" ] && [ "$(git -C "$TMP/rs-wt/old" hash-object scripts/install-git-guards.sh 2>/dev/null)" = "$RSB" ] \
     && [ -f "$TMP/rs-wt/old/b.txt" ] && ok "--resume … --merge-main — origin/main merged in, tree created" || bad "--resume --merge-main" "$out"
 out=$(bash "$RS/scripts/wt-new.sh" t-mm --merge-main 2>&1); rc=$?
 [ $rc -eq 2 ] && echo "$out" | grep -q -- '--merge-main only works with --resume' && ok "--merge-main without --resume — usage error" || bad "--merge-main alone" "rc=$rc $out"
@@ -1297,15 +1505,28 @@ out=$(iw GH_STUB=notfound bash "$IW/scripts/wt-new.sh" --issue 6 2>&1); rc=$?
 [ $rc -eq 1 ] && echo "$out" | grep -q 'not found in acme/proj' && [ ! -e "$CLM/issue-6" ] && ok "issue not found — refused" || bad "issue not found" "$out"
 out=$(iw GH_STUB=noauth bash "$IW/scripts/wt-new.sh" --issue 6 2>&1); rc=$?
 [ $rc -eq 1 ] && echo "$out" | grep -q 'gh is not authenticated' && ok "gh not authenticated — refused with gh auth login" || bad "gh noauth" "$out"
-T0=$SECONDS; out=$(iw GH_STUB=hang bash "$IW/scripts/wt-new.sh" --issue 6 2>&1); rc=$?; T=$((SECONDS-T0))
+T0=$SECONDS; out=$(iw GH_STUB=hang $TO bash "$IW/scripts/wt-new.sh" --issue 6 2>&1); rc=$?; T=$((SECONDS-T0))
 [ $rc -eq 1 ] && [ $T -lt 12 ] && echo "$out" | grep -q 'did not answer within 2s' && ok "hanging gh — cut off by GG_ISSUE_TIMEOUT (${T}s)" || bad "hanging gh" "rc=$rc ${T}s $out"
-NOGH="$TMP/nogh"; mkdir -p "$NOGH"
-# Every system tool except gh: CI runners and some distros keep gh in /usr/bin itself.
-for d in /usr/bin /bin /usr/sbin /sbin; do
-    for f in "$d"/*; do n=${f##*/}; [ "$n" = gh ] || [ -e "$NOGH/$n" ] || ln -s "$f" "$NOGH/$n"; done
+# PATH = the existing directories minus every one that holds gh. CI runners and
+# some distros keep gh in /usr/bin itself: the other tools of such a directory get
+# exec wrappers (no symlink farm — Git Bash copies symlinks, and copied .exe files
+# lose their DLLs; on Windows gh lives in a directory of its own).
+NOGH="$TMP/nogh"; mkdir -p "$NOGH"; NOGH_PATH=""
+NOGH_IFS=$IFS; IFS=:
+for d in $PATH; do
+    [ -n "$d" ] && [ -d "$d" ] || continue
+    if [ -e "$d/gh" ] || [ -e "$d/gh.exe" ]; then
+        for f in "$d"/*; do
+            n=${f##*/}; [ "$IS_WIN" = 1 ] && n=${n%.exe}
+            case "$n" in gh|*\'*|*'"'*) continue ;; esac
+            [ -f "$f" ] && [ -x "$f" ] && [ ! -e "$NOGH/$n" ] && mkwrap "$NOGH" "$n" "$f"
+        done
+    else
+        NOGH_PATH="${NOGH_PATH:+$NOGH_PATH:}$d"
+    fi
 done
-for t in git python3; do ln -sf "$(command -v $t)" "$NOGH/$t"; done
-out=$(env PATH="$NOGH" bash "$IW/scripts/wt-new.sh" --issue 6 2>&1); rc=$?
+IFS=$NOGH_IFS
+out=$(env PATH="$NOGH:$NOGH_PATH" bash "$IW/scripts/wt-new.sh" --issue 6 2>&1); rc=$?
 [ $rc -eq 1 ] && echo "$out" | grep -q 'gh (GitHub CLI) not found' && ok "no gh in PATH — refused with an install hint" || bad "no gh" "$out"
 
 out=$(iw GH_STUB=open GH_TITLE='Исправить вход 🚀 Login page' bash "$IW/scripts/wt-new.sh" --issue 20 2>&1); rc=$?
@@ -1486,7 +1707,7 @@ pe_run "$PE/lib/a.ts" >/dev/null
 [ "$(pe_calls)" = 1 ] && ! grep -q 'gone.ts' "$PECALLS" && grep -qx 'ARG lib/a.ts' "$PECALLS" && ok "deleted file in the queue — not passed to the runner" || bad "deleted file in queue" "$(cat "$PECALLS")"
 
 PELOCK="$PE/.git/monitorex-locks/post-edit-run"
-pe_reset; mkdir -p "$PELOCK"; printf 'pid=%s\ntime=%s\n' "$$" "$(date +%s)" > "$PELOCK/owner"
+pe_reset; mkdir -p "$PELOCK"; printf 'pid=%s\ntime=%s\n' "$(native_pid $$)" "$(date +%s)" > "$PELOCK/owner"
 pe_run "$PE/lib/a.ts" >/dev/null
 [ "$(pe_calls)" = 0 ] && [ -d "$PELOCK" ] && grep -qx 'lib/a.ts' "$PEQ" && ok "run lock held by a live pid — no run, the path waits in the queue" || bad "live lock" "$(pe_calls)"
 # two worktrees of one repository: own queues, one shared lock
@@ -1495,7 +1716,7 @@ pe_run "$TMP/pe-wt2/lib/a.ts" "$TMP/pe-wt2" >/dev/null
 PEQ2="$PE/.git/worktrees/pe-wt2/post-edit-tests/pending"
 [ "$(pe_calls)" = 0 ] && grep -qx 'lib/a.ts' "$PEQ2" 2>/dev/null && [ "$(grep -c . "$PEQ")" = 1 ] \
     && ok "two worktrees — separate queues, the lock is shared (no run in the second tree)" || bad "two worktrees" "$(pe_calls) q2=$(cat "$PEQ2" 2>&1)"
-printf 'pid=%s\ntime=%s\n' "$(dead_pid)" "$(date +%s)" > "$PELOCK/owner"
+printf 'pid=%s\ntime=%s\n' "$(dead_native_pid)" "$(date +%s)" > "$PELOCK/owner"
 pe_run "$PE/lib/a.ts" >/dev/null
 [ "$(pe_calls)" = 1 ] && [ ! -d "$PELOCK" ] && ok "run lock of a dead pid — removed, the run happens" || bad "dead lock" "$(pe_calls)"
 
@@ -1503,13 +1724,14 @@ pe_conf 'GG_POST_EDIT_MAX=1'; pe_reset; echo sleep > "$PEMODE"; rm -f "$TMP/pe-c
 T0=$SECONDS; out=$(pe_run "$PE/lib/a.ts"); T=$((SECONDS-T0))
 child=$(cat "$TMP/pe-child" 2>/dev/null); sleep 1
 { [ -z "$out" ] && [ $T -lt 15 ] && [ -n "$child" ] && ! kill -0 "$child" 2>/dev/null && [ ! -d "$PELOCK" ]; } \
-    && ok "GG_POST_EDIT_MAX=1 — the whole process group killed (${T}s), lock released, no block" || bad "ceiling" "out=$out T=$T child=$child"
+    && ok "GG_POST_EDIT_MAX=1 — the whole process group killed (${T}s), lock released, no block" \
+    || bad "ceiling" "out=$out T=$T child=$child alive=$(kill -0 "$child" 2>/dev/null && echo yes || echo no) lock=$([ -d "$PELOCK" ] && echo held || echo free)"
 [ -n "$child" ] && kill "$child" 2>/dev/null
 echo green > "$PEMODE"
 
 out=$(printf 'not json {' | CLAUDE_PROJECT_DIR="$PE" bash "$CH/post-edit-tests.sh"); rc=$?
 [ $rc -eq 0 ] && [ -z "$out" ] && ok "broken JSON — exit 0, silent" || bad "broken JSON" "rc=$rc $out"
-NOPY="$TMP/nopy"; mkdir -p "$NOPY"; for t in cat dirname; do ln -sf "$(command -v $t)" "$NOPY/$t"; done
+NOPY="$TMP/nopy"; mkdir -p "$NOPY"; for t in cat dirname; do mkwrap "$NOPY" "$t" "$(command -v $t)"; done
 pe_reset
 out=$(pe_in "$PE/lib/a.ts" "$PE" | env PATH="$NOPY" CLAUDE_PROJECT_DIR="$PE" /bin/bash "$CH/post-edit-tests.sh"); rc=$?
 [ $rc -eq 0 ] && [ -z "$out" ] && [ "$(pe_calls)" = 0 ] && ok "no python3 — exit 0, silent" || bad "no python3" "rc=$rc $out"
@@ -1577,10 +1799,15 @@ print(len(c), sum(1 for m,cm,t in c if m=="Edit|Write|MultiEdit" and t==120))' "
         && echo "$out" | grep -qx 'GG_PLAN_GATE="githooks/plan-gate.sh"' && ok "detect: no test runner / no migrations — no GG_POST_EDIT_TESTS / GG_PLAN_REQUIRED_NEW" || bad "detect without runner" "$out"
 
     # install.sh itself: a copy of the kit with a stub acceptance (the real one is this file)
-    FK="$TMP/fakekit"; mkdir -p "$FK"
-    cp -R "$KIT/files" "$FK/files"; cp "$KIT/detect.py" "$KIT/settings-merge.py" "$FK/"
-    sed "s#/tmp/gg-accept.log#$TMP/gg-accept.log#g" "$KIT/install.sh" > "$FK/install.sh"
-    printf '#!/usr/bin/env bash\necho "  passed: 1   failed: 0"\n' > "$FK/files/scripts/test-git-guards.sh"
+    # Every top-level file of the kit travels along (detect.py, settings-merge.py and,
+    # from 1.3.0, attributes.py and selftest.sh): install.sh calls them by path.
+    fake_kit() {   # $1 = directory → a copy of the kit, acceptance stubbed
+        mkdir -p "$1"; cp -R "$KIT/files" "$1/files"
+        for f in "$KIT"/*; do [ -f "$f" ] && [ "${f##*/}" != install.sh ] && cp "$f" "$1/"; done
+        sed "s#/tmp/gg-accept.log#$TMP/gg-accept.log#g" "$KIT/install.sh" > "$1/install.sh"
+        printf '#!/usr/bin/env bash\necho "  passed: 1   failed: 0"\n' > "$1/files/scripts/test-git-guards.sh"
+    }
+    FK="$TMP/fakekit"; fake_kit "$FK"
     IT="$TMP/it"; mkrepo "$IT"; echo '{"devDependencies":{"vitest":"1"}}' > "$IT/package.json"
     out=$(GG_EMBEDDED=1 bash "$FK/install.sh" "$IT" 2>&1); rc=$?
     [ $rc -eq 0 ] && grep -qx 'GG_POST_EDIT_TESTS=1' "$IT/.gitguards.conf" && grep -q 'post-edit-tests.sh' "$IT/.claude/settings.json" \
@@ -1936,8 +2163,12 @@ exit 127
 EOF
 H_NOSHASUM="$TMP/shim-no-shasum"
 ABC=ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
-[ "$(PATH="$H_NOSHA:$PATH" sha_of abc)" = "$ABC" ] && [ "$(PATH="$H_NOSHASUM:$PATH" sha_of abc)" = "$ABC" ] \
-    && ok "sha_of: the same digest with only shasum or only sha256sum" || bad "sha_of fallback" "$(PATH="$H_NOSHASUM:$PATH" sha_of abc)"
+if command -v shasum >/dev/null 2>&1; then
+    [ "$(PATH="$H_NOSHA:$PATH" sha_of abc)" = "$ABC" ] && [ "$(PATH="$H_NOSHASUM:$PATH" sha_of abc)" = "$ABC" ] \
+        && ok "sha_of: the same digest with only shasum or only sha256sum" || bad "sha_of fallback" "$(PATH="$H_NOSHASUM:$PATH" sha_of abc)"
+else
+    na "sha_of: the same digest with only shasum or only sha256sum" "no shasum"
+fi
 IGS="$TMP/port-igs"; mkrepo "$IGS"; kit_copy "$IGS"
 ( cd "$IGS" && PATH="$H_NOSHASUM:$PATH" bash scripts/install-git-guards.sh ) >/dev/null 2>&1
 want=$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$IGS/.git/monitorex-hooks/pre-push" 2>/dev/null)
@@ -2057,39 +2288,51 @@ gcase "git -C <main>/sub/deep add" deny "$GSD" Bash command "git -C $GSD/sub/dee
 gcase "git add from a subdirectory of a linked worktree" allow "$GSD" Bash command "git add a.txt" "$TMP/port-gsd-wt/sub"
 gcase "git add at the root of a linked worktree" allow "$GSD" Bash command "git add a.txt" "$TMP/port-gsd-wt"
 
+guard_wrapper_cases
+
 if [ -n "$KIT" ]; then
-    echo "== portability: native Windows stop and a failed detect (installer) =="
-    FW="$TMP/fakekit-win"; mkdir -p "$FW"
-    cp -R "$KIT/files" "$FW/files"; cp "$KIT/detect.py" "$KIT/settings-merge.py" "$FW/"
-    sed "s#/tmp/gg-accept.log#$TMP/gg-accept.log#g" "$KIT/install.sh" > "$FW/install.sh"
-    printf '#!/usr/bin/env bash\necho "  passed: 1   failed: 0"\n' > "$FW/files/scripts/test-git-guards.sh"
+    echo "== portability: Git Bash supported, MSYS/Cygwin stop, a failed detect (installer) =="
+    # vibe-flow 1.3.0: native Windows through Git for Windows (uname MINGW*) is
+    # supported; MSYS2/Cygwin shells bring their own POSIX Python and path rules and
+    # are not tested, so they stop — whatever GG_ALLOW_UNSUPPORTED_OS says (removed).
+    FW="$TMP/fakekit-win"; fake_kit "$FW"
     untouched() { [ -z "$(git -C "$1" status --porcelain)" ] && [ ! -e "$1/.gitguards.conf" ] && [ ! -e "$1/scripts" ] && [ ! -e "$1/githooks" ] && [ ! -e "$1/CLAUDE.md" ]; }
+    STOP_MSG='use Git for Windows (Git Bash) or WSL 2'
     for u in MINGW64_NT-10.0-26200 MSYS_NT-10.0-26200 CYGWIN_NT-10.0-26200; do
         k=${u%%_*}
         mkshim "uname-$k" uname <<EOF
 echo $u
 EOF
+    done
+    FP="$TMP/fakeplugin"; mkdir -p "$FP"
+    cp -R "$KIT/../scripts" "$KIT/../templates" "$KIT/../.claude-plugin" "$FP/"; cp -R "$FW" "$FP/git-guards"
+    NG="$TMP/port-notgit"; mkdir -p "$NG"
+    for k in MSYS CYGWIN; do
         US="$TMP/shim-uname-$k"
         WR="$TMP/port-win-$k"; mkrepo "$WR"
         out=$(env -u GG_ALLOW_UNSUPPORTED_OS -u GITHUB_ACTIONS PATH="$US:$PATH" GG_EMBEDDED=1 bash "$FW/install.sh" "$WR" 2>&1); rc=$?
-        [ $rc -ne 0 ] && echo "$out" | grep -q 'WSL 2' && untouched "$WR" \
-            && ok "install.sh on $k — stops with the WSL steps, repository untouched" || bad "install.sh on $k" "rc=$rc $out"
+        [ $rc -ne 0 ] && echo "$out" | grep -qF "$STOP_MSG" && untouched "$WR" \
+            && ok "install.sh on $k — stops ('$STOP_MSG'), repository untouched" || bad "install.sh on $k" "rc=$rc $out"
+        out=$(GITHUB_ACTIONS=true GG_ALLOW_UNSUPPORTED_OS=1 PATH="$US:$PATH" GG_EMBEDDED=1 bash "$FW/install.sh" "$WR" 2>&1); rc=$?
+        [ $rc -ne 0 ] && echo "$out" | grep -qF "$STOP_MSG" && untouched "$WR" \
+            && ok "install.sh on $k with GG_ALLOW_UNSUPPORTED_OS=1 inside CI — still stops (the variable is gone)" || bad "install.sh on $k, old override" "rc=$rc $out"
+        WI="$TMP/port-win-init-$k"; mkrepo "$WI"
+        out=$(env -u GG_ALLOW_UNSUPPORTED_OS -u GITHUB_ACTIONS PATH="$US:$PATH" bash "$FP/scripts/init.sh" "$WI" 2>&1); rc=$?
+        [ $rc -ne 0 ] && echo "$out" | grep -qF "$STOP_MSG" && untouched "$WI" \
+            && ok "init.sh on $k — stops before any write" || bad "init.sh on $k" "rc=$rc $out"
+        out=$(GITHUB_ACTIONS=true GG_ALLOW_UNSUPPORTED_OS=1 PATH="$US:$PATH" bash "$FP/scripts/init.sh" "$NG" 2>&1); rc=$?
+        [ $rc -ne 0 ] && echo "$out" | grep -qF "$STOP_MSG" \
+            && ok "init.sh on $k with GG_ALLOW_UNSUPPORTED_OS=1 inside CI — still stops" || bad "init.sh on $k, old override" "rc=$rc $out"
     done
     US="$TMP/shim-uname-MINGW64"
-    FP="$TMP/fakeplugin"; mkdir -p "$FP"
-    cp -R "$KIT/../scripts" "$KIT/../templates" "$KIT/../.claude-plugin" "$FP/"; cp -R "$FW" "$FP/git-guards"
-    WI="$TMP/port-win-init"; mkrepo "$WI"
+    WR="$TMP/port-win-MINGW64"; mkrepo "$WR"
+    out=$(env -u GG_ALLOW_UNSUPPORTED_OS -u GITHUB_ACTIONS PATH="$US:$PATH" GG_EMBEDDED=1 bash "$FW/install.sh" "$WR" 2>&1); rc=$?
+    [ $rc -eq 0 ] && ! echo "$out" | grep -q 'WSL 2' && grep -q '^GG_PROTECTED=' "$WR/.gitguards.conf" 2>/dev/null \
+        && ok "install.sh on MINGW64 (Git Bash) — no stop, the kit is installed" || bad "install.sh on MINGW64" "rc=$rc $out"
+    WI="$TMP/port-win-init-MINGW64"; mkrepo "$WI"
     out=$(env -u GG_ALLOW_UNSUPPORTED_OS -u GITHUB_ACTIONS PATH="$US:$PATH" bash "$FP/scripts/init.sh" "$WI" 2>&1); rc=$?
-    [ $rc -ne 0 ] && echo "$out" | grep -q 'WSL 2' && untouched "$WI" \
-        && ok "init.sh on MINGW64 — stops before any write" || bad "init.sh on MINGW64" "rc=$rc $out"
-    NG="$TMP/port-notgit"; mkdir -p "$NG"
-    out=$(env -u GITHUB_ACTIONS GG_ALLOW_UNSUPPORTED_OS=1 PATH="$US:$PATH" bash "$FW/install.sh" "$NG" 2>&1); rc=$?
-    [ $rc -ne 0 ] && echo "$out" | grep -q 'WSL 2' && ok "GG_ALLOW_UNSUPPORTED_OS alone (outside CI) — still stops" || bad "override outside CI" "rc=$rc $out"
-    out=$(env -u GITHUB_ACTIONS GG_ALLOW_UNSUPPORTED_OS=1 PATH="$US:$PATH" bash "$FP/scripts/init.sh" "$NG" 2>&1); rc=$?
-    [ $rc -ne 0 ] && echo "$out" | grep -q 'WSL 2' && ok "init.sh: GG_ALLOW_UNSUPPORTED_OS alone — still stops" || bad "init override outside CI" "rc=$rc $out"
-    out=$(GITHUB_ACTIONS=true GG_ALLOW_UNSUPPORTED_OS=1 PATH="$US:$PATH" bash "$FW/install.sh" "$NG" 2>&1); rc=$?
-    ! echo "$out" | grep -q 'WSL 2' && echo "$out" | grep -q 'unsupported OS' && echo "$out" | grep -q 'not a git repository' \
-        && ok "override inside CI — passes the stop with a warning banner" || bad "override in CI" "rc=$rc $out"
+    [ $rc -eq 0 ] && ! echo "$out" | grep -q 'WSL 2' && [ -f "$WI/.gitguards.conf" ] && grep -q 'vibe-flow:begin' "$WI/CLAUDE.md" 2>/dev/null \
+        && ok "init.sh on MINGW64 (Git Bash) — no stop, deployed" || bad "init.sh on MINGW64" "rc=$rc $out"
 
     FD="$TMP/fakekit-baddetect"; cp -R "$FW" "$FD"
     printf 'import sys\nprint("GG_PARTIAL=1")\nsys.exit(1)\n' > "$FD/detect.py"
@@ -2104,6 +2347,369 @@ EOF
         && ok ".gitattributes: scripts check out with LF on any core.autocrlf" || bad ".gitattributes eol" "$(git -C "$KIT" check-attr eol -- files/scripts/wt-new.sh)"
 fi
 
+# ═════════════════════════════════════════════════════════════════════════════
+# vibe-flow 1.3.0 — native Windows (Git Bash) and the holes found on the way.
+# Every case below runs on macOS and Linux too, except the block marked
+# "native Windows only". The contracts K1–K14 are in the 1.3.0 plan.
+# ═════════════════════════════════════════════════════════════════════════════
+echo "== policy from origin: absent → tree text, unreadable → refuse (K8, Codex C1), git replace ignored =="
+# A read ERROR is not "absent": the built-in defaults switch the release gate, the
+# plan gate and the typecheck off, and the tree copy is whatever the branch wants.
+pp_direct() {   # $1 repo, $2 origin, $3 branch, $4 sha, [$5 PATH prefix] → pre-push run directly
+    # (not via `git push`: git puts its exec-path first on PATH, past any shim)
+    ( cd "$1" && printf 'refs/heads/%s %s refs/heads/%s 0000000000000000000000000000000000000000\n' "$3" "$4" "$3" \
+        | env PATH="${5:+$5:}$PATH" MONITOREX_ACTOR=tst CLAUDE_CODE_SESSION_ID= sh "$1/.git/monitorex-hooks/pre-push" origin "$2" 2>&1 )
+}
+K8O="$TMP/k8-origin.git"; git init -q --bare "$K8O"; git -C "$K8O" symbolic-ref HEAD refs/heads/main
+K8="$TMP/k8"; git init -q "$K8"; git -C "$K8" symbolic-ref HEAD refs/heads/main
+git -C "$K8" config user.email t@t; git -C "$K8" config user.name t
+kit_copy "$K8"; cp "$ROOT/scripts/release-gate.sh" "$K8/scripts/"; echo a > "$K8/a.txt"
+printf 'GG_PROTECTED="main"\nGG_RELEASE_GATE=1\nGG_PLAN_REQUIRED_TYPES="feat"\nGG_PLAN_GATE="githooks/plan-gate.sh"\n' > "$K8/.gitguards.conf"
+nh -C "$K8" add -A; nh -C "$K8" commit -qm init
+git -C "$K8" remote add origin "$K8O"; nh -C "$K8" push -q origin main 2>/dev/null; git -C "$K8" fetch -q origin
+bash "$K8/scripts/install-git-guards.sh" >/dev/null 2>&1
+# The main tree's own copy, weakened and uncommitted: only origin's text may count.
+printf 'GG_RELEASE_GATE=0\nGG_PLAN_REQUIRED_TYPES="none"\n' > "$K8/.gitguards.conf"
+mkshim policy-unreadable git <<'EOF'
+# Every read of .gitguards.conf out of git fails — today's `git show <ref>:.gitguards.conf`
+# and the 1.3.0 ls-tree / cat-file path alike; anything else goes to the real git.
+for a in "$@"; do
+    case "$a" in *.gitguards.conf*)
+        for b in "$@"; do case "$b" in show|ls-tree|cat-file) echo "fatal: injected read failure" >&2; exit 128 ;; esac; done ;;
+    esac
+done
+exec "@REAL_GIT@" "$@"
+EOF
+S_NOPOL="$TMP/shim-policy-unreadable"
+git -C "$K8" checkout -q -b wt/k8f origin/main
+K8F=$(pg_mc "$K8" "[feat]: unplanned" a.txt f1)
+git -C "$K8" checkout -q -b wt/k8x origin/main
+K8X=$(pg_mc "$K8" "[fix]: code" a.txt x1)
+# pre-push checks the commit it pushes against the working tree: push what is checked out
+k8_on() { git -C "$K8" checkout -q "$1"; }
+k8_on wt/k8f; out=$(pp_direct "$K8" "$K8O" wt/k8f "$K8F"); rc=$?
+[ $rc -ne 0 ] && echo "$out" | grep -q 'plan gate' && ok "K8 fixture: origin's policy refuses an unapproved [feat] (control)" || bad "K8 fixture: [feat] control" "rc=$rc $out"
+k8_on wt/k8x; out=$(pp_direct "$K8" "$K8O" wt/k8x "$K8X"); rc=$?
+[ $rc -ne 0 ] && echo "$out" | grep -q 'has not passed final review' && ok "K8 fixture: origin's policy refuses code without a verdict (control)" || bad "K8 fixture: verdict control" "rc=$rc $out"
+k8_on wt/k8f; out=$(pp_direct "$K8" "$K8O" wt/k8f "$K8F" "$S_NOPOL"); rc=$?
+[ $rc -ne 0 ] && echo "$out" | grep -q 'unreadable' \
+    && ok "pre-push: origin's policy unreadable — an unapproved [feat] is still refused, out loud (Codex C1)" || bad "pre-push: unreadable policy, [feat]" "rc=$rc $out"
+k8_on wt/k8x; out=$(pp_direct "$K8" "$K8O" wt/k8x "$K8X" "$S_NOPOL"); rc=$?
+[ $rc -ne 0 ] && echo "$out" | grep -q 'unreadable' \
+    && ok "pre-push: origin's policy unreadable — code without a verdict is still refused (Codex C1)" || bad "pre-push: unreadable policy, no verdict" "rc=$rc $out"
+printf '[feat]: early\n' > "$TMP/k8-msg"
+out=$( cd "$K8" && env PATH="$S_NOPOL:$PATH" sh githooks/plan-gate.sh "$TMP/k8-msg" a.txt 2>&1 ); rc=$?
+[ $rc -ne 0 ] && echo "$out" | grep -q 'unreadable' \
+    && ok "plan-gate.sh: policy unreadable — refuses (not the tree's GG_PLAN_REQUIRED_TYPES=none)" || bad "plan-gate.sh: unreadable policy" "rc=$rc $out"
+out=$( cd "$K8" && env PATH="$S_NOPOL:$PATH" bash scripts/release-gate.sh scope 2>&1 ); rc=$?
+[ $rc -ne 0 ] && echo "$out" | grep -q 'unreadable' && ok "release-gate.sh scope: policy unreadable — stops" || bad "release-gate.sh: unreadable policy" "rc=$rc $out"
+out=$( cd "$K8" && env PATH="$S_NOPOL:$PATH" bash scripts/wt-new.sh k8wt 2>&1 ); rc=$?
+[ $rc -ne 0 ] && echo "$out" | grep -q 'unreadable' && [ ! -d "$TMP/k8-wt/k8wt" ] \
+    && ok "wt-new: policy unreadable — stops, no tree from the tree's or the default values" || bad "wt-new: unreadable policy" "rc=$rc $out"
+K8H=$(git -C "$K8" rev-parse HEAD); echo s1 > "$K8/a.txt"
+out=$( cd "$K8" && env PATH="$S_NOPOL:$PATH" MONITOREX_ACTOR=tst CLAUDE_CODE_SESSION_ID= MONITOREX_SKIP_TESTS=1 \
+       bash scripts/git-safe-commit.sh --message-file "$TMP/k8-msg" -- a.txt 2>&1 ); rc=$?
+[ $rc -ne 0 ] && echo "$out" | grep -q 'unreadable' && [ "$(git -C "$K8" rev-parse HEAD)" = "$K8H" ] \
+    && ok "safe-commit: policy unreadable — the gate part refuses, no commit" || bad "safe-commit: unreadable policy" "rc=$rc $out"
+nh -C "$K8" reset -q --hard "$K8H"
+printf 'GG_RELEASE_GATE=0\nGG_PLAN_REQUIRED_TYPES="none"\n' > "$K8/.gitguards.conf"
+# git replace swaps what `git show` returns; the policy reader must not follow it
+K8B=$(git -C "$K8" ls-tree origin/main -- .gitguards.conf | awk '{print $3}')
+K8W=$(printf 'GG_RELEASE_GATE=0\n' | git -C "$K8" hash-object -w --stdin)
+git -C "$K8" replace "$K8B" "$K8W" 2>/dev/null
+out=$(pp_direct "$K8" "$K8O" wt/k8x "$K8X"); rc=$?
+[ -n "$K8B" ] && [ $rc -ne 0 ] && echo "$out" | grep -q 'has not passed final review' \
+    && ok "pre-push: a 'git replace' of origin's policy blob is ignored (the real policy applies)" || bad "pre-push: git replace of the policy" "rc=$rc $out"
+git -C "$K8" replace -d "$K8B" >/dev/null 2>&1
+# Bootstrap: origin has no policy yet (gg_blob "absent") → the main tree's text applies
+K8AO="$TMP/k8a-origin.git"; git init -q --bare "$K8AO"; git -C "$K8AO" symbolic-ref HEAD refs/heads/main
+K8A="$TMP/k8a"; git init -q "$K8A"; git -C "$K8A" symbolic-ref HEAD refs/heads/main
+git -C "$K8A" config user.email t@t; git -C "$K8A" config user.name t
+kit_copy "$K8A"; echo a > "$K8A/a.txt"; nh -C "$K8A" add -A; nh -C "$K8A" commit -qm init
+git -C "$K8A" remote add origin "$K8AO"; nh -C "$K8A" push -q origin main 2>/dev/null; git -C "$K8A" fetch -q origin
+bash "$K8A/scripts/install-git-guards.sh" >/dev/null 2>&1
+printf 'GG_RELEASE_GATE=1\n' > "$K8A/.gitguards.conf"
+git -C "$K8A" checkout -q -b wt/k8a origin/main
+K8AX=$(pg_mc "$K8A" "[fix]: code" a.txt y1)
+out=$(pp_direct "$K8A" "$K8AO" wt/k8a "$K8AX"); rc=$?
+[ $rc -ne 0 ] && echo "$out" | grep -q 'has not passed final review' \
+    && ok "pre-push: no policy on origin yet (absent) — the main tree's text applies" || bad "pre-push: absent policy fallback" "rc=$rc $out"
+
+echo "== safe-commit: a new kit script keeps its exec bit without core.filemode (K11) =="
+# A kit committed from Windows (core.filemode=false) must still run on Linux/macOS clones.
+XB="$TMP/xbit"; mkrepo "$XB"; git -C "$XB" config core.filemode false
+mkdir -p "$XB/scripts/git-guards" "$XB/githooks" "$XB/.claude/hooks" "$XB/lib"
+printf '#!/bin/sh\necho old\n' > "$XB/scripts/old.sh"; git -C "$XB" add scripts/old.sh; git -C "$XB" commit -qm old
+printf '#!/bin/sh\necho v2\n' > "$XB/scripts/old.sh"
+for f in scripts/new.sh scripts/git-guards/helper.sh githooks/new-hook .claude/hooks/new-hook.sh lib/tool.sh; do
+    printf '#!/bin/sh\necho x\n' > "$XB/$f"
+done
+printf 'echo no shebang\n' > "$XB/scripts/plain.sh"
+chmod 644 "$XB/scripts/old.sh" "$XB/scripts/new.sh" "$XB/scripts/plain.sh" "$XB/scripts/git-guards/helper.sh" \
+    "$XB/githooks/new-hook" "$XB/.claude/hooks/new-hook.sh" "$XB/lib/tool.sh"
+out=$(commit "$XB" "kit files" scripts githooks .claude lib); rc=$?
+xmode() { git -C "$XB" ls-tree HEAD -- "$1" | cut -d' ' -f1; }
+[ $rc -eq 0 ] && [ "$(xmode scripts/new.sh)" = 100755 ] && [ "$(xmode scripts/git-guards/helper.sh)" = 100755 ] \
+    && [ "$(xmode githooks/new-hook)" = 100755 ] && [ "$(xmode .claude/hooks/new-hook.sh)" = 100755 ] \
+    && ok "safe-commit: NEW kit files starting with #! are committed 100755 under core.filemode=false" \
+    || bad "safe-commit: exec bit of new kit files" "rc=$rc new.sh=$(xmode scripts/new.sh) helper=$(xmode scripts/git-guards/helper.sh) hook=$(xmode githooks/new-hook) claude=$(xmode .claude/hooks/new-hook.sh) $out"
+[ "$(xmode scripts/old.sh)" = 100644 ] && ok "safe-commit: an existing kit file keeps HEAD's mode (100644)" || bad "safe-commit: existing file mode" "$(xmode scripts/old.sh)"
+[ "$(xmode lib/tool.sh)" = 100644 ] && [ "$(xmode scripts/plain.sh)" = 100644 ] \
+    && ok "safe-commit: a script outside the kit paths, a kit file without #! — 100644" || bad "safe-commit: non-kit modes" "tool=$(xmode lib/tool.sh) plain=$(xmode scripts/plain.sh)"
+
+if [ -n "$KIT" ]; then
+    echo "== attributes.py: the kit's eol=lf block in the target's .gitattributes (K10) =="
+    # Without it, worktrees on Windows check out CRLF scripts and bash fails on $'\r'.
+    ga_block() {
+        printf '%s\n' '# vibe-flow:git-guards:begin (managed by vibe-flow, do not edit inside)' \
+            'scripts/*.sh text eol=lf' 'scripts/git-guards/** text eol=lf' 'githooks/** text eol=lf' \
+            '.claude/hooks/** text eol=lf' '.gitguards.conf text eol=lf' '# vibe-flow:git-guards:end'
+    }
+    ga_run() { "$PYBIN" "$KIT/attributes.py" "$1" 2>&1; }
+    GA1="$TMP/ga1"; mkdir -p "$GA1"; ga_block > "$TMP/ga1.want"
+    out=$(ga_run "$GA1"); rc=$?
+    [ $rc -eq 0 ] && cmp -s "$GA1/.gitattributes" "$TMP/ga1.want" \
+        && ok "attributes.py: no .gitattributes — created with exactly the block (LF)" || bad "attributes.py: created" "rc=$rc $out"
+    GA2="$TMP/ga2"; mkdir -p "$GA2"; printf '*.png binary' > "$GA2/.gitattributes"
+    { printf '*.png binary\n'; ga_block; } > "$TMP/ga2.want"
+    out=$(ga_run "$GA2"); rc=$?
+    [ $rc -eq 0 ] && cmp -s "$GA2/.gitattributes" "$TMP/ga2.want" \
+        && ok "attributes.py: a file without a final newline — newline first, block appended, own line kept" || bad "attributes.py: appended" "rc=$rc $out"
+    GA3="$TMP/ga3"; mkdir -p "$GA3"
+    printf '*.jpg binary\r\n# vibe-flow:git-guards:begin (managed by vibe-flow, do not edit inside)\nold line\n# vibe-flow:git-guards:end\n*.pdf binary\n' > "$GA3/.gitattributes"
+    { printf '*.jpg binary\r\n'; ga_block; printf '*.pdf binary\n'; } > "$TMP/ga3.want"
+    out=$(ga_run "$GA3"); rc=$?
+    [ $rc -eq 0 ] && cmp -s "$GA3/.gitattributes" "$TMP/ga3.want" \
+        && ok "attributes.py: an old block replaced in place, lines outside byte-identical (a CRLF one too)" || bad "attributes.py: replaced" "rc=$rc $out"
+    cp "$GA3/.gitattributes" "$TMP/ga3.before"; out=$(ga_run "$GA3"); rc=$?
+    [ $rc -eq 0 ] && cmp -s "$GA3/.gitattributes" "$TMP/ga3.before" \
+        && ok "attributes.py: a rerun leaves the file byte-identical" || bad "attributes.py: idempotent" "rc=$rc $out"
+
+    echo "== selftest.sh: the guard really blocks on this machine (K9) =="
+    # Fail-open stays (the user's decision), silence goes: an install whose guard
+    # cannot deny must say so instead of claiming success.
+    st_setup() { mkrepo "$1"; kit_copy "$1"; "$PYBIN" "$KIT/settings-merge.py" "$1" >/dev/null 2>&1; }
+    st_run() { bash "$KIT/selftest.sh" "$1" 2>&1; }
+    ST_OK='✅ guard self-test passed: the guard blocks on this machine'
+    ST_BAD='🔴 the guard does not block on this machine'
+    ST="$TMP/st"; st_setup "$ST"; nh -C "$ST" add -A; nh -C "$ST" commit -qm kit
+    out=$(st_run "$ST"); rc=$?
+    [ $rc -eq 0 ] && echo "$out" | grep -qF "$ST_OK" && ok "selftest: a healthy install — passes" || bad "selftest: healthy" "rc=$rc $out"
+    git -C "$ST" worktree add -q "$TMP/st-wt" -b wt/st >/dev/null 2>&1
+    out=$(st_run "$TMP/st-wt"); rc=$?
+    [ $rc -eq 0 ] && echo "$out" | grep -qF "$ST_OK" \
+        && ok "selftest: run from a linked worktree — still judged in the main tree, passes" || bad "selftest: from a worktree" "rc=$rc $out"
+    # The rollout tests its prepared worktree: the guard under test is THAT tree's,
+    # not the healthy one installed in the main tree (code review M2).
+    cp "$TMP/st-wt/.claude/hooks/monitorex-git-guard.sh" "$TMP/st-wt-guard.bak"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/st-wt/.claude/hooks/monitorex-git-guard.sh"
+    out=$(st_run "$TMP/st-wt"); rc=$?
+    [ $rc -eq 1 ] && echo "$out" | grep -qF "$ST_BAD" \
+        && ok "selftest: an inert guard in the tested worktree fails even though the main tree's guard is healthy" \
+        || bad "selftest: worktree guard under test" "rc=$rc $out"
+    cp "$TMP/st-wt-guard.bak" "$TMP/st-wt/.claude/hooks/monitorex-git-guard.sh"
+    S86="$TMP/st-py86"; mkdir -p "$S86"
+    for n in python3 python py; do printf '#!/bin/sh\nexit 86\n' > "$S86/$n"; chmod +x "$S86/$n"; done
+    out=$(PATH="$S86:$PATH" st_run "$ST"); rc=$?
+    [ $rc -eq 1 ] && echo "$out" | grep -qF "$ST_BAD" && ok "selftest: only too-old interpreters on PATH — fails loudly" || bad "selftest: too-old interpreter" "rc=$rc $out"
+    ST2="$TMP/st-inert"; st_setup "$ST2"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$ST2/.claude/hooks/monitorex-git-guard.sh"
+    out=$(st_run "$ST2"); rc=$?
+    [ $rc -eq 1 ] && echo "$out" | grep -qF "$ST_BAD" && ok "selftest: an inert guard (wrapper exits 0) — fails loudly" || bad "selftest: inert guard" "rc=$rc $out"
+    ST3="$TMP/st-noreg"; mkrepo "$ST3"; kit_copy "$ST3"
+    out=$(st_run "$ST3"); rc=$?
+    [ $rc -eq 1 ] && echo "$out" | grep -qF "$ST_BAD" && ok "selftest: no registration in .claude/settings.json — fails" || bad "selftest: no registration" "rc=$rc $out"
+    ST4="$TMP/st-bashonly"; mkrepo "$ST4"; kit_copy "$ST4"; mkdir -p "$ST4/.claude"
+    printf '{"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "bash \\"$CLAUDE_PROJECT_DIR/.claude/hooks/monitorex-git-guard.sh\\""}]}]}}\n' > "$ST4/.claude/settings.json"
+    out=$(st_run "$ST4"); rc=$?
+    [ $rc -eq 1 ] && echo "$out" | grep -qF "$ST_BAD" && ok "selftest: registered for Bash only, not for Write|Edit — fails" || bad "selftest: Bash-only registration" "rc=$rc $out"
+fi
+
+echo "== inlined helpers: every copy is byte-identical to its source (drift) =="
+# Git hooks and the Claude hook wrappers run standalone (or as copies from the
+# protected branch) and cannot source pyenv.sh / paths.sh: they carry the marked
+# block inline. (The marker is assembled from pieces so this file never matches.)
+gi_block() {   # $1 = file, $2 = block name → the block, marker lines included; rc 1 unless exactly one
+    awk -v s="# >>> gg""-inline:$2 >>>" -v e="# <<< gg""-inline:$2 <<<" '
+        { l = $0; sub(/\r$/, "", l); t = l; sub(/^[ \t]+/, "", t) }
+        t == s { if (on) broken = 1; on = 1; n++ }
+        on { print }
+        t == e { if (!on) broken = 1; on = 0; m++ }
+        END { exit (n == 1 && m == 1 && !broken && !on) ? 0 : 1 }' "$1"
+}
+for spec in "pyenv|$CH/monitorex-git-guard.sh $CH/plan-approved.sh $CH/post-edit-tests.sh" "paths|$ROOT/githooks/pre-push"; do
+    n=${spec%%|*}; req=${spec#*|}; src="$ROOT/scripts/git-guards/$n.sh"
+    if [ -f "$src" ] && gi_block "$src" "$n" > "$TMP/gi-$n.src"; then
+        ok "drift: scripts/git-guards/$n.sh carries exactly one marked $n block"
+    else
+        bad "drift: scripts/git-guards/$n.sh carries exactly one marked $n block" "missing or malformed"; continue
+    fi
+    seen=" "
+    for f in $req $(grep -rlF -- "# >>> gg""-inline:$n >>>" "$ROOT/scripts" "$ROOT/githooks" "$CH" 2>/dev/null); do
+        case "$f" in "$src"|*/test-*|*/test_*) continue ;; esac
+        case "$seen" in *" $f "*) continue ;; esac
+        seen="$seen$f "
+        if gi_block "$f" "$n" > "$TMP/gi-$n.copy" && cmp -s "$TMP/gi-$n.copy" "$TMP/gi-$n.src"; then
+            ok "drift: ${f#"$ROOT"/} carries the $n block, byte-identical to its source"
+        else
+            bad "drift: ${f#"$ROOT"/} carries the $n block, byte-identical to its source" "absent, malformed or different"
+        fi
+    done
+done
+
+echo "== wt-new: a lockfile that differs only in line endings is the same lockfile =="
+# A Windows checkout (core.autocrlf=true) has CRLF on disk for the LF blob: a byte
+# comparison forced a full reinstall every time; the blob ids are equal.
+LCO="$TMP/lc.git"; git init -q --bare "$LCO"; git -C "$LCO" symbolic-ref HEAD refs/heads/main
+LC="$TMP/lc"; mkrepo "$LC"
+printf '{"name":"t","version":"1.0.0"}\n' > "$LC/package.json"; printf '{"lock":1}\n' > "$LC/package-lock.json"
+printf 'package-lock.json text\n' > "$LC/.gitattributes"
+nh -C "$LC" add -A; nh -C "$LC" commit -qm deps
+git -C "$LC" remote add origin "$LCO"; nh -C "$LC" push -q origin main 2>/dev/null
+mkdir -p "$LC/scripts/git-guards" "$LC/githooks"
+cp "$ROOT/scripts/wt-new.sh" "$ROOT/scripts/install-git-guards.sh" "$ROOT/scripts/wt-status.sh" "$LC/scripts/"
+cp "$ROOT"/scripts/git-guards/*.sh "$LC/scripts/git-guards/"; cp "$ROOT/githooks/pre-commit" "$ROOT/githooks/pre-push" "$LC/githooks/"
+printf 'GG_DEPS_INSTALL_CMD="mkdir -p node_modules && touch node_modules/.installed"\n' > "$LC/.gitguards.conf"
+mkdir -p "$LC/node_modules"; echo main > "$LC/node_modules/from-main"
+printf '{"lock":1}\r\n' > "$LC/package-lock.json"          # what the Windows checkout has on disk
+touch "$LC/node_modules/.package-lock.json"                # packages installed after the lockfile
+out=$(bash "$LC/scripts/wt-new.sh" lc1 2>&1); rc=$?
+[ $rc -eq 0 ] && [ -f "$TMP/lc-wt/lc1/node_modules/from-main" ] && [ ! -f "$TMP/lc-wt/lc1/node_modules/.installed" ] \
+    && ! echo "$out" | grep -q 'differs between' \
+    && ok "wt-new: lockfile CRLF in the main folder vs LF in the tree — node_modules cloned, no reinstall" || bad "wt-new: CRLF lockfile" "rc=$rc $out"
+
+echo "== wt-done: warnings on stderr are not uncommitted files =="
+# Git for Windows prints "LF will be replaced by CRLF" warnings; `git status
+# --porcelain 2>&1` counted them as dirty files and refused to remove a clean tree.
+CRL="$TMP/crl"; mkrepo "$CRL"; kit_copy "$CRL"; nh -C "$CRL" add -A; nh -C "$CRL" commit -qm kit
+out=$(bash "$CRL/scripts/wt-new.sh" crlf 2>&1)
+mkshim crlf-warn git <<'EOF'
+for a in "$@"; do
+    [ "$a" = status ] && { echo "warning: in the working copy of 'a.txt', LF will be replaced by CRLF the next time Git touches it" >&2; break; }
+done
+exec "@REAL_GIT@" "$@"
+EOF
+if [ -d "$TMP/crl-wt/crlf" ]; then
+    out=$(PATH="$TMP/shim-crlf-warn:$PATH" bash "$CRL/scripts/wt-done.sh" crlf 2>&1); rc=$?
+    [ $rc -eq 0 ] && [ ! -d "$TMP/crl-wt/crlf" ] \
+        && ok "wt-done: a clean tree whose git status warns about CRLF — removed (not 'uncommitted changes')" || bad "wt-done: CRLF warnings" "rc=$rc $out"
+else
+    bad "wt-done: CRLF warnings" "fixture: wt-new did not create the tree: $out"
+fi
+
+echo "== Step 9: no temporary index left behind; age() under set -e =="
+# A TERM while the shared index is being synced used to leave .git/index.monitorex.*.
+TI="$TMP/tidx"; mkrepo "$TI"; echo v2 > "$TI/a.txt"; printf 'edit a\n' > "$TI/.msg"
+mkshim kill-sync git <<'EOF'
+# The first read-tree into the temporary index next to .git/index: TERM the caller.
+case "${GIT_INDEX_FILE:-}" in
+    *.monitorex.*)
+        for a in "$@"; do
+            if [ "$a" = read-tree ] && [ -n "${GG_KILL_MARK:-}" ] && [ ! -e "$GG_KILL_MARK" ]; then
+                : > "$GG_KILL_MARK"; kill -TERM "$PPID"; break
+            fi
+        done ;;
+esac
+exec "@REAL_GIT@" "$@"
+EOF
+out=$( cd "$TI" && env PATH="$TMP/shim-kill-sync:$PATH" GG_KILL_MARK="$TMP/tidx-killed" CLAUDE_CODE_SESSION_ID= MONITOREX_ACTOR=test \
+       MONITOREX_SKIP_TESTS=1 bash "$ROOT/scripts/git-safe-commit.sh" --message-file .msg -- a.txt 2>&1 ); rc=$?
+[ -e "$TMP/tidx-killed" ] && [ -z "$(ls -A "$TI/.git" | grep '^index\.monitorex\.')" ] \
+    && ok "safe-commit killed while syncing the shared index — no index.monitorex.* left (EXIT trap)" \
+    || bad "safe-commit: temp index after a kill" "rc=$rc killed=$([ -e "$TMP/tidx-killed" ] && echo yes || echo no) left=$(ls -A "$TI/.git" | grep '^index\.monitorex\.' | tr '\n' ' ')"
+eval "$(sed -n '/^age()/,/^}/p' "$GL")"
+: > "$TMP/age-f"
+out=$( set -e; PATH="$S_EMPTY:$PATH"; age "$TMP/age-f"; echo after )
+[ "$out" = "$(printf '?\nafter')" ] && ok "git-lock.sh age(): stat fails under set -e — prints '?' and carries on" || bad "git-lock.sh age() under set -e" "[$out]"
+unset -f age
+
+echo "== post-edit-tests.sh: the prefilter reads a JSON-escaped Windows path =="
+# Claude Code sends file_path with backslashes on Windows: the old prefilter could
+# not parse it, so every edit (markdown too) started Python plus ~7 git processes.
+PFS="$TMP/pf-stubs"; mkdir -p "$PFS"
+for n in python3 python py; do printf '#!/bin/sh\ntouch "%s"\nexit 0\n' "$TMP/pf-python-ran" > "$PFS/$n"; chmod +x "$PFS/$n"; done
+printf '{"tool_name":"Edit","tool_input":{"file_path":"C:\\\\Users\\\\x\\\\README.md"},"cwd":"C:\\\\Users\\\\x"}' > "$TMP/pf-md.json"
+printf '{"tool_name":"Edit","tool_input":{"file_path":"C:\\\\Users\\\\x\\\\a.ts"},"cwd":"C:\\\\Users\\\\x"}' > "$TMP/pf-ts.json"
+rm -f "$TMP/pf-python-ran"
+out=$(env PATH="$PFS:$PATH" CLAUDE_PROJECT_DIR="$PE" bash "$CH/post-edit-tests.sh" < "$TMP/pf-md.json"); rc=$?
+[ $rc -eq 0 ] && [ -z "$out" ] && [ ! -e "$TMP/pf-python-ran" ] \
+    && ok "post-edit-tests.sh: Edit of C:\\Users\\x\\README.md (JSON-escaped) — Python not started" || bad "post-edit-tests.sh: escaped .md path" "rc=$rc python ran: $([ -e "$TMP/pf-python-ran" ] && echo yes || echo no)"
+rm -f "$TMP/pf-python-ran"
+env PATH="$PFS:$PATH" CLAUDE_PROJECT_DIR="$PE" bash "$CH/post-edit-tests.sh" < "$TMP/pf-ts.json" >/dev/null 2>&1
+[ -e "$TMP/pf-python-ran" ] && ok "post-edit-tests.sh: Edit of C:\\Users\\x\\a.ts (in the mask) — Python does start (control)" || bad "post-edit-tests.sh: escaped .ts control" "python did not run"
+
+if [ "$IS_WIN" = 1 ]; then
+    echo "== native Windows only: interpreters, path forms, 8.3 / ADS, processes =="
+    WM="$TMP/win-main"; WWT="$TMP/win-main-wt"
+    mkrepo "$WM"; mkdir -p "$WM/.git/monitorex-locks"; git -C "$WM" worktree add -q "$WWT" -b wt/win >/dev/null 2>&1
+    # The Microsoft Store alias: `python3` that only offers the Store, exit 9009
+    WS="$TMP/win-store"; mkdir -p "$WS"
+    printf '@exit /b 9009\r\n' > "$WS/python3.bat"
+    printf '#!/bin/sh\ncmd //c "%s" "$@"\n' "$(cygpath -w "$WS/python3.bat")" > "$WS/python3"; chmod +x "$WS/python3"
+    "$WS/python3" -c '' >/dev/null 2>&1; echo "  info - the Store stub's exit code as Git Bash sees it: $?"
+    gwrap "Store stub python3 (exit 9009) first on PATH — the next interpreter denies" deny "$WM" PATH="$WS:$TMP/gw-realpy:$PATH" -- Bash command "git add a.txt" "$WM"
+    # cwd as C:\…, C:/… and /c/… — one decision
+    wm_m=$(cygpath -alm "$WM"); wwt_m=$(cygpath -alm "$WWT")
+    slash_c() { printf '/%s%s' "$(printf '%s' "${1%%:*}" | tr 'A-Z' 'a-z')" "${1#?:}"; }
+    for form in "$(cygpath -alw "$WM")|$(cygpath -alw "$WWT")|C:\\" "$wm_m|$wwt_m|C:/" "$(slash_c "$wm_m")|$(slash_c "$wwt_m")|/c/"; do
+        cm=${form%%|*}; rest=${form#*|}; cw=${rest%%|*}; kind=${rest#*|}
+        gcase "cwd in the $kind form: git add in the main tree" deny "$WM" Bash command "git add a.txt" "$cm"
+        gcase "cwd in the $kind form: git add in a linked worktree" allow "$WM" Bash command "git add a.txt" "$cw"
+    done
+    gcase "cd /c/…/worktree && git add (the form wt-new prints)" allow "$WM" Bash command "cd $(slash_c "$wwt_m") && git add a.txt" "$OUTSIDE"
+    gcase "cd /c/…/main && git add" deny "$WM" Bash command "cd $(slash_c "$wm_m") && git add a.txt" "$OUTSIDE"
+    gcase "Write to C:\\…\\.git\\monitorex-locks\\… (backslashes)" deny "$WM" Write file_path "$(cygpath -alw "$WM")\\.git\\monitorex-locks\\x" "$WM"
+    gcase "Write to C:/…/.git/monitorex-locks/…" deny "$WM" Write file_path "$wm_m/.git/monitorex-locks/x" "$WM"
+    # 8.3 short names, trailing dots, alternate data streams
+    gcase "redirect into .git/MONITO~1/CONFIRM (8.3 name)" deny "$WM" Bash command "echo target=feat > .git/MONITO~1/CONFIRM" "$WM"
+    gcase "Write GIT~1\\monitorex-locks\\x (8.3 name of .git)" deny "$WM" Write file_path 'GIT~1\monitorex-locks\x' "$WM"
+    gcase "Write .git.\\monitorex-locks\\x (trailing dot)" deny "$WM" Write file_path '.git.\monitorex-locks\x' "$WM"
+    gcase "Write .git::\$INDEX_ALLOCATION\\monitorex-locks\\x (ADS)" deny "$WM" Write file_path '.git::$INDEX_ALLOCATION\monitorex-locks\x' "$WM"
+    # A junction in a repository path named by a plan header counts as a link
+    # MSYS_NO_PATHCONV: otherwise Git Bash rewrites the /c and /J switches into paths
+    # (C:/Program Files/Git/J); the two paths are already native (cygpath -w).
+    JOUT=$(MSYS_NO_PATHCONV=1 cmd /c mklink /J "$(cygpath -w "$PAH/dev/a-junction")" "$(cygpath -w "$PAH/dev/a")" 2>&1)
+    if [ -d "$PAH/dev/a-junction/.git" ]; then
+        out=$(ar "$PAH/dev/a-junction")
+        case "$out" in NO*symlink*) ok "accept_repo: a junction (mklink /J) — refused as a link" ;; *) bad "accept_repo: junction" "$out" ;; esac
+    else
+        bad "accept_repo: junction" "fixture: mklink /J failed: $JOUT"
+    fi
+    # The post-edit-tests liveness check must not kill the lock owner (os.kill(pid, 0) = TerminateProcess)
+    rm -f "$TMP/win-live.pid"
+    python3 -c 'import os, sys, time; open(sys.argv[1], "w").write(str(os.getpid())); time.sleep(120)' "$(cygpath -w "$TMP/win-live.pid")" &
+    LIVE_BG=$!; i=0; while [ ! -s "$TMP/win-live.pid" ] && [ $i -lt 50 ]; do sleep 0.2; i=$((i+1)); done
+    WINPID=$(cat "$TMP/win-live.pid" 2>/dev/null)
+    pe_conf; pe_reset; echo green > "$PEMODE"
+    mkdir -p "$PELOCK"; printf 'pid=%s\ntime=%s\n' "$WINPID" "$(date +%s)" > "$PELOCK/owner"
+    pe_run "$PE/lib/a.ts" >/dev/null
+    if [ -n "$WINPID" ] && tasklist //FI "PID eq $WINPID" //NH 2>/dev/null | grep -qw "$WINPID" && [ "$(pe_calls)" = 0 ]; then
+        ok "post-edit-tests: the run lock's live owner (a native process) is left alive, no run"
+    else
+        bad "post-edit-tests: liveness check" "winpid=$WINPID calls=$(pe_calls) alive=$(tasklist //FI "PID eq $WINPID" //NH 2>/dev/null | tr -s ' ' | head -1)"
+    fi
+    [ -n "$WINPID" ] && taskkill //F //PID "$WINPID" >/dev/null 2>&1; kill "$LIVE_BG" 2>/dev/null; rm -rf "$PELOCK"
+    # wt-done stops a NATIVE dev server (node.exe in real life; python here)
+    DV="$TMP/dv"; mkrepo "$DV"; kit_copy "$DV"
+    cat > "$DV/dev.sh" <<'EOF'
+#!/bin/sh
+exec python3 -c 'import os, time; open("devpid.txt", "w").write(str(os.getpid())); time.sleep(120)'
+EOF
+    printf 'GG_DEV_CMD="sh dev.sh"\nGG_DEV_PORT_BASE=3970\n' > "$DV/.gitguards.conf"
+    nh -C "$DV" add -A; nh -C "$DV" commit -qm dev
+    out=$($TO bash "$DV/scripts/wt-new.sh" dv1 2>&1)
+    i=0; while [ ! -s "$TMP/dv-wt/dv1/devpid.txt" ] && [ $i -lt 75 ]; do sleep 0.2; i=$((i+1)); done
+    DEVPID=$(cat "$TMP/dv-wt/dv1/devpid.txt" 2>/dev/null)
+    out2=$($TO bash "$DV/scripts/wt-done.sh" dv1 --force 2>&1); sleep 2
+    if [ -z "$DEVPID" ]; then
+        bad "wt-done: native dev server stopped" "fixture: the dev server never wrote its pid: $out"
+    elif tasklist //FI "PID eq $DEVPID" //NH 2>/dev/null | grep -qw "$DEVPID"; then
+        bad "wt-done: native dev server stopped" "pid $DEVPID still running: $out2"; taskkill //F //T //PID "$DEVPID" >/dev/null 2>&1
+    else
+        ok "wt-done: the native dev server process is gone"
+    fi
+fi
+
 # Project tests: scripts/git-guards/test-local-*.sh. They are added by the project
 # itself, not by install.sh — so updating the kit does not overwrite them. All helpers are visible to them.
 for t in "$ROOT"/scripts/git-guards/test-local-*.sh; do
@@ -2111,9 +2717,4 @@ for t in "$ROOT"/scripts/git-guards/test-local-*.sh; do
     . "$t"
 done
 
-echo
-echo "=========================================="
-echo "  passed: $PASS   failed: $FAIL"
-[ $FAIL -gt 0 ] && { echo "  failures:"; printf '    - %s\n' "${FAILED[@]}"; exit 1; }
-echo "=========================================="
-exit 0
+finish

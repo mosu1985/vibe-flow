@@ -135,11 +135,20 @@ prints JSON: {"cd_dir":..., "cd_ambiguous":..., "segments":[...],
 
 Any internal error → a safe empty result, never a traceback to the caller
 (the calling hook is a safety net and must fail open).
+
+Local changes (vibe-flow 1.3.0, native Windows): absoluteness and the cwd join go
+through gg_paths (`C:/x`, `C:\\x` and `/c/x` are absolute on Windows, identity on
+POSIX), and basename_matches() has gg_paths.cmd_name() semantics on every OS
+(`BASH -c`, `bash.exe -c`, `/usr/bin/GIT`). `cd`/`pushd`/`popd` stay
+case-sensitive on purpose: they are bash builtins, `CD x` does not change the
+directory, and treating it as a cd would move the check to the wrong tree.
 """
 import json
 import re
 import shlex
 import sys
+
+import gg_paths
 
 SIZE_CAP = 50_000
 MAX_CANDIDATES = 20
@@ -362,7 +371,9 @@ def first_word(seg):
 
 
 def basename_matches(word, name):
-    return word.rstrip('/').split('/')[-1] == name
+    """Does `word` run the program `name` (lower case)? gg_paths.cmd_name semantics:
+    both separators, case-insensitive, one `.exe` stripped."""
+    return gg_paths.cmd_name(word) == name
 
 
 def extract_bash_c_inner(seg):
@@ -389,16 +400,18 @@ def _resolve_cd_arg(state, arg):
         # `cd` with no argument / `cd -` / a variable or command substitution
         # does not resolve statically → case (c).
         return (None, True)
-    if arg.startswith('/') or arg.startswith('~'):
+    if gg_paths.is_abs(arg) or arg.startswith('~'):
         # An absolute (or home `~`) path does NOT depend on the previous
-        # state: it resets it completely, clearing the ambiguity.
+        # state: it resets it completely, clearing the ambiguity. On Windows
+        # `C:/x` and `C:\x` are absolute too (gg_paths.is_abs).
         return (arg, False)
     cur_dir, cur_amb = state
     if cur_amb:
         return (None, True)
     if cur_dir is None:
         return (arg, False)
-    return (cur_dir.rstrip('/') + '/' + arg, False)
+    trailing = '/\\' if gg_paths.WINDOWS else '/'
+    return (cur_dir.rstrip(trailing) + '/' + arg, False)
 
 
 def _dedup_candidates(candidates):

@@ -25,15 +25,21 @@ if [ ! -f "$GG_CONF_LIB" ]; then
     echo "   (scripts/wt-new.sh --resume <branch> --merge-main from the main folder) or reinstall the kit (/vibe-flow:init)" >&2
     exit 1
 fi
-. "$GG_CONF_LIB"
-gg_conf_init "$ROOT" || { echo "🔴 cannot read the repository at $ROOT"; exit 1; }
+. "$GG_CONF_LIB"           # also brings scripts/git-guards/paths.sh (gg_path, gg_is_abs, gg_is_msys)
+GG_PYENV_LIB="$ROOT/scripts/git-guards/pyenv.sh"
+[ -f "$GG_PYENV_LIB" ] || { echo "🔴 scripts/git-guards/pyenv.sh missing — the kit in this tree is incomplete: reinstall it (/vibe-flow:init)" >&2; exit 1; }
+. "$GG_PYENV_LIB"
+# rc 2: the protected branch's policy is unreadable — conf.sh has said so; stop (K8).
+gg_conf_init "$ROOT" || { [ "$?" = 2 ] || echo "🔴 cannot read the repository at $ROOT"; exit 1; }
 GG_PROTECTED=$GG_PROT
 GG_WT_DIR=$(gg_get GG_WT_DIR "")
 GG_DEV_PROC_MATCH=$(gg_get GG_DEV_PROC_MATCH "")   # part of the dev process name, for killing orphans
 
 MAIN=$(git -C "$ROOT" worktree list --porcelain | awk '/^worktree /{print substr($0, 10); exit}')
 WT_BASE="${GG_WT_DIR:-$(dirname "$MAIN")/$(basename "$MAIN")-wt}"
-case "$WT_BASE" in /*) ;; *) WT_BASE="$(cd "$MAIN" && cd "$(dirname "$WT_BASE")" && pwd)/$(basename "$WT_BASE")" ;; esac
+if ! gg_is_abs "$WT_BASE"; then     # GG_WT_DIR=D:/x on Windows is absolute too
+    WT_BASE="$(cd "$MAIN" && cd "$(dirname "$WT_BASE")" && pwd)/$(basename "$WT_BASE")"
+fi
 DIR="$WT_BASE/$NAME"
 
 [ -d "$DIR" ] || { echo "🔴 no directory $DIR"; exit 1; }
@@ -62,7 +68,8 @@ fi
 # with the same name in the main tree stops everything before anything is moved.
 # Same rule for the folder as plans_dirs() in plan-gate.sh; the value is read as
 # JSON, never sourced.
-PD=$(python3 - "$MAIN/.claude/settings.json" <<'PY' 2>/dev/null || true
+gg_python 2>/dev/null || true       # no Python: the default folder (.plans) below
+PD=$("${GG_PY:-python3}" - "$MAIN/.claude/settings.json" <<'PY' 2>/dev/null || true
 import json, os, re, sys
 v = ".plans"
 if os.path.isfile(sys.argv[1]):
@@ -77,7 +84,9 @@ PY
 if [ -n "$PD" ] && [ -n "$(git -C "$DIR" ls-files -- "$PD" 2>/dev/null)" ]; then
     PD=""     # a plans folder the project keeps in git travels with the branch, not by us
 fi
-if [ -n "$PD" ] && [ -d "$DIR/$PD" ] && [ ! -L "$DIR/$PD" ] && [ "$DIR" != "$MAIN" ]; then
+# The tree is not the main folder — compared normalized (git's C:/… vs the shell's /c/…).
+if [ -n "$PD" ] && [ -d "$DIR/$PD" ] && [ ! -L "$DIR/$PD" ] \
+   && [ "$(gg_path "$DIR" 2>/dev/null || printf '%s' "$DIR")" != "$(gg_path "$MAIN" 2>/dev/null || printf '%s' "$MAIN")" ]; then
     PSRC="$DIR/$PD"; PDST="$MAIN/$PD"
     if [ -L "$PDST" ]; then
         echo "🔴 $PDST is a symlink — the plans of $NAME are not moved, the tree is kept."
@@ -120,9 +129,10 @@ fi
 # the "?" branch was unreachable — and cleanup WIPED the branch together with its
 # unpushed commits. Exactly the loss of work this script was written to prevent.
 # Caught 10.09.2026 during acceptance.
-if ! DIRTY_OUT=$(cd "$DIR" && git status --porcelain 2>&1); then
-    echo "🔴 could not read the state of $DIR:"
-    printf '%s\n' "$DIRTY_OUT" | sed 's/^/     /'
+# stdout only: git's warnings go to stderr ("LF will be replaced by CRLF" on Windows)
+# and used to be counted as uncommitted files; on failure git's message is shown as is.
+if ! DIRTY_OUT=$(cd "$DIR" && git status --porcelain); then
+    echo "🔴 could not read the state of $DIR (git's message above)"
     exit 1
 fi
 DIRTY=$(printf '%s' "$DIRTY_OUT" | grep -c . || true)
@@ -157,7 +167,50 @@ if [ "$FORCE" != "--force" ]; then
 fi
 
 # ── 2. Stop dev ──────────────────────────────────────────────────────────────
-if [ -f "$DIR/.wt-dev.pid" ]; then
+# Windows (Git Bash): the native dev server (node.exe) is out of reach of MSYS kill,
+# so its whole Windows process tree goes with taskkill. wt-new.sh writes
+# "<windows pid> msys:<msys pid>" (older: one of the two). The launch-time Windows pid
+# goes stale — each exec of the launch chain is a new Windows process under the same
+# msys pid — so the CURRENT one is read from /proc/<msys pid>/winpid. No such /proc
+# entry = the chain has ended = dev is no longer running.
+win_alive() { tasklist //FI "PID eq $1" //NH 2>/dev/null | grep -qw "$1"; }
+stop_dev_windows() {   # $1 = content of .wt-dev.pid
+    local tok msys="" win="" bad=0
+    for tok in $1; do
+        case "$tok" in
+            msys:*) msys=${tok#msys:} ;;
+            *) win=$tok ;;
+        esac
+    done
+    case "$msys$win" in ''|*[!0-9]*) bad=1 ;; esac
+    if [ "$bad" = 1 ]; then
+        echo "  ⚠️  .wt-dev.pid is unreadable — stop the dev server manually"; return
+    fi
+    if [ -n "$msys" ] && [ -d /proc ]; then
+        if [ ! -e "/proc/$msys" ]; then
+            echo "  dev is no longer running"; return
+        fi
+        win=$(cat "/proc/$msys/winpid" 2>/dev/null || true)
+        case "$win" in ''|*[!0-9]*) win="" ;; esac
+    fi
+    if [ -z "$win" ]; then
+        echo "  ⚠️  stop the dev server manually: pid ${msys:-?} (its Windows pid cannot be read)"; return
+    fi
+    if command -v tasklist >/dev/null 2>&1 && ! win_alive "$win"; then
+        echo "  dev is no longer running"
+        return
+    fi
+    taskkill //T //F //PID "$win" >/dev/null 2>&1 || true
+    sleep 1
+    if command -v tasklist >/dev/null 2>&1 && win_alive "$win"; then
+        echo "  ⚠️  stop the dev server manually: Windows pid $win is still running"
+    else
+        echo "  dev stopped (Windows pid $win)"
+    fi
+}
+if [ -f "$DIR/.wt-dev.pid" ] && gg_is_msys; then
+    stop_dev_windows "$(cat "$DIR/.wt-dev.pid" 2>/dev/null || true)"
+elif [ -f "$DIR/.wt-dev.pid" ]; then
     PID=$(cat "$DIR/.wt-dev.pid" 2>/dev/null || true)
     if [ -n "${PID:-}" ] && kill -0 "$PID" 2>/dev/null; then
         # Kill the whole process tree: a dev server often starts its worker process
@@ -173,7 +226,10 @@ if [ -f "$DIR/.wt-dev.pid" ]; then
 fi
 
 # Safety net: a process whose working directory is this directory but whose pid file is lost.
-if [ -n "$GG_DEV_PROC_MATCH" ]; then
+# `lsof +D` does not exist on Windows: say so instead of silently doing nothing.
+if [ -n "$GG_DEV_PROC_MATCH" ] && gg_is_msys; then
+    echo "  ⚪️ orphaned dev processes (lsof +D) — not available on Windows; check Task Manager"
+elif [ -n "$GG_DEV_PROC_MATCH" ]; then
     for p in $(lsof -t +D "$DIR" 2>/dev/null | head -20); do
         cmd=$(ps -p "$p" -o command= 2>/dev/null || true)
         case "$cmd" in
@@ -203,12 +259,12 @@ fi
 # must be removed regardless. So every call's failure is swallowed, and under
 # `set -e` only `if` is used here: `[ ... ] && echo` would crash the script exactly
 # where there is nothing to close.
-if command -v orca >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+if command -v orca >/dev/null 2>&1 && gg_python 2>/dev/null; then
     CLOSED=0
 
     # Main path: close all of the workspace's terminals with one command.
     WT_ID=$(orca worktree list --json 2>/dev/null \
-        | python3 -c "
+        | "$GG_PY" -c "
 import json, sys
 try:
     d = json.load(sys.stdin)
@@ -222,7 +278,7 @@ for w in d.get('result', {}).get('worktrees', []):
 
     if [ -n "${WT_ID:-}" ]; then
         N=$(orca terminal close --worktree "$WT_ID" --all --json 2>/dev/null \
-            | python3 -c "
+            | "$GG_PY" -c "
 import json, sys
 try:
     d = json.load(sys.stdin)
@@ -237,7 +293,7 @@ print(int(d.get('result', {}).get('closed', 0) or 0))
     # registry (that is how orphaned tabs from earlier removals linger).
     # The selector no longer works for them — close them one by one, by handle.
     for h in $(orca terminal list --json 2>/dev/null \
-        | python3 -c "
+        | "$GG_PY" -c "
 import json, sys
 try:
     d = json.load(sys.stdin)
@@ -268,7 +324,7 @@ git -C "$ROOT" branch -D "$BRANCH" 2>/dev/null | sed 's/^/  /' || echo "  no loc
 # The script removes it itself — sessions are not allowed to write into
 # monitorex-locks/ directly.
 COMMON=$(git -C "$ROOT" rev-parse --git-common-dir 2>/dev/null || true)
-case "$COMMON" in /*|'') ;; *) COMMON="$(cd "$ROOT/$COMMON" 2>/dev/null && pwd -P || true)" ;; esac
+if [ -n "$COMMON" ] && ! gg_is_abs "$COMMON"; then COMMON="$(gg_path "$ROOT" "$COMMON" 2>/dev/null || true)"; fi
 if [ -n "$COMMON" ]; then
     for c in "$COMMON"/monitorex-locks/claims/issue-*; do
         [ -d "$c" ] || continue

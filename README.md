@@ -47,9 +47,21 @@ Stack packages (optional; `init` will tell you whether you need them):
 /plugin install vibe-flow-supabase@vibe-school   # project on Supabase
 ```
 
-**Required:** Claude Code, `git`, `bash`, `python3`. Works on macOS, Linux and Windows via WSL 2; the protection suite runs in [CI](.github/workflows/test.yml) on Ubuntu and macOS on every push. No git repository? `init` will offer to create one.
+**Required:** Claude Code, `git`, `bash`, Python 3.9+. No git repository? `init` will offer to create one.
 
-**Windows:** use WSL 2. Native Windows (Git Bash) is not supported yet: `init` stops before changing anything and prints the steps: `wsl --install` in PowerShell as administrator, then git, python3, Node.js and Claude Code inside Ubuntu, with the project kept inside WSL (`~/projects/…`, not `/mnt/c`). The plugin's agents and skills work on native Windows too, just without the git protection.
+**Supported platforms** (the protection suite runs in [CI](.github/workflows/test.yml) on every push):
+
+| Platform | Status |
+|---|---|
+| macOS | supported (CI: macOS, plus a Python 3.9 floor job) |
+| Linux | supported (CI: Ubuntu, plus a Python 3.9 floor job) |
+| Windows via WSL 2 | supported: `wsl --install` in PowerShell as administrator, then git, Python, Node.js and Claude Code inside Ubuntu, with the project kept inside WSL (`~/projects/…`, not `/mnt/c`) |
+| Windows, Git Bash | **beta** until students confirm it (CI: Windows). Install Git for Windows and Python 3.9+ from python.org, not the Microsoft Store `python3` alias (it only opens the Store), and start Claude Code from Git Bash |
+| MSYS2, Cygwin shells | not supported: `init` stops before changing anything; use Git Bash or WSL 2 |
+
+On Windows the protection runs a Python process per tool call: expect roughly 140–180 ms per guard check (median measured in CI).
+
+The install ends with a guard self-test. If Python is broken after the install, the guard goes silent (it fails open: a tool call is not blocked when Python is unusable), so a failing self-test is the signal to fix Python and rerun `init`. The plugin's agents and skills work on any platform, with or without the git protection.
 
 **Optional:**
 - `lsof`: free-port detection and dev-server cleanup in worktrees (missing on some minimal Linux images)

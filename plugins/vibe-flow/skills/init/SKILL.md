@@ -13,8 +13,9 @@ The user invoked the installation themselves — that is consent to write files 
 git rev-parse --show-toplevel && git rev-parse --git-dir --git-common-dir && git log --oneline -1 && git remote -v
 ```
 
-- `bash`, `git` and `python3` are required. Supported: macOS, Linux, and Windows **via WSL 2**; the protection suite runs in CI on Ubuntu and macOS. `lsof` is optional (free-port detection and dev-server cleanup in worktrees).
-- **Native Windows (Git Bash / MSYS / Cygwin) is not supported yet:** the installer stops before writing anything and prints the WSL 2 steps. Relay those steps to the user in their language, and say plainly that the plugin's agents and skills still work without the git protection. 🔴 Never set `GG_ALLOW_UNSUPPORTED_OS` to get past the stop: it exists only for the package's own CI and is ignored outside it.
+- `bash`, `git` and Python 3.9+ are required. Supported: macOS, Linux, Windows **via WSL 2**, and native Windows through **Git for Windows (Git Bash)**, which is in **beta** until students confirm it. The protection suite runs in CI on Ubuntu, macOS and Windows. `lsof` is optional (free-port detection and dev-server cleanup in worktrees).
+- **Native Windows:** the installer proceeds in Git Bash (`uname` reports MINGW). Python must be a real 3.9+ from python.org, not the Microsoft Store `python3` alias (it only opens the Store). In an **MSYS2 or Cygwin** shell (`uname` reports MSYS / CYGWIN) the installer stops before writing anything and says: use Git for Windows (Git Bash) or WSL 2. Relay that to the user in their language, and say plainly that the plugin's agents and skills still work without the git protection. There is no switch to force an unsupported shell through.
+- **The install ends with a guard self-test** that really tries a forbidden command and fails loudly when the guard does not block on this machine (for example a broken Python). Do not continue past a failed self-test: tell the user why it failed and what to fix, then rerun init.
 - **The session sits in a linked worktree** (git-dir ≠ git-common-dir) → install into the main tree: take the path `git-common-dir/..`.
 - **Not a git repository, or no commits** → ask via `AskUserQuestion`: "Run `git init` and make a first commit?". No → stop. Yes:
   1. `git init`, if needed

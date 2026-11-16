@@ -19,6 +19,10 @@ Prints one status line:
   appended / created    only with --append-if-missing
 --check prints the status and writes nothing; --diff prints a unified diff of the block
 (old → new) and writes nothing. A write is atomic: temp file in the same folder + rename.
+
+CLAUDE.md and the status line are UTF-8 with LF on every OS: a piped stdout on
+Windows is cp1252 (the → of "update vA → vB" raised) and ends lines with \\r\\n,
+and init.sh compares the status it captured.
 """
 import difflib
 import os
@@ -27,6 +31,21 @@ import sys
 import tempfile
 
 PAT = re.compile(r"<!-- vibe-flow:begin([^>]*)-->.*?<!-- vibe-flow:end -->", re.S)
+
+
+def _utf8_lf_stdout() -> None:
+    if sys.stdout is not None and hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace", newline="\n")
+
+
+def _within(path: str, root: str) -> bool:
+    """path is root or below it. Same drive first: commonpath raises across drives."""
+    if os.path.splitdrive(path)[0].casefold() != os.path.splitdrive(root)[0].casefold():
+        return False
+    try:
+        return os.path.normcase(os.path.commonpath([path, root])) == os.path.normcase(root)
+    except ValueError:
+        return False
 
 
 def build(template: str, version: str) -> str:
@@ -40,7 +59,7 @@ def write_atomic(path: str, text: str) -> None:
     mode = os.stat(path).st_mode & 0o777 if os.path.exists(path) else 0o644
     fd, tmp = tempfile.mkstemp(prefix=".CLAUDE.md.", dir=folder)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
             f.write(text)
         os.chmod(tmp, mode)
         os.replace(tmp, path)
@@ -51,6 +70,7 @@ def write_atomic(path: str, text: str) -> None:
 
 
 def main(argv: list) -> int:
+    _utf8_lf_stdout()
     within = None
     for a in argv:
         if a.startswith("--follow-symlink-within="):
@@ -67,12 +87,15 @@ def main(argv: list) -> int:
 
     if os.path.islink(path):
         target = os.path.realpath(path)
-        if within is None or os.path.commonpath([target, within]) != within or os.path.islink(target):
+        if within is None or not _within(target, within) or os.path.islink(target):
             print("symlink")
             return 0
         path = target
     exists = os.path.exists(path)
-    text = open(path, encoding="utf-8").read() if exists else ""
+    text = ""
+    if exists:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
     m = PAT.search(text)
 
     if m is None:
