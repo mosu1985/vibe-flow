@@ -86,11 +86,11 @@ Run `bash tools/test-rollout-projects.sh` after changing the rollout.
 ## CI and portability
 
 Every push runs `.github/workflows/test.yml`: the git-guards suite and the Node
-tests on Ubuntu and macOS (`posix`), and the rollout test on Ubuntu (`rollout`, its
-own job because it runs the suite inside every prepared project). Merge only when
-`posix` and `rollout` are green. A
-`windows-probe` job runs the suite on native Windows (Git Bash) for information
-only; it is expected to be red until Git Bash is supported.
+tests on Ubuntu and macOS (`posix`), the guard cases under the Python 3.9 floor on
+Ubuntu and macOS (`floor`), the suite on native Windows in Git Bash (`windows`), and
+the rollout test on Ubuntu (`rollout`, its own job because it runs the suite inside
+every prepared project). Merge only when `posix`, `floor`, `windows` and `rollout`
+are green.
 
 The scripts must run with both GNU tools (Linux, WSL, Git Bash) and BSD tools (macOS):
 
@@ -107,6 +107,37 @@ The scripts must run with both GNU tools (Linux, WSL, Git Bash) and BSD tools (m
 - To reproduce the other platform locally, the suite has PATH shims (`mkshim`);
   on a Mac, `brew install coreutils` and the `gnubin` directory first in `PATH`
   give real GNU tools.
+
+## Windows rules
+
+Native Windows runs the scripts in Git Bash (MSYS), where one directory has three
+spellings (`C:/…`, `/c/…`, `C:\…`) and git prints `C:/…`. Rules for any change to
+git-guards:
+
+- **Paths** in shell: `gg_path` and `gg_is_abs` (`scripts/git-guards/paths.sh`);
+  never compare or test raw path strings. In Python: `gg_paths.py` (`to_native`,
+  `is_abs`, `same_path`, `posix_rel`, `cmd_name`).
+- **A file at a revision** (the policy `.gitguards.conf` on the protected branch,
+  any other blob): only through `gg_blob REV PATH`. Return codes: 0 found, 1 absent,
+  2 error. Fall back to the tree's `.gitguards.conf` only on 1, never on 2.
+- 🔴 **Never pass a `<rev>:<path>` argument to git.** Git Bash rewrites
+  `origin/main:.gitguards.conf` as if it were a path list, and the read fails as a
+  false "no such path".
+- **Python** is found only through `scripts/git-guards/pyenv.sh` (`gg_python`
+  exports `GG_PY`; hook wrappers use `gg_hook_exec`). Floor: Python 3.9. It sets
+  `PYTHONUTF8`. The Microsoft Store alias (exit 9009, seen by Git Bash as 49) is
+  not a Python and is skipped.
+- **Hook output is ASCII JSON** (`ensure_ascii=True`). A deny that cannot be
+  printed still exits 2, so a deny never turns into an allow.
+- **Never `os.kill(pid, 0)`** to test that a process lives: on Windows it
+  terminates the process. Use the platform check the hooks already carry.
+- **Inlined blocks stay byte-identical.** Hooks and wrappers that cannot source
+  `pyenv.sh` or `paths.sh` (the Claude hook wrappers, `pre-push`, `plan-gate.sh`) carry a marked copy (`gg-inline:pyenv`, `gg-inline:paths`).
+  Edit the source in `scripts/git-guards/`, then update every copy: the suite's
+  drift check compares them.
+- **The `na` test helper** (a case that cannot run here) is allowed only on
+  Windows and only for three reasons: `ln -s made a copy` (no symlink rights), `no shasum`,
+  `noexec`. Anywhere else an N/A is a failure, so macOS and Linux run every case.
 
 ## Versions
 
