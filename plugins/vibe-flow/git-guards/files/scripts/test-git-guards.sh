@@ -2537,25 +2537,51 @@ gi_block() {   # $1 = file, $2 = block name → the block, marker lines included
         t == e { if (!on) broken = 1; on = 0; m++ }
         END { exit (n == 1 && m == 1 && !broken && !on) ? 0 : 1 }' "$1"
 }
-for spec in "pyenv|$CH/monitorex-git-guard.sh $CH/plan-approved.sh $CH/post-edit-tests.sh" "paths|$ROOT/githooks/pre-push"; do
-    n=${spec%%|*}; req=${spec#*|}; src="$ROOT/scripts/git-guards/$n.sh"
-    if [ -f "$src" ] && gi_block "$src" "$n" > "$TMP/gi-$n.src"; then
-        ok "drift: scripts/git-guards/$n.sh carries exactly one marked $n block"
-    else
-        bad "drift: scripts/git-guards/$n.sh carries exactly one marked $n block" "missing or malformed"; continue
-    fi
-    seen=" "
-    for f in $req $(grep -rlF -- "# >>> gg""-inline:$n >>>" "$ROOT/scripts" "$ROOT/githooks" "$CH" 2>/dev/null); do
-        case "$f" in "$src"|*/test-*|*/test_*) continue ;; esac
-        case "$seen" in *" $f "*) continue ;; esac
-        seen="$seen$f "
-        if gi_block "$f" "$n" > "$TMP/gi-$n.copy" && cmp -s "$TMP/gi-$n.copy" "$TMP/gi-$n.src"; then
-            ok "drift: ${f#"$ROOT"/} carries the $n block, byte-identical to its source"
+# One path per line, never word-split: projects live in folders like
+# "Vibe-coding school" (1.3.0 split them and reported every copy as drifted).
+gi_required() {   # $1 = block, $2 = root, $3 = hooks dir → the copies that MUST carry it
+    case "$1" in
+        pyenv) printf '%s\n' "$3/monitorex-git-guard.sh" "$3/plan-approved.sh" "$3/post-edit-tests.sh" ;;
+        paths) printf '%s\n' "$2/githooks/pre-push" ;;
+    esac
+}
+drift_check() {   # $1 = root, $2 = hooks dir, $3 = label prefix
+    local r="$1" ch="$2" lp="$3" n src f files
+    for n in pyenv paths; do
+        src="$r/scripts/git-guards/$n.sh"
+        if [ -f "$src" ] && gi_block "$src" "$n" > "$TMP/gi-$n.src"; then
+            ok "drift:$lp scripts/git-guards/$n.sh carries exactly one marked $n block"
         else
-            bad "drift: ${f#"$ROOT"/} carries the $n block, byte-identical to its source" "absent, malformed or different"
+            bad "drift:$lp scripts/git-guards/$n.sh carries exactly one marked $n block" "missing or malformed"; continue
         fi
+        files=$( { gi_required "$n" "$r" "$ch"
+                   grep -rlF -- "# >>> gg""-inline:$n >>>" "$r/scripts" "$r/githooks" "$ch" 2>/dev/null; } \
+                 | awk 'NF && !seen[$0]++')
+        while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            # Matched on the path INSIDE the project: a project in ~/dev/test-shop
+            # must not skip every copy (a false pass).
+            case "${f#"$r"/}" in "${src#"$r"/}"|*/test-*|*/test_*|test-*|test_*) continue ;; esac
+            if gi_block "$f" "$n" > "$TMP/gi-$n.copy" && cmp -s "$TMP/gi-$n.copy" "$TMP/gi-$n.src"; then
+                ok "drift:$lp ${f#"$r"/} carries the $n block, byte-identical to its source"
+            else
+                bad "drift:$lp ${f#"$r"/} carries the $n block, byte-identical to its source" "absent, malformed or different"
+            fi
+        done <<EOF
+$files
+EOF
     done
-done
+}
+drift_check "$ROOT" "$CH" ""
+# The same check on a project whose path has a space in it, and on one inside a
+# folder named test-…: neither may be split nor skipped.
+SPP="$TMP/with space/test-shop"; kit_copy "$SPP"
+cp "$CH/plan-approved.sh" "$CH/post-edit-tests.sh" "$SPP/.claude/hooks/"
+drift_check "$SPP" "$SPP/.claude/hooks" " [path with a space, test-* folder]"
+# …and every copy really was checked, not silently skipped: 2 sources + 6 copies.
+n_dc=$( (drift_check "$SPP" "$SPP/.claude/hooks" "") 2>&1 | grep -c '^  ok ')
+[ "$n_dc" -eq 8 ] && ok "drift: no copy skipped in a project under a test-* folder with a space (8 checks)" \
+    || bad "drift: copies skipped in a spaced test-* project" "ok checks: $n_dc, expected 8"
 
 echo "== wt-new: a lockfile that differs only in line endings is the same lockfile =="
 # A Windows checkout (core.autocrlf=true) has CRLF on disk for the LF blob: a byte
