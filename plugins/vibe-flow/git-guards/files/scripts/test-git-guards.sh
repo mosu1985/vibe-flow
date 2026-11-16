@@ -2559,7 +2559,9 @@ drift_check() {   # $1 = root, $2 = hooks dir, $3 = label prefix
                  | awk 'NF && !seen[$0]++')
         while IFS= read -r f; do
             [ -n "$f" ] || continue
-            case "$f" in "$src"|*/test-*|*/test_*) continue ;; esac
+            # Matched on the path INSIDE the project: a project in ~/dev/test-shop
+            # must not skip every copy (a false pass).
+            case "${f#"$r"/}" in "${src#"$r"/}"|*/test-*|*/test_*|test-*|test_*) continue ;; esac
             if gi_block "$f" "$n" > "$TMP/gi-$n.copy" && cmp -s "$TMP/gi-$n.copy" "$TMP/gi-$n.src"; then
                 ok "drift:$lp ${f#"$r"/} carries the $n block, byte-identical to its source"
             else
@@ -2571,10 +2573,15 @@ EOF
     done
 }
 drift_check "$ROOT" "$CH" ""
-# The same check on a project whose path has a space in it.
-SPP="$TMP/with space/proj"; kit_copy "$SPP"
+# The same check on a project whose path has a space in it, and on one inside a
+# folder named test-…: neither may be split nor skipped.
+SPP="$TMP/with space/test-shop"; kit_copy "$SPP"
 cp "$CH/plan-approved.sh" "$CH/post-edit-tests.sh" "$SPP/.claude/hooks/"
-drift_check "$SPP" "$SPP/.claude/hooks" " [path with a space]"
+drift_check "$SPP" "$SPP/.claude/hooks" " [path with a space, test-* folder]"
+# …and every copy really was checked, not silently skipped: 2 sources + 6 copies.
+n_dc=$( (drift_check "$SPP" "$SPP/.claude/hooks" "") 2>&1 | grep -c '^  ok ')
+[ "$n_dc" -eq 8 ] && ok "drift: no copy skipped in a project under a test-* folder with a space (8 checks)" \
+    || bad "drift: copies skipped in a spaced test-* project" "ok checks: $n_dc, expected 8"
 
 echo "== wt-new: a lockfile that differs only in line endings is the same lockfile =="
 # A Windows checkout (core.autocrlf=true) has CRLF on disk for the LF blob: a byte
