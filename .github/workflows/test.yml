@@ -92,7 +92,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # Ubuntu pinned: ubuntu-latest moved to 26.04, where setup-python has no 3.9
+        # build ("The version '3.9' with architecture 'x64' was not found").
+        os: [ubuntu-24.04, macos-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
@@ -101,7 +103,7 @@ jobs:
           persist-credentials: false
 
       - name: Python 3.9 (setup-python)
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-24.04'
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.9'

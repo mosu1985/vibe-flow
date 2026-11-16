@@ -167,29 +167,46 @@ if [ "$FORCE" != "--force" ]; then
 fi
 
 # ── 2. Stop dev ──────────────────────────────────────────────────────────────
-# Windows (Git Bash): wt-new.sh records the WINDOWS pid of the launcher; the native
-# dev server (node.exe) under it is out of reach of MSYS kill, so the whole tree goes
-# with taskkill. "msys:<pid>" = wt-new could not learn the Windows pid: say so.
+# Windows (Git Bash): the native dev server (node.exe) is out of reach of MSYS kill,
+# so its whole Windows process tree goes with taskkill. wt-new.sh writes
+# "<windows pid> msys:<msys pid>" (older: one of the two). The launch-time Windows pid
+# goes stale — each exec of the launch chain is a new Windows process under the same
+# msys pid — so the CURRENT one is read from /proc/<msys pid>/winpid. No such /proc
+# entry = the chain has ended = dev is no longer running.
 win_alive() { tasklist //FI "PID eq $1" //NH 2>/dev/null | grep -qw "$1"; }
 stop_dev_windows() {   # $1 = content of .wt-dev.pid
-    case "$1" in
-        msys:*)
-            echo "  ⚠️  stop the dev server manually: pid ${1#msys:} (its Windows pid was not recorded)" ;;
-        ''|*[!0-9]*)
-            echo "  ⚠️  .wt-dev.pid is unreadable — stop the dev server manually" ;;
-        *)
-            if command -v tasklist >/dev/null 2>&1 && ! win_alive "$1"; then
-                echo "  dev is no longer running"
-            else
-                taskkill //T //F //PID "$1" >/dev/null 2>&1 || true
-                sleep 1
-                if command -v tasklist >/dev/null 2>&1 && win_alive "$1"; then
-                    echo "  ⚠️  stop the dev server manually: Windows pid $1 is still running"
-                else
-                    echo "  dev stopped (Windows pid $1)"
-                fi
-            fi ;;
-    esac
+    local tok msys="" win="" bad=0
+    for tok in $1; do
+        case "$tok" in
+            msys:*) msys=${tok#msys:} ;;
+            *) win=$tok ;;
+        esac
+    done
+    case "$msys$win" in ''|*[!0-9]*) bad=1 ;; esac
+    if [ "$bad" = 1 ]; then
+        echo "  ⚠️  .wt-dev.pid is unreadable — stop the dev server manually"; return
+    fi
+    if [ -n "$msys" ] && [ -d /proc ]; then
+        if [ ! -e "/proc/$msys" ]; then
+            echo "  dev is no longer running"; return
+        fi
+        win=$(cat "/proc/$msys/winpid" 2>/dev/null || true)
+        case "$win" in ''|*[!0-9]*) win="" ;; esac
+    fi
+    if [ -z "$win" ]; then
+        echo "  ⚠️  stop the dev server manually: pid ${msys:-?} (its Windows pid cannot be read)"; return
+    fi
+    if command -v tasklist >/dev/null 2>&1 && ! win_alive "$win"; then
+        echo "  dev is no longer running"
+        return
+    fi
+    taskkill //T //F //PID "$win" >/dev/null 2>&1 || true
+    sleep 1
+    if command -v tasklist >/dev/null 2>&1 && win_alive "$win"; then
+        echo "  ⚠️  stop the dev server manually: Windows pid $win is still running"
+    else
+        echo "  dev stopped (Windows pid $win)"
+    fi
 }
 if [ -f "$DIR/.wt-dev.pid" ] && gg_is_msys; then
     stop_dev_windows "$(cat "$DIR/.wt-dev.pid" 2>/dev/null || true)"

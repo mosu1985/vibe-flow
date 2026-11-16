@@ -861,5 +861,16 @@ def main() -> int:
     return 1 if t.fail else 0
 
 
+def _utf8_stdio() -> None:
+    """The case labels carry dashes and Cyrillic; a Windows pipe is cp1252, and the
+    first such label raised UnicodeEncodeError before any verdict was printed. Only
+    this runner's own output: the guard under test keeps the inherited environment."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="backslashreplace")
+
+
 if __name__ == "__main__":
+    _utf8_stdio()
     sys.exit(main())

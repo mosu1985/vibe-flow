@@ -114,25 +114,44 @@ def search_dirs(extra=""):
 
 
 def _program_files(directory, name):
-    """The files that would run `name` from `directory`: on Windows one per PATHEXT
-    extension (codex.cmd from npm), elsewhere the bare name."""
+    """The files that would run `name` from `directory`: on Windows the bare name
+    (npm's `codex` sh shim, what the Bash tool's Git Bash runs) and one per PATHEXT
+    extension (codex.cmd, codex.exe); elsewhere the bare name."""
     base = os.path.join(directory, name)
     if not WINDOWS:
         return [base]
     exts = [e for e in (os.environ.get("PATHEXT") or DEFAULT_PATHEXT).split(os.pathsep) if e]
-    return [base + e for e in exts]
+    return [base] + [base + e for e in exts]
+
+
+def _starts_with_shebang(path):
+    try:
+        with open(path, "rb") as fh:
+            return fh.read(2) == b"#!"
+    except OSError:
+        return False
 
 
 def _runnable(path):
-    # Windows has no exec bit (os.access(X_OK) is always true): the PATHEXT
-    # extension, already in the name, is what makes a file runnable there.
-    return os.path.isfile(path) and (WINDOWS or os.access(path, os.X_OK))
+    """Windows has no exec bit (os.access(X_OK) is always true). There a PATHEXT
+    extension makes a file runnable, and an extensionless one runs in Git Bash only
+    as a script (`#!`, how MSYS decides it is executable); elsewhere the exec bit."""
+    if not os.path.isfile(path):
+        return False
+    if not WINDOWS:
+        return os.access(path, os.X_OK)
+    if os.path.splitext(path)[1]:
+        return True
+    return _starts_with_shebang(path)
 
 
 def codex_found(path_env, dirs):
-    if shutil.which("codex", path=path_env or ""):
+    if not WINDOWS and shutil.which("codex", path=path_env or ""):
         return True
-    return any(_runnable(f) for d in dirs for f in _program_files(d, "codex"))
+    # Windows: PATH is searched by the same rules as the standard locations;
+    # shutil.which there never looks at the extensionless npm shim.
+    path_dirs = [d for d in (path_env or "").split(os.pathsep) if d] if WINDOWS else []
+    return any(_runnable(f) for d in path_dirs + list(dirs) for f in _program_files(d, "codex"))
 
 
 def _cells(line):

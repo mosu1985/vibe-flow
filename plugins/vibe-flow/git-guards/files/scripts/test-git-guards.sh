@@ -197,7 +197,10 @@ guard_unit_cases() {
         out=$(cd "$GLY" && python3 -B "$GLY/scripts/git-guards/test_pretooluse_guard.py" 2>&1); rc=$?
     fi
     summary=$(printf '%s\n' "$out" | grep -E 'passed: [0-9]+' | tail -1 | sed 's/^ *//')
-    [ $rc -eq 0 ] && ok "guard unit cases — $summary" || bad "guard unit cases" "$(printf '%s\n' "$out" | grep -E 'FAIL|passed' | head -40)"
+    # No FAIL/passed line = the runner itself crashed: show its last lines (the traceback).
+    [ $rc -eq 0 ] && ok "guard unit cases — $summary" \
+        || bad "guard unit cases" "rc=$rc $(printf '%s\n' "$out" | grep -E 'FAIL|passed' | head -40)
+$(printf '%s\n' "$out" | grep -qE 'FAIL|passed' || printf '%s\n' "$out" | tail -15)"
 }
 
 finish() {
@@ -739,6 +742,13 @@ kit_copy() {     # $1 = repo: the kit in project layout
 sha_of() { { printf '%s' "$1" | sha256sum 2>/dev/null || printf '%s' "$1" | shasum -a 256; } | cut -d' ' -f1; }
 NOW_TS=$(date +%s)
 dead_pid() { sh -c 'exit 0' & local p=$!; wait "$p" 2>/dev/null; echo "$p"; }
+# Pids as a NATIVE program sees them (post-edit-tests.py writes os.getpid() into its
+# lock and checks liveness with OpenProcess). Git Bash numbers its processes itself:
+# the Windows pid of an MSYS pid is /proc/<pid>/winpid. Elsewhere the same number.
+native_pid() { if [ "$IS_WIN" = 1 ]; then cat "/proc/$1/winpid"; else echo "$1"; fi; }
+dead_native_pid() {   # a process of the native kind that has already exited
+    if [ "$IS_WIN" = 1 ]; then "$PYBIN" -c 'import os; print(os.getpid())'; else dead_pid; fi
+}
 
 echo "== plan gate: installer takes hooks from origin =="
 PGO="$TMP/pg-origin.git"; git init -q --bare "$PGO"; git -C "$PGO" symbolic-ref HEAD refs/heads/main
@@ -770,11 +780,13 @@ git -C "$PGR" checkout -q -- githooks/pre-push
 PGB="$TMP/pg-norefs"; git clone -q "$PGO" "$PGB" 2>/dev/null
 git -C "$PGB" update-ref -d refs/remotes/origin/main; git -C "$PGB" update-ref -d refs/remotes/origin/HEAD 2>/dev/null
 mkdir -p "$PGB/.git/monitorex-hooks"; printf '#!/bin/sh\n# installed earlier\n' > "$PGB/.git/monitorex-hooks/pre-push"
-# MSYS_NO_PATHCONV: Git Bash would rewrite the literal /some/where into C:/Program Files/Git/some/where
-MSYS_NO_PATHCONV=1 git -C "$PGB" config core.hooksPath /some/where
+# MSYS_NO_PATHCONV: Git Bash would rewrite the literal /some/where into C:/Program Files/Git/some/where.
+# It switches off EVERY argument's conversion, so no `-C <msys path>` next to it: git.exe
+# would get /tmp/… literally and fail with "cannot change to" — a cd in a subshell instead.
+( cd "$PGB" && MSYS_NO_PATHCONV=1 git config core.hooksPath /some/where )
 out=$(bash "$PGB/scripts/install-git-guards.sh" 2>&1); rc=$?
 [ $rc -eq 0 ] && echo "$out" | grep -q 'hooks left untouched' && grep -q 'installed earlier' "$PGB/.git/monitorex-hooks/pre-push" \
-    && [ "$(MSYS_NO_PATHCONV=1 git -C "$PGB" config core.hooksPath)" = /some/where ] && [ ! -f "$PGB/.git/monitorex-hooks/.source" ] \
+    && [ "$(cd "$PGB" && MSYS_NO_PATHCONV=1 git config core.hooksPath)" = /some/where ] && [ ! -f "$PGB/.git/monitorex-hooks/.source" ] \
     && ok "installer: origin without fetched refs — rc 0, warning, hooks and hooksPath untouched (no tree fallback)" \
     || bad "installer: origin without refs" "rc=$rc $out"
 # CI checkout of a PR: only refs/remotes/pull/N/merge, depth 1, no origin/main
@@ -1159,7 +1171,9 @@ echo "== plan-approved.py: the gate without Codex (decide / codex_found) =="
 # environment: the hook always checks the standard Codex locations, so on a machine
 # with Codex installed an environment-based test would be red (plan C1/C3).
 pa_py() {   # pa_py <python expression over module m> [args…] — prints the result
-    python3 -B - "$CH/plan-approved.py" "$@" <<'PY2'
+    # utf-8 stdout: a helper of the suite, not the product — on Windows a pipe is cp1252,
+    # and printing a refusal reason with a dash or Cyrillic raised UnicodeEncodeError.
+    PYTHONIOENCODING=utf-8 python3 -B - "$CH/plan-approved.py" "$@" <<'PY2'
 import importlib.util, sys
 spec = importlib.util.spec_from_file_location("pa", sys.argv[1])
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
@@ -1210,9 +1224,11 @@ printf '#!/bin/sh\n' > "$TMP/pc-has/codex"; chmod +x "$TMP/pc-has/codex"; printf
 [ "$(pa_py 'm.codex_found(args[0], [args[1]])' "" "$TMP/pc-has")" = True ] && ok "codex_found: executable codex in a search dir — True (not on PATH)" || bad "codex_found search dir" ""
 [ "$(pa_py 'm.codex_found(args[0], [])' "$TMP/pc-has")" = True ] && ok "codex_found: codex on PATH — True" || bad "codex_found PATH" ""
 [ "$(pa_py 'm.codex_found(args[0], [args[1]])' "" "$TMP/pc-noexec")" = False ] && ok "codex_found: non-executable file — False" || bad "codex_found noexec" ""
-out=$(HOME=/h pa_py 'set(m.search_dirs(args[0])) >= {"/opt/homebrew/bin", "/usr/local/bin", "/h/.local/bin"}' "")
+# HOME as the interpreter got it: Git Bash hands a native Python /h and /extra/bin
+# rewritten to C:/Program Files/Git/h…; POSIX sees /h, and the check is the literal one.
+out=$(HOME=/h pa_py '(m.os.environ["HOME"] == "/h" or m.WINDOWS) and set(m.search_dirs(args[0])) >= {"/opt/homebrew/bin", "/usr/local/bin", m.os.environ["HOME"] + "/.local/bin"}' "")
 [ "$out" = True ] && ok "search_dirs: GG_CODEX_SEARCH_PATHS='' does NOT drop the standard locations (C3)" || bad "search_dirs C3" "$out"
-out=$(pa_py '"/extra/bin" in m.search_dirs(args[0])' "/extra/bin")
+out=$(pa_py '(lambda s: args[0] in s and set(m.search_dirs("")) <= set(s))(m.search_dirs(args[0]))' "/extra/bin")
 [ "$out" = True ] && ok "search_dirs: GG_CODEX_SEARCH_PATHS only adds directories" || bad "search_dirs extra" "$out"
 # Integration, deterministic in both environments:
 mkdir -p "$TMP/pa-bin-codex"
@@ -1252,6 +1268,22 @@ pr_repo "$PAH/dev/fake"; rm -rf "$PAH/dev/fake/.git"; printf 'gitdir: %s/dev/c/.
 pr_repo "$PAH/dev/lockln"; mkdir -p "$PAH/dev/d/.git/monitorex-locks"; ln -s "$PAH/dev/d/.git/monitorex-locks" "$PAH/dev/lockln/.git/monitorex-locks"
 pr_repo "$PAH/dev/b2"   # $HOME prefix trap lives in the unit case below
 pa_run_h() { pa_in "$@" | HOME="$PAH" CLAUDE_PROJECT_DIR="${PA_SESSION:-$PA}" bash "$CH/plan-approved.sh"; }
+# A path in the hook's words. POSIX: the exact string, as before. Native Windows: the
+# hook speaks native paths (C:\Users\runneradmin\…), the suite MSYS ones (/tmp/… =
+# C:/Users/RUNNER~1/…) — both sides go through realpath + normcase there, nothing else.
+pa_msg_count() {   # stdin = hook JSON; $1 = path → how many times systemMessage names it
+    python3 -c 'import json, os, sys
+m = json.load(sys.stdin)["systemMessage"]; p = sys.argv[1]
+if os.name == "nt":
+    m, p = os.path.normcase(m), os.path.normcase(os.path.realpath(p))
+print(m.count(p))' "$1"
+}
+same_path() {      # A B → 0 when they name one directory (see pa_msg_count)
+    if [ "$IS_WIN" != 1 ]; then [ "$1" = "$2" ]; return; fi
+    "$PYBIN" -c 'import os, sys
+n = lambda p: os.path.normcase(os.path.realpath(p))
+sys.exit(0 if sys.argv[1] and n(sys.argv[1]) == n(sys.argv[2]) else 1)' "$1" "$2"
+}
 mk() { printf '%s/.git/monitorex-locks/plan-approved/%s' "$1" "$2"; }
 pr_plan() { printf '# P\n\n%s\n\n## 🧑‍⚖️ External review Codex\n\nГейт: ✅ пройден\n' "$1"; }
 
@@ -1295,9 +1327,11 @@ case "$out" in NO*) ok "accept_repo: empty HOME — refused (fail-closed)" ;; *)
 # Integration
 for n in rp1.md rp2.md rp3.md rp4.md rp5.md rp6.md rp7.md rp8.md; do echo plan > "$GG_PLANS_DIR/$n"; done
 out=$(pa_run_h rp1.md "$(pr_plan "Репозиторий: \`$PAH/dev/a\` (основной)")" false)
-[ -f "$(mk "$PAH/dev/a" rp1.md)" ] && [ -f "$PAM/rp1.md" ] && grep -q "^source=$PA$" "$(mk "$PAH/dev/a" rp1.md)" \
+[ -f "$(mk "$PAH/dev/a" rp1.md)" ] && [ -f "$PAM/rp1.md" ] \
+    && [ "$(grep -c '^source=' "$(mk "$PAH/dev/a" rp1.md)")" = 1 ] && same_path "$(sed -n 's/^source=//p' "$(mk "$PAH/dev/a" rp1.md)")" "$PA" \
     && grep -q '^ts=[0-9]*$' "$(mk "$PAH/dev/a" rp1.md)" && grep -q '^critic=section$' "$(mk "$PAH/dev/a" rp1.md)" \
-    && echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); m=d["systemMessage"]; sys.exit(0 if sys.argv[1] in m and "decision" not in d else 1)' "$PAH/dev/a" \
+    && [ "$(printf '%s' "$out" | pa_msg_count "$PAH/dev/a")" -ge 1 ] \
+    && echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if "decision" not in d else 1)' \
     && ok "hook: named repository — mark there (source=, same format) and in the session repo; the user is told where" || bad "hook: named repository" "$out"
 # Without real symlinks (Git Bash copies) the symlinked monitorex-locks target is N/A, the rest still runs.
 RP2_LN="$PAH/dev/lockln"; RP2_SYM=symlink
@@ -1329,7 +1363,7 @@ out=$(pa_run good.md "$PA_GOOD" false)
 [ -z "$out" ] && ok "hook: plan without 'Репозиторий:' — silent, as before" || bad "hook: silent without targets" "$out"
 echo plan > "$GG_PLANS_DIR/rp9.md"
 out=$(PA_SESSION="$TMP/pa-norepo" pa_run_h rp9.md "$(printf '# P\nРепозиторий: %s\nРепозиторий: %s\n\n| Codex | — | ❌ unavailable — user'"'"'s decision |\n\nГейт: ✅ пройден\n' "$PAH/dev/a" "~/dev/a")" false)
-[ "$(printf '%s' "$out" | grep -o "$PAH/dev/a" | wc -l | tr -d ' ')" = 1 ] && echo "$out" | grep -q 'WITHOUT' \
+[ "$(printf '%s' "$out" | pa_msg_count "$PAH/dev/a")" = 1 ] && echo "$out" | grep -q 'WITHOUT' \
     && ok "hook: same repository written twice — listed once; critic notice when a named repo got the mark" || bad "hook: dedup list" "$out"
 echo plan > "$GG_PLANS_DIR/rp10.md"
 out=$(PA_SESSION="$TMP/pa-norepo" pa_run_h rp10.md "$(printf '# P\n\n| Codex | — | ❌ unavailable — user'"'"'s decision |\n\nГейт: ✅ пройден\n')" false)
@@ -1669,7 +1703,7 @@ pe_run "$PE/lib/a.ts" >/dev/null
 [ "$(pe_calls)" = 1 ] && ! grep -q 'gone.ts' "$PECALLS" && grep -qx 'ARG lib/a.ts' "$PECALLS" && ok "deleted file in the queue — not passed to the runner" || bad "deleted file in queue" "$(cat "$PECALLS")"
 
 PELOCK="$PE/.git/monitorex-locks/post-edit-run"
-pe_reset; mkdir -p "$PELOCK"; printf 'pid=%s\ntime=%s\n' "$$" "$(date +%s)" > "$PELOCK/owner"
+pe_reset; mkdir -p "$PELOCK"; printf 'pid=%s\ntime=%s\n' "$(native_pid $$)" "$(date +%s)" > "$PELOCK/owner"
 pe_run "$PE/lib/a.ts" >/dev/null
 [ "$(pe_calls)" = 0 ] && [ -d "$PELOCK" ] && grep -qx 'lib/a.ts' "$PEQ" && ok "run lock held by a live pid — no run, the path waits in the queue" || bad "live lock" "$(pe_calls)"
 # two worktrees of one repository: own queues, one shared lock
@@ -1678,7 +1712,7 @@ pe_run "$TMP/pe-wt2/lib/a.ts" "$TMP/pe-wt2" >/dev/null
 PEQ2="$PE/.git/worktrees/pe-wt2/post-edit-tests/pending"
 [ "$(pe_calls)" = 0 ] && grep -qx 'lib/a.ts' "$PEQ2" 2>/dev/null && [ "$(grep -c . "$PEQ")" = 1 ] \
     && ok "two worktrees — separate queues, the lock is shared (no run in the second tree)" || bad "two worktrees" "$(pe_calls) q2=$(cat "$PEQ2" 2>&1)"
-printf 'pid=%s\ntime=%s\n' "$(dead_pid)" "$(date +%s)" > "$PELOCK/owner"
+printf 'pid=%s\ntime=%s\n' "$(dead_native_pid)" "$(date +%s)" > "$PELOCK/owner"
 pe_run "$PE/lib/a.ts" >/dev/null
 [ "$(pe_calls)" = 1 ] && [ ! -d "$PELOCK" ] && ok "run lock of a dead pid — removed, the run happens" || bad "dead lock" "$(pe_calls)"
 
@@ -1686,7 +1720,8 @@ pe_conf 'GG_POST_EDIT_MAX=1'; pe_reset; echo sleep > "$PEMODE"; rm -f "$TMP/pe-c
 T0=$SECONDS; out=$(pe_run "$PE/lib/a.ts"); T=$((SECONDS-T0))
 child=$(cat "$TMP/pe-child" 2>/dev/null); sleep 1
 { [ -z "$out" ] && [ $T -lt 15 ] && [ -n "$child" ] && ! kill -0 "$child" 2>/dev/null && [ ! -d "$PELOCK" ]; } \
-    && ok "GG_POST_EDIT_MAX=1 — the whole process group killed (${T}s), lock released, no block" || bad "ceiling" "out=$out T=$T child=$child"
+    && ok "GG_POST_EDIT_MAX=1 — the whole process group killed (${T}s), lock released, no block" \
+    || bad "ceiling" "out=$out T=$T child=$child alive=$(kill -0 "$child" 2>/dev/null && echo yes || echo no) lock=$([ -d "$PELOCK" ] && echo held || echo free)"
 [ -n "$child" ] && kill "$child" 2>/dev/null
 echo green > "$PEMODE"
 
@@ -2618,11 +2653,14 @@ if [ "$IS_WIN" = 1 ]; then
     gcase "Write .git.\\monitorex-locks\\x (trailing dot)" deny "$WM" Write file_path '.git.\monitorex-locks\x' "$WM"
     gcase "Write .git::\$INDEX_ALLOCATION\\monitorex-locks\\x (ADS)" deny "$WM" Write file_path '.git::$INDEX_ALLOCATION\monitorex-locks\x' "$WM"
     # A junction in a repository path named by a plan header counts as a link
-    if cmd //c mklink /J "$(cygpath -w "$PAH/dev/a-junction")" "$(cygpath -w "$PAH/dev/a")" >/dev/null 2>&1; then
+    # MSYS_NO_PATHCONV: otherwise Git Bash rewrites the /c and /J switches into paths
+    # (C:/Program Files/Git/J); the two paths are already native (cygpath -w).
+    JOUT=$(MSYS_NO_PATHCONV=1 cmd /c mklink /J "$(cygpath -w "$PAH/dev/a-junction")" "$(cygpath -w "$PAH/dev/a")" 2>&1)
+    if [ -d "$PAH/dev/a-junction/.git" ]; then
         out=$(ar "$PAH/dev/a-junction")
         case "$out" in NO*symlink*) ok "accept_repo: a junction (mklink /J) — refused as a link" ;; *) bad "accept_repo: junction" "$out" ;; esac
     else
-        bad "accept_repo: junction" "fixture: mklink /J failed"
+        bad "accept_repo: junction" "fixture: mklink /J failed: $JOUT"
     fi
     # The post-edit-tests liveness check must not kill the lock owner (os.kill(pid, 0) = TerminateProcess)
     rm -f "$TMP/win-live.pid"

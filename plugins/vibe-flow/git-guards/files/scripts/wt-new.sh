@@ -120,15 +120,24 @@ kill_tree() {   # $1 = pid, $2 = TERM | KILL; rc 1 when the process is already g
     pkill -"$2" -P "$1" 2>/dev/null || true     # its children too (wrapper scripts)
     kill -"$2" "$1" 2>/dev/null
 }
+# rc 124 (as GNU timeout) when the watcher cut the command off. Not inferred from
+# the killed process's status: a process killed with taskkill reports 0 to Git
+# Bash's `wait`, so a hung gh looked like a successful empty answer (CI, 1.3.0).
 run_with_timeout() {
     local secs="$1"; shift
+    local fired; fired=$(mktemp "${TMPDIR:-/tmp}/gg-timeout.XXXXXX") || fired=""
     "$@" &
     local pid=$!
     (
         trap 'kill "$s" 2>/dev/null; exit 0' TERM
         sleep "$secs" & s=$!
         wait "$s"
-        kill_tree "$pid" TERM || exit 0
+        # Marked BEFORE the kill: once the process dies the caller stops this watcher.
+        [ -z "$fired" ] || echo timeout > "$fired"
+        if ! kill_tree "$pid" TERM; then
+            [ -z "$fired" ] || : > "$fired"     # it had already finished on its own
+            exit 0
+        fi
         sleep 2 & s=$!
         wait "$s"
         kill_tree "$pid" KILL || true
@@ -138,6 +147,10 @@ run_with_timeout() {
     wait "$pid" || rc=$?
     kill -TERM "$watcher" 2>/dev/null || true
     wait "$watcher" 2>/dev/null || true   # otherwise bash prints "Terminated: 15"
+    if [ -n "$fired" ]; then
+        [ -s "$fired" ] && rc=124
+        rm -f "$fired"
+    fi
     return "$rc"
 }
 
@@ -170,7 +183,7 @@ if [ "$ISSUE_SET" = "1" ]; then
     if [ "$GHRC" != "0" ]; then
         # Only printable ASCII of gh's message reaches the terminal (and the model).
         GHMSG=$(LC_ALL=C tr -cd '\11\12\40-\176' < "$GH_ERR" | sed -n '1,3p')
-        if [ $((SECONDS - T0)) -ge "$GG_ISSUE_TIMEOUT" ]; then
+        if [ "$GHRC" = 124 ] || [ $((SECONDS - T0)) -ge "$GG_ISSUE_TIMEOUT" ]; then
             echo "🔴 gh did not answer within ${GG_ISSUE_TIMEOUT}s — issue #$ISSUE not checked (network?)"
         elif printf '%s' "$GHMSG" | grep -qiE 'auth login|not logged|authenticat|bad credentials|HTTP 401'; then
             echo "🔴 gh is not authenticated — run: gh auth login"
@@ -738,16 +751,19 @@ elif [ -n "$GG_DEV_CMD" ]; then
     DEV_PID=$!
     if gg_is_msys; then
         # Windows: the dev server is a native process (node.exe) that MSYS `kill` does
-        # not reach. The pid file keeps the WINDOWS pid of the launcher, whose tree
-        # wt-done.sh kills with taskkill. Unknown → "msys:<pid>": wt-done then says to
-        # stop it by hand instead of claiming it did.
+        # not reach; wt-done.sh kills its Windows process tree with taskkill. The pid
+        # file holds "<windows pid> msys:<msys pid>". The Windows pid read here is only
+        # the launch-time one: every exec of the chain (env → nohup → sh) is a NEW
+        # Windows process under the SAME msys pid and the old one exits (CI 1.3.0:
+        # the recorded pid was gone while the server ran). So wt-done reads the current
+        # one from /proc/<msys pid>/winpid. Unknown here → "msys:<pid>" alone.
         WINPID=""; i=0
         while [ "$i" -lt 20 ]; do
             WINPID=$(cat "/proc/$DEV_PID/winpid" 2>/dev/null || true)
             case "$WINPID" in ''|*[!0-9]*) WINPID="" ;; *) break ;; esac
             sleep 0.1; i=$((i+1))
         done
-        if [ -n "$WINPID" ]; then echo "$WINPID" > "$DIR/.wt-dev.pid"; else echo "msys:$DEV_PID" > "$DIR/.wt-dev.pid"; fi
+        if [ -n "$WINPID" ]; then echo "$WINPID msys:$DEV_PID" > "$DIR/.wt-dev.pid"; else echo "msys:$DEV_PID" > "$DIR/.wt-dev.pid"; fi
     else
         echo "$DEV_PID" > "$DIR/.wt-dev.pid"
     fi
