@@ -92,7 +92,8 @@ for h in $HOOKS; do
         chmod +x "$tmp"; mv "$tmp" "$dst"   # atomic swap
         echo "  + $h installed"
     fi
-    shasum -a 256 "$dst" | cut -d' ' -f1 > "$DEST/$h.sha256"
+    # sha256sum (GNU, macOS 14+) or shasum (perl) — minimal Linux images may lack the latter
+    { sha256sum "$dst" 2>/dev/null || shasum -a 256 "$dst"; } | cut -d' ' -f1 > "$DEST/$h.sha256"
 done
 
 printf '%s@%s\n' "$MODE" "$SRC_SHA" > "$DEST/.source.tmp.$$" && mv "$DEST/.source.tmp.$$" "$DEST/.source"

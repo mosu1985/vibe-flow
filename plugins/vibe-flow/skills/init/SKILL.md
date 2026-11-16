@@ -13,7 +13,8 @@ The user invoked the installation themselves — that is consent to write files 
 git rev-parse --show-toplevel && git rev-parse --git-dir --git-common-dir && git log --oneline -1 && git remote -v
 ```
 
-- `bash`, `git` and `python3` are required. Windows without WSL/Git Bash is not supported — say so plainly. Verified on macOS; on Linux/WSL the mechanism works but has not been run — if something fails, report it to the package author.
+- `bash`, `git` and `python3` are required. Supported: macOS, Linux, and Windows **via WSL 2**; the protection suite runs in CI on Ubuntu and macOS. `lsof` is optional (free-port detection and dev-server cleanup in worktrees).
+- **Native Windows (Git Bash / MSYS / Cygwin) is not supported yet:** the installer stops before writing anything and prints the WSL 2 steps. Relay those steps to the user in their language, and say plainly that the plugin's agents and skills still work without the git protection. 🔴 Never set `GG_ALLOW_UNSUPPORTED_OS` to get past the stop: it exists only for the package's own CI and is ignored outside it.
 - **The session sits in a linked worktree** (git-dir ≠ git-common-dir) → install into the main tree: take the path `git-common-dir/..`.
 - **Not a git repository, or no commits** → ask via `AskUserQuestion`: "Run `git init` and make a first commit?". No → stop. Yes:
   1. `git init`, if needed

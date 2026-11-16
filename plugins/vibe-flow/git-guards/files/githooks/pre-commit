@@ -38,7 +38,12 @@ if [ "$GITDIR_RAW" = "$COMMON_RAW" ]; then   # we are in the MAIN working tree
     # set it without a second thought, while a human sets the mark via a command that asks.
     CONFIRM="$COMMON/monitorex-locks/CONFIRM"
     if [ -f "$CONFIRM" ]; then
-        age=$(( $(date +%s) - $(stat -f %m "$CONFIRM") ))
+        # mtime: GNU stat first (Linux/WSL/Git Bash), then BSD (macOS). GNU `stat -f %m`
+        # prints filesystem info instead of failing, so the order matters. Unknown or
+        # in the future (clock skew, restored backup) counts as expired: fail-closed.
+        mt=$(stat -c %Y "$CONFIRM" 2>/dev/null || stat -f %m "$CONFIRM" 2>/dev/null || true)
+        case "$mt" in ''|*[!0-9]*) age=99999 ;; *) age=$(( $(date +%s) - mt )) ;; esac
+        [ "$age" -ge -300 ] || age=99999
         if [ "$age" -lt 900 ] && grep -q '^target=commit$' "$CONFIRM"; then
             rm -f "$CONFIRM"
             echo "⚠️  regular commit allowed by a one-off mark (now consumed)"

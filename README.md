@@ -1,5 +1,7 @@
 # vibe-flow
 
+[![test](https://github.com/mosu1985/vibe-flow/actions/workflows/test.yml/badge.svg)](https://github.com/mosu1985/vibe-flow/actions/workflows/test.yml)
+
 A Claude Code development environment, battle-tested on a live production project.
 Installs into any project in a couple of minutes.
 
@@ -45,8 +47,12 @@ Stack packages (optional; `init` will tell you whether you need them):
 /plugin install vibe-flow-supabase@vibe-school   # project on Supabase
 ```
 
-**Required:** Claude Code, `git`, `bash`, `python3`. Tested on macOS; Linux and Windows via WSL use the same mechanism but haven't been tested. No git repository? `init` will offer to create one.
+**Required:** Claude Code, `git`, `bash`, `python3`. Works on macOS, Linux and Windows via WSL 2; the protection suite runs in [CI](.github/workflows/test.yml) on Ubuntu and macOS on every push. No git repository? `init` will offer to create one.
+
+**Windows:** use WSL 2. Native Windows (Git Bash) is not supported yet: `init` stops before changing anything and prints the steps: `wsl --install` in PowerShell as administrator, then git, python3, Node.js and Claude Code inside Ubuntu, with the project kept inside WSL (`~/projects/…`, not `/mnt/c`). The plugin's agents and skills work on native Windows too, just without the git protection.
+
 **Optional:**
+- `lsof`: free-port detection and dev-server cleanup in worktrees (missing on some minimal Linux images)
 - GitHub CLI `gh` (`gh auth login`): lets Claude create and merge PRs itself
 - Codex CLI (`npm i -g @openai/codex` → `codex login`): a second, independent plan critic. The plan and code fragments are sent to OpenAI
 - Claude in Chrome extension: checks in the browser

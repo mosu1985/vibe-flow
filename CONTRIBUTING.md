@@ -83,6 +83,31 @@ canonical file. Never delete `tools/git-guards-known-blobs.txt`: without it, eve
 older project file looks edited by the project and stops getting updates.
 Run `bash tools/test-rollout-projects.sh` after changing the rollout.
 
+## CI and portability
+
+Every push runs `.github/workflows/test.yml`: the git-guards suite and the Node
+tests on Ubuntu and macOS (`posix`), and the rollout test on Ubuntu (`rollout`, its
+own job because it runs the suite inside every prepared project). Merge only when
+`posix` and `rollout` are green. A
+`windows-probe` job runs the suite on native Windows (Git Bash) for information
+only; it is expected to be red until Git Bash is supported.
+
+The scripts must run with both GNU tools (Linux, WSL, Git Bash) and BSD tools (macOS):
+
+- **No BSD-only or GNU-only flags.** mtime: `stat -c %Y f 2>/dev/null || stat -f %m f`,
+  GNU first, because GNU `stat -f %m` prints filesystem info instead of failing;
+  treat a non-numeric result as unknown. Temp files: `mktemp "${TMPDIR:-/tmp}/name.XXXXXX"`,
+  never `mktemp -t name` (GNU requires the X's). In-place edits: `sed … > tmp && mv`,
+  never `sed -i ''`.
+- **A temp file that replaces a shared file with `mv`** is created next to it
+  (same filesystem), so the rename stays atomic.
+- **Test fixtures name their branch** (`git symbolic-ref HEAD refs/heads/main`):
+  git's own default is still `master`, and macOS only looks like `main` because of
+  Apple's system gitconfig.
+- To reproduce the other platform locally, the suite has PATH shims (`mkshim`);
+  on a Mac, `brew install coreutils` and the `gnubin` directory first in `PATH`
+  give real GNU tools.
+
 ## Versions
 
 Bump `version` in `plugins/*/.claude-plugin/plugin.json` on EVERY release,

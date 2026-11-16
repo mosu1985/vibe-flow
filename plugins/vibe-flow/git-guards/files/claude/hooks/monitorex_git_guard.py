@@ -788,7 +788,15 @@ def is_linked_worktree(where: str) -> bool | None:
     gd = git(where, "rev-parse", "--git-dir")
     if not gd:
         return None
-    return gd != git(where, "rev-parse", "--git-common-dir")
+    common = git(where, "rev-parse", "--git-common-dir")
+    if not common:
+        return False                 # cannot tell — err on the safe side (shared tree)
+    # Compare resolved paths, not strings: in a subdirectory of the main tree
+    # --git-dir comes back absolute and --git-common-dir relative (`../../.git`),
+    # and the raw comparison took the shared tree for a linked worktree — `git add`
+    # from any subdirectory went through. (--path-format=absolute needs git 2.31+.)
+    return (os.path.realpath(os.path.join(where, gd))
+            != os.path.realpath(os.path.join(where, common)))
 
 
 def resolve(base: str, path: str) -> str:

@@ -37,13 +37,21 @@ ALLOW="$COMMON/monitorex-locks/delete-allow"
 TTL=900
 mkdir -p "$(dirname "$ALLOW")"
 
-age_of() { echo $(( $(date +%s) - $(stat -f %m "$1" 2>/dev/null || echo 0) )); }
+age_of() {   # seconds since mtime, empty when unknown. GNU stat first, then BSD:
+    # GNU `stat -f %m` prints filesystem info instead of failing.
+    local m; m=$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || true)
+    case "$m" in ''|*[!0-9]*) echo "" ;; *) echo $(( $(date +%s) - m )) ;; esac
+}
 
 case "${1:-list}" in
   list)
     if [ -f "$ALLOW" ]; then
         AGE=$(age_of "$ALLOW")
-        if [ "$AGE" -lt "$TTL" ]; then
+        if [ -z "$AGE" ]; then
+            echo "mark age unknown — treated as absent"
+        elif [ "$AGE" -lt -300 ]; then
+            echo "mark time is in the future (${AGE}s) — treated as absent"
+        elif [ "$AGE" -lt "$TTL" ]; then
             echo "allowed for deletion (age ${AGE}s, lives ${TTL}s):"
             sed 's/^/  /' "$ALLOW"
         else

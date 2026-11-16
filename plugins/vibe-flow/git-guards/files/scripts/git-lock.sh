@@ -18,7 +18,13 @@ IDXPATH=$(git rev-parse --git-path index); case "$IDXPATH" in /*) ;; *) IDXPATH=
 IDXLOCK="$IDXPATH.lock"
 field() { sed -n "s/^$2=//p" "$1" 2>/dev/null | head -1; }
 alive() { [ -n "$1" ] && kill -0 "$1" 2>/dev/null && echo "alive" || echo "DEAD"; }
-age()   { [ -f "$1" ] && echo "$(( ($(date +%s) - $(stat -f %m "$1")) ))s" || echo "-"; }
+# mtime: GNU stat first (Linux/WSL/Git Bash), then BSD (macOS). GNU `stat -f %m`
+# prints filesystem info instead of failing, so the order matters. Not a number → "?".
+age()   {
+  [ -f "$1" ] || { echo "-"; return; }
+  _m=$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null)
+  case "$_m" in ''|*[!0-9]*) echo "?" ;; *) echo "$(( $(date +%s) - _m ))s" ;; esac
+}
 
 show() {
   echo "=== Locks ==="
@@ -45,7 +51,8 @@ case "${1:-status}" in
     printf 'Release the locks? In the post-cas phase the index will be reset to the new HEAD. [yes/no] '
     read -r a; { [ "$a" = "yes" ] || [ "$a" = "да" ]; } || { echo "cancelled"; exit 1; }  # "да" kept for existing Russian-speaking users
     if [ -f "$JOURNAL" ] && [ "$(field "$JOURNAL" phase)" = "post-cas" ]; then
-      NEW=$(field "$JOURNAL" new); TMP=$(mktemp -t monitorex-idxrepair)
+      # Next to the index: the same filesystem keeps `mv` an atomic rename.
+      NEW=$(field "$JOURNAL" new); TMP=$(mktemp "$IDXPATH.monitorex.XXXXXX")
       GIT_INDEX_FILE="$TMP" git read-tree "$NEW" && mv "$TMP" "$IDXPATH" && rm -f "$JOURNAL" \
         && echo "index reset to $NEW" || { rm -f "$TMP"; echo "🔴 repair failed"; exit 1; }
     fi

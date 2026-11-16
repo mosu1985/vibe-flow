@@ -1,0 +1,140 @@
+# CI for vibe-flow: the git-guards acceptance suite and the Node tests on Linux
+# and macOS (green on both is required before a merge), plus an informational
+# native-Windows probe that collects the facts for Git Bash support.
+#
+# Keep it this way: read-only token, no secrets, no caches, no pull_request_target,
+# actions pinned to commit SHAs, and never interpolate ${{ github.event.* }} or
+# github.head_ref inside `run:`.
+name: test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  # The event is part of the key: a push run and the pull_request run of the same
+  # branch must not cancel each other (the PR run skips its jobs for own branches).
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  posix:
+    # A branch with an open PR runs once (on push); pull requests from forks still run.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Tool versions
+        run: |
+          uname -a
+          bash --version | head -1
+          git --version
+          python3 --version
+          node --version
+          for t in lsof uuidgen sha256sum shasum; do printf '%-10s %s\n' "$t" "$(command -v "$t" || echo '- missing')"; done
+
+      - name: Git identity for the test repositories
+        run: |
+          git config --global user.name ci
+          git config --global user.email ci@example.invalid
+
+      - name: git-guards acceptance suite
+        working-directory: plugins/vibe-flow/git-guards
+        run: bash files/scripts/test-git-guards.sh
+
+      - name: Node tests
+        run: node --test tools/measure-plan-cost.test.mjs plugins/vibe-flow-vercel/scripts/wait-vercel-deploy.test.mjs
+
+  rollout:
+    # Its own job: the rollout test runs the whole git-guards suite inside every
+    # prepared project (~13 min on a fast Mac), so it must not hold up `posix`.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0              # the test looks up older file versions in history
+          persist-credentials: false
+
+      - name: Git identity for the test repositories
+        run: |
+          git config --global user.name ci
+          git config --global user.email ci@example.invalid
+
+      - name: Rollout tool test
+        run: bash tools/test-rollout-projects.sh
+
+  windows-probe:
+    # Informational: native Windows (Git Bash) is not supported yet and init stops
+    # there. The log is the fact base for that work; red here is expected.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: windows-latest
+    continue-on-error: true
+    timeout-minutes: 50
+    defaults:
+      run:
+        shell: bash
+    env:
+      GG_ALLOW_UNSUPPORTED_OS: "1"    # honored only together with GITHUB_ACTIONS=true (set by the runner)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Environment facts
+        run: |
+          set +e
+          echo "uname -s:               $(uname -s)"
+          echo "pwd -P:                 $(pwd -P)"
+          echo "git --show-toplevel:    $(git rev-parse --show-toplevel)"
+          echo "git --git-common-dir:   $(git rev-parse --git-common-dir)"
+          echo "git --absolute-git-dir: $(git rev-parse --absolute-git-dir)"
+          for t in python3 python py cygpath lsof netstat uuidgen shasum sha256sum stat mktemp; do
+            printf '%-10s %s\n' "$t" "$(command -v "$t" || echo '- missing')"
+          done
+          python3 -c ''; echo "python3 -c '' -> exit $?"
+          python -c 'import sys; print("python:", sys.version.split()[0], "stdout encoding:", sys.stdout.encoding)'
+          cygpath --version 2>&1 | head -1
+          stat --version 2>&1 | head -1
+          git --version
+          echo "core.autocrlf:"; git config --show-origin --get-all core.autocrlf
+          echo "TMPDIR=${TMPDIR:-<unset>}  TMP=${TMP:-<unset>}"
+          git ls-files --eol plugins/vibe-flow/git-guards/files/scripts/wt-new.sh \
+            plugins/vibe-flow/git-guards/files/githooks/pre-push plugins/vibe-flow/scripts/init.sh
+          d=$(mktemp -d); echo x > "$d/target"; ln -s "$d/target" "$d/link"
+          if [ -L "$d/link" ]; then echo "ln -s: real symlink"; else echo "ln -s: copy, not a symlink"; fi
+          idx=$(mktemp "${TMPDIR:-/tmp}/probe-idx.XXXXXX"); echo "mktemp -> $idx"
+          if GIT_INDEX_FILE="$idx" git read-tree HEAD; then
+            echo "GIT_INDEX_FILE round-trip: ok ($(GIT_INDEX_FILE="$idx" git ls-files | wc -l) files)"
+          else echo "GIT_INDEX_FILE round-trip: FAILED"; fi
+          sleep 2 & p=$!; kill -0 "$p" && echo "kill -0 on a bash child: ok"; wait
+          true
+
+      - name: git-guards suite (baseline for native Windows support)
+        working-directory: plugins/vibe-flow/git-guards
+        timeout-minutes: 45
+        run: |
+          git config --global user.name ci
+          git config --global user.email ci@example.invalid
+          bash files/scripts/test-git-guards.sh 2>&1 | tee "$RUNNER_TEMP/windows-probe-suite.log"
+
+      - name: Keep the suite log
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-probe-suite-log
+          path: ${{ runner.temp }}/windows-probe-suite.log
+          if-no-files-found: warn

@@ -116,7 +116,8 @@ GG_PLAN_GATE=$(printf '%s\n' "$GG_POLICY" | conf_get GG_PLAN_GATE) || GG_PLAN_GA
 # index: the isolated index does not exist yet at this point.
 if [ -n "$GG_PLAN_GATE" ]; then
     if [ -n "$GG_PROT_REF" ] && git cat-file -e "$GG_PROT_REF:$GG_PLAN_GATE" 2>/dev/null; then
-        gg_gate=$(mktemp -t monitorex-gate)
+        # A template with X's: GNU mktemp (Linux, WSL, Git Bash) rejects `-t NAME` without them.
+        gg_gate=$(mktemp "${TMPDIR:-/tmp}/monitorex-gate.XXXXXX")
         git show "$GG_PROT_REF:$GG_PLAN_GATE" > "$gg_gate"
         gg_rc=0; bash "$gg_gate" "$MSGFILE" "$@" || gg_rc=$?
         rm -f "$gg_gate"
@@ -157,14 +158,19 @@ JOURNAL="$LOCKDIR/journal"
 IDXPATH=$(git rev-parse --git-path index)          # per-worktree, NOT $COMMON/index
 case "$IDXPATH" in /*) ;; *) IDXPATH="$(pwd -P)/$IDXPATH" ;; esac
 IDXLOCK="$IDXPATH.lock"
-TOKEN=$(uuidgen)
+# uuidgen is optional on Debian/Ubuntu (uuid-runtime): fall back to the kernel, then Python.
+TOKEN=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null || python3 -c 'import uuid; print(uuid.uuid4())' 2>/dev/null || true)
+[ -n "$TOKEN" ] || die "cannot generate a lock token: no uuidgen, /proc/sys/kernel/random/uuid or python3"
 mkdir -p "$LOCKDIR"
 
 IDX=""; T=""; OWN_IDXLOCK=0; OWN_COMMIT_LOCK=0; PHASE=""; NEW=""
 
 sync_index_to() {   # $1 = commit-ish whose tree goes into the shared index
     local tmp
-    tmp=$(mktemp -t monitorex-idxcopy) || return 1
+    # Next to the index, not in $TMPDIR: the same filesystem keeps `mv` an atomic
+    # rename. Across filesystems (/tmp is often tmpfs on Linux) mv is copy+unlink,
+    # and a parallel `git status` could read a half-written shared index.
+    tmp=$(mktemp "$IDXPATH.monitorex.XXXXXX") || return 1
     if GIT_INDEX_FILE="$tmp" git read-tree "$1" 2>/dev/null && mv "$tmp" "$IDXPATH"; then
         return 0
     fi
@@ -259,7 +265,7 @@ stage_paths() {      # IDX/HEAD_START are variables; $@ — paths
     done
 }
 
-IDX=$(mktemp -t monitorex-idx)
+IDX=$(mktemp "${TMPDIR:-/tmp}/monitorex-idx.XXXXXX")
 GIT_INDEX_FILE="$IDX" git read-tree "$HEAD_START"
 stage_paths "$@"
 

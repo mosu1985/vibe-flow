@@ -358,8 +358,14 @@ while read -r local_ref local_sha remote_ref remote_sha; do
                 ALLOWDEL="$COMMON/monitorex-locks/delete-allow"
                 fresh=0
                 if [ -f "$ALLOWDEL" ]; then
-                    dage=$(( $(date +%s) - $(stat -f %m "$ALLOWDEL" 2>/dev/null || echo 0) ))
-                    [ "$dage" -lt 900 ] && fresh=1
+                    # GNU stat first, then BSD (GNU `stat -f %m` prints filesystem info
+                    # instead of failing). Unknown or future mtime = expired: fail-closed.
+                    dmt=$(stat -c %Y "$ALLOWDEL" 2>/dev/null || stat -f %m "$ALLOWDEL" 2>/dev/null || true)
+                    case "$dmt" in
+                      ''|*[!0-9]*) ;;
+                      *) dage=$(( $(date +%s) - dmt ))
+                         if [ "$dage" -ge -300 ] && [ "$dage" -lt 900 ]; then fresh=1; fi ;;
+                    esac
                 fi
                 # Check FILE BY FILE: a mark for two paths must not allow deleting
                 # a third one that happened to land in the same commit.

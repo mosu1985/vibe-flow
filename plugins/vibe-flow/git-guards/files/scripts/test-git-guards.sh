@@ -16,8 +16,21 @@ PASS=0; FAIL=0; FAILED=()
 ok()  { PASS=$((PASS+1)); echo "  ok   - $1"; }
 bad() { FAIL=$((FAIL+1)); FAILED+=("$1"); echo "  FAIL - $1: ${2:-}"; }
 
+# Shims placed first in PATH reproduce another platform's tools (GNU vs BSD,
+# Git Bash) on any machine. The body comes on stdin; @REAL_MKTEMP@ and
+# @REAL_CP@ are replaced with the real binaries so a shim can pass calls through.
+REAL_MKTEMP=$(command -v mktemp); REAL_CP=$(command -v cp)
+mkshim() {   # $1 = shim set name, $2 = tool name; body on stdin → $TMP/shim-$1/$2
+    # (not used inside $(...): bash 3.2 misparses a heredoc with `case` or `'` there)
+    local d="$TMP/shim-$1"; mkdir -p "$d"
+    { echo '#!/bin/sh'; sed -e "s#@REAL_MKTEMP@#$REAL_MKTEMP#g" -e "s#@REAL_CP@#$REAL_CP#g"; } > "$d/$2"
+    chmod +x "$d/$2"
+}
+
 mkrepo() {                     # $1 = path
-    mkdir -p "$1"; git -C "$1" init -q
+    # The branch is named explicitly: the fixtures must not depend on the
+    # machine's init.defaultBranch (git's own default is still `master`).
+    mkdir -p "$1"; git -C "$1" init -q; git -C "$1" symbolic-ref HEAD refs/heads/main
     git -C "$1" config user.email t@t; git -C "$1" config user.name t
     echo v1 > "$1/a.txt"; echo v1 > "$1/b.txt"
     printf '#!/bin/sh\necho hi\n' > "$1/s.sh"; chmod +x "$1/s.sh"
@@ -112,7 +125,7 @@ R6="$TMP/r6"; mkrepo "$R6"
 A=$(git -C "$R6" rev-parse HEAD)
 echo x > "$R6/c.txt"; git -C "$R6" add c.txt; git -C "$R6" commit -qm neighbour
 echo v2 > "$R6/a.txt"
-IDXF=$(mktemp -t idx); GIT_INDEX_FILE="$IDXF" git -C "$R6" read-tree "$A"
+IDXF=$(mktemp "${TMPDIR:-/tmp}/idx.XXXXXX"); GIT_INDEX_FILE="$IDXF" git -C "$R6" read-tree "$A"
 GIT_INDEX_FILE="$IDXF" git -C "$R6" add a.txt
 TREE=$(GIT_INDEX_FILE="$IDXF" git -C "$R6" write-tree)
 N=$(echo m | git -C "$R6" commit-tree "$TREE" -p "$A")
@@ -198,7 +211,7 @@ rm -f "$DEL"
 echo "== pre-push: ref matrix =="
 PP="$ROOT/githooks/pre-push"
 R8="$TMP/r8"; mkrepo "$R8"
-REMOTE="$TMP/remote.git"; git init -q --bare "$REMOTE"
+REMOTE="$TMP/remote.git"; git init -q --bare "$REMOTE"; git -C "$REMOTE" symbolic-ref HEAD refs/heads/main
 git -C "$R8" remote add origin "$REMOTE"
 git -C "$R8" push -q origin main 2>/dev/null
 R8GIT="$R8/.git"
@@ -414,7 +427,7 @@ out=$(commit "$RP" "edit" a.txt); rc=$?
 [ $rc -ne 0 ] && echo "$out" | grep -q 'nonexistent' && ok "GG_PLAN_GATE pointing to a nonexistent file — rejected" || bad "GG_PLAN_GATE without file" "$out"
 
 echo "== wt-new: the new branch's base is a fresh origin =="
-WO="$TMP/wo.git"; git init -q --bare "$WO"
+WO="$TMP/wo.git"; git init -q --bare "$WO"; git -C "$WO" symbolic-ref HEAD refs/heads/main
 W="$TMP/w"; mkrepo "$W"; git -C "$W" branch -M main
 git -C "$W" remote add origin "$WO"; git -C "$W" push -q origin main 2>/dev/null
 mkdir -p "$W/scripts/git-guards" "$W/githooks"
@@ -462,7 +475,7 @@ out=$(bash "$W/scripts/wt-new.sh" t6 2>&1); rc=$?
     && ok "no origin — base is local main" || bad "no origin" "$out"
 
 echo "== wt-new: dependencies, early fetch, fetch timeout =="
-DO="$TMP/do.git"; git init -q --bare "$DO"
+DO="$TMP/do.git"; git init -q --bare "$DO"; git -C "$DO" symbolic-ref HEAD refs/heads/main
 D="$TMP/d"; mkrepo "$D"; git -C "$D" branch -M main
 echo '{"name":"t","version":"1.0.0"}' > "$D/package.json"; echo '{"lock":1}' > "$D/package-lock.json"
 git -C "$D" add -A; git -C "$D" commit -qm deps
@@ -481,6 +494,17 @@ git -C "$DN" config user.email t@t; git -C "$DN" config user.name t
 out=$(bash "$D/scripts/wt-new.sh" d1 2>&1); rc=$?
 [ $rc -eq 0 ] && [ -f "$TMP/d-wt/d1/node_modules/from-main" ] && [ ! -f "$TMP/d-wt/d1/node_modules/.installed" ] \
     && ok "fresh packages in main — node_modules cloned" || bad "clone of fresh packages" "$out"
+# GNU cp has no clonefile flag: `cp -Rc` may copy part of the tree and then fail.
+# The fallback copy must start clean, not nest node_modules/node_modules.
+mkshim cp-partial cp <<'EOF'
+if [ "$1" = -Rc ]; then mkdir -p "$3"; echo partial > "$3/partial"; exit 1; fi
+exec @REAL_CP@ "$@"
+EOF
+CP_PART="$TMP/shim-cp-partial"
+out=$(PATH="$CP_PART:$PATH" bash "$D/scripts/wt-new.sh" cpfall 2>&1); rc=$?
+[ $rc -eq 0 ] && [ -f "$TMP/d-wt/cpfall/node_modules/from-main" ] && [ ! -e "$TMP/d-wt/cpfall/node_modules/node_modules" ] \
+    && [ ! -e "$TMP/d-wt/cpfall/node_modules/partial" ] \
+    && ok "clone fails half-way (GNU cp -Rc) — clean regular copy, no nested node_modules" || bad "partial cp -Rc" "$out"
 
 touch -t 202001010000 "$D/node_modules/.package-lock.json"   # main pulled without reinstalling
 out=$(bash "$D/scripts/wt-new.sh" d2 2>&1); rc=$?
@@ -537,7 +561,7 @@ kit_copy() {     # $1 = repo: the kit in project layout
     cp "$ROOT"/scripts/git-guards/*.py "$ROOT/scripts/git-guards/consumer-warn.sh" "$ROOT/scripts/git-guards/conf.sh" "$1/scripts/git-guards/"
     cp "$CH/monitorex-git-guard.sh" "$CH/monitorex_git_guard.py" "$1/.claude/hooks/"
 }
-sha_of() { printf '%s' "$1" | shasum -a 256 | cut -d' ' -f1; }
+sha_of() { { printf '%s' "$1" | sha256sum 2>/dev/null || printf '%s' "$1" | shasum -a 256; } | cut -d' ' -f1; }
 NOW_TS=$(date +%s)
 dead_pid() { sh -c 'exit 0' & local p=$!; wait "$p" 2>/dev/null; echo "$p"; }
 
@@ -578,7 +602,7 @@ out=$(bash "$PGB/scripts/install-git-guards.sh" 2>&1); rc=$?
     && ok "installer: origin without fetched refs — rc 0, warning, hooks and hooksPath untouched (no tree fallback)" \
     || bad "installer: origin without refs" "rc=$rc $out"
 # CI checkout of a PR: only refs/remotes/pull/N/merge, depth 1, no origin/main
-PGCI="$TMP/pg-ci"; git init -q "$PGCI"; git -C "$PGCI" remote add origin "$PGO"
+PGCI="$TMP/pg-ci"; git init -q "$PGCI"; git -C "$PGCI" symbolic-ref HEAD refs/heads/main; git -C "$PGCI" remote add origin "$PGO"
 git -C "$PGCI" fetch -q --depth=1 origin "+$(git -C "$PGR" rev-parse origin/main):refs/remotes/pull/1/merge" 2>/dev/null
 git -C "$PGCI" checkout -q --detach refs/remotes/pull/1/merge 2>/dev/null
 out=$(bash "$PGCI/scripts/install-git-guards.sh" 2>&1); rc=$?
@@ -817,15 +841,17 @@ gcase() {   # label expect(deny|allow) project tool key value cwd
 }
 PGL="$PGR/.git/monitorex-locks"
 gcase "Write into .git/monitorex-locks/release-gate/<tree>" deny "$PGR" Write file_path "$PGL/release-gate/abc" "$PGR"
-gcase "Write into monitorex-locks after cd /private/tmp (M5)" deny "$PGR" Write file_path "$PGL/release-gate/abc" /private/tmp
-gcase "NotebookEdit via notebook_path into .git (M5)" deny "$PGR" NotebookEdit notebook_path "$PGL/x.ipynb" /private/tmp
+# A cwd outside the repository, resolved: /private/tmp on macOS, /tmp on Linux.
+OUTSIDE=$(cd /tmp && pwd -P)
+gcase "Write into monitorex-locks after cd /tmp (M5)" deny "$PGR" Write file_path "$PGL/release-gate/abc" "$OUTSIDE"
+gcase "NotebookEdit via notebook_path into .git (M5)" deny "$PGR" NotebookEdit notebook_path "$PGL/x.ipynb" "$OUTSIDE"
 gcase "Write of a plan-approved mark" deny "$PGR" Write file_path "$PGL/plan-approved/p1.md" "$PGR"
 gcase "Bash echo > …/monitorex-locks/CONFIRM" deny "$PGR" Bash command "echo target=feat > $PGL/CONFIRM" "$PGR"
 gcase "Bash rm in monitorex-locks/" deny "$PGR" Bash command "rm -rf .git/monitorex-locks/claims/issue-7" "$PGR"
 gcase "git -c url.X.insteadOf=Y fetch origin (C1-r2)" deny "$PGR" Bash command "git -c url.X.insteadOf=Y fetch origin" "$PGR"
 gcase "nice scripts/git-confirm.sh feat (L6)" deny "$PGR" Bash command "nice scripts/git-confirm.sh feat" "$PGR"
 gcase "git remote set-head origin x" deny "$PGR" Bash command "git remote set-head origin x" "$PGR"
-gcase "Write …/memory/x.md (H6: memory stays writable)" allow "$PGR" Write file_path "$TMP/home/.claude/projects/-p/memory/x.md" /private/tmp
+gcase "Write …/memory/x.md (H6: memory stays writable)" allow "$PGR" Write file_path "$TMP/home/.claude/projects/-p/memory/x.md" "$OUTSIDE"
 gcase "Write lib/x.ts in the project" allow "$PGR" Write file_path "$PGR/lib/x.ts" "$PGR"
 gcase "git push with installed hooks equal to origin" allow "$PGR" Bash command "git push origin HEAD" "$PGR"
 echo '# rolled back by an old tree' >> "$PGH/pre-push"
@@ -897,7 +923,7 @@ out=$(commit "$PGK" "[fix]: canonical" a.txt); rc=$?
 [ $rc -eq 0 ] && ok "canonical plan-gate.sh through GG_PLAN_GATE — lets [fix] through" || bad "canonical gate [fix]" "$out"
 
 echo "== plan-approved.sh: the approval mark (PostToolUse ExitPlanMode) =="
-PA="$TMP/pa"; git init -q "$PA"; git -C "$PA" config user.email t@t; git -C "$PA" config user.name t
+PA="$TMP/pa"; git init -q "$PA"; git -C "$PA" symbolic-ref HEAD refs/heads/main; git -C "$PA" config user.email t@t; git -C "$PA" config user.name t
 PAM="$PA/.git/monitorex-locks/plan-approved"
 mkdir -p "$TMP/pa-out"
 PA_GOOD=$'# План\n\n## 🧑‍⚖️ Внешнее ревью Codex — раунд 1\n\nГейт: ✅ пройден — ok\n'
@@ -1274,8 +1300,12 @@ out=$(iw GH_STUB=noauth bash "$IW/scripts/wt-new.sh" --issue 6 2>&1); rc=$?
 T0=$SECONDS; out=$(iw GH_STUB=hang bash "$IW/scripts/wt-new.sh" --issue 6 2>&1); rc=$?; T=$((SECONDS-T0))
 [ $rc -eq 1 ] && [ $T -lt 12 ] && echo "$out" | grep -q 'did not answer within 2s' && ok "hanging gh — cut off by GG_ISSUE_TIMEOUT (${T}s)" || bad "hanging gh" "rc=$rc ${T}s $out"
 NOGH="$TMP/nogh"; mkdir -p "$NOGH"
+# Every system tool except gh: CI runners and some distros keep gh in /usr/bin itself.
+for d in /usr/bin /bin /usr/sbin /sbin; do
+    for f in "$d"/*; do n=${f##*/}; [ "$n" = gh ] || [ -e "$NOGH/$n" ] || ln -s "$f" "$NOGH/$n"; done
+done
 for t in git python3; do ln -sf "$(command -v $t)" "$NOGH/$t"; done
-out=$(env PATH="$NOGH:/usr/bin:/bin:/usr/sbin:/sbin" bash "$IW/scripts/wt-new.sh" --issue 6 2>&1); rc=$?
+out=$(env PATH="$NOGH" bash "$IW/scripts/wt-new.sh" --issue 6 2>&1); rc=$?
 [ $rc -eq 1 ] && echo "$out" | grep -q 'gh (GitHub CLI) not found' && ok "no gh in PATH — refused with an install hint" || bad "no gh" "$out"
 
 out=$(iw GH_STUB=open GH_TITLE='Исправить вход 🚀 Login page' bash "$IW/scripts/wt-new.sh" --issue 20 2>&1); rc=$?
@@ -1850,6 +1880,229 @@ out=$( cd "$EP" && bash scripts/release-gate.sh scope 2>&1 ); rc=$?
 [ $rc -eq 0 ] && echo "$out" | grep -q 'files for review' && ok "release-gate: SKIP=\" \" — even a docs-only diff needs review" || bad "release-gate: SKIP space" "rc=$rc $out"
 out=$(pg_push "$EP" wt/ep-skip); rc=$?
 [ $rc -ne 0 ] && echo "$out" | grep -q 'has not passed final review' && ok "pre-push: SKIP=\" \" — a docs-only push needs a verdict" || bad "pre-push: SKIP space" "rc=$rc $out"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Portability: GNU vs BSD tools, the guard in a subdirectory, native Windows.
+# Linux, WSL and Git Bash ship GNU tools: `mktemp -t NAME` without X's fails
+# ("too few X's") and `stat -f %m` prints filesystem info instead of an mtime.
+# The shims reproduce that on any machine, so these cases are red/green on
+# macOS too, not only in CI.
+# ═════════════════════════════════════════════════════════════════════════════
+echo "== portability: safe-commit and git-lock under GNU mktemp, without uuidgen =="
+mkshim mktemp-gnu mktemp <<'EOF'
+t=""
+for a in "$@"; do
+    case "$a" in
+        -t) echo "mktemp: too few X's in template" >&2; exit 1 ;;
+        -*) ;;
+        *) t="$a" ;;
+    esac
+done
+case "$t" in ""|*XXX*) exec @REAL_MKTEMP@ "$@" ;; esac
+echo "mktemp: too few X's in template '$t'" >&2; exit 1
+EOF
+S_MKT="$TMP/shim-mktemp-gnu"
+mkshim no-uuidgen uuidgen <<'EOF'
+exit 127
+EOF
+S_NOUUID="$TMP/shim-no-uuidgen"
+PT="$TMP/port-sc"; mkrepo "$PT"
+echo v2 > "$PT/a.txt"; echo foreign > "$PT/b.txt"
+out=$(PATH="$S_MKT:$PATH" commit "$PT" "edit a under GNU mktemp" a.txt); rc=$?
+[ $rc -eq 0 ] && [ "$(git -C "$PT" show --name-only --format='' HEAD)" = "a.txt" ] && [ -z "$(git -C "$PT" status --porcelain a.txt)" ] \
+    && ok "safe-commit under GNU mktemp (-t rejected) — commits exactly a.txt, index in sync" || bad "safe-commit under GNU mktemp" "$out"
+[ -z "$(ls -A "$PT/.git" | grep '^index\.monitorex\.')" ] && ok "safe-commit: no temporary index left next to .git/index" || bad "temp index left" "$(ls -A "$PT/.git")"
+echo v3 > "$PT/a.txt"
+out=$(PATH="$S_NOUUID:$PATH" commit "$PT" "edit a without uuidgen" a.txt); rc=$?
+[ $rc -eq 0 ] && git -C "$PT" log -1 --format='%(trailers:key=Session-Id)' | grep -q test \
+    && ok "safe-commit without uuidgen (optional uuid-runtime on Debian/Ubuntu) — commits" || bad "safe-commit without uuidgen" "$out"
+
+PLK="$TMP/port-lock"; mkrepo "$PLK"
+echo v2 > "$PLK/a.txt"; git -C "$PLK" add a.txt          # the index no longer matches HEAD
+mkdir -p "$PLK/.git/monitorex-locks"
+printf 'phase=post-cas\nbranch=main\nold=%s\nnew=%s\n' "$(git -C "$PLK" rev-parse HEAD)" "$(git -C "$PLK" rev-parse HEAD)" > "$PLK/.git/monitorex-locks/journal"
+out=$( cd "$PLK" && echo yes | PATH="$S_MKT:$PATH" bash "$GL" release 2>&1 ); rc=$?
+[ $rc -eq 0 ] && echo "$out" | grep -q 'index reset to' && git -C "$PLK" diff --cached --quiet && [ ! -f "$PLK/.git/monitorex-locks/journal" ] \
+    && [ -z "$(ls -A "$PLK/.git" | grep '^index\.monitorex\.')" ] \
+    && ok "git-lock release in post-cas under GNU mktemp — index repaired, no temp left" || bad "git-lock release repair" "$out"
+
+echo "== portability: sha256 with only sha256sum or only shasum =="
+mkshim no-sha256sum sha256sum <<'EOF'
+exit 127
+EOF
+H_NOSHA="$TMP/shim-no-sha256sum"
+mkshim no-shasum shasum <<'EOF'
+exit 127
+EOF
+H_NOSHASUM="$TMP/shim-no-shasum"
+ABC=ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+[ "$(PATH="$H_NOSHA:$PATH" sha_of abc)" = "$ABC" ] && [ "$(PATH="$H_NOSHASUM:$PATH" sha_of abc)" = "$ABC" ] \
+    && ok "sha_of: the same digest with only shasum or only sha256sum" || bad "sha_of fallback" "$(PATH="$H_NOSHASUM:$PATH" sha_of abc)"
+IGS="$TMP/port-igs"; mkrepo "$IGS"; kit_copy "$IGS"
+( cd "$IGS" && PATH="$H_NOSHASUM:$PATH" bash scripts/install-git-guards.sh ) >/dev/null 2>&1
+want=$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$IGS/.git/monitorex-hooks/pre-push" 2>/dev/null)
+[ -n "$want" ] && [ "$(cat "$IGS/.git/monitorex-hooks/pre-push.sha256" 2>/dev/null)" = "$want" ] \
+    && ok "install-git-guards: hook digest written without shasum" || bad "install-git-guards digest without shasum" "want=$want got=$(cat "$IGS/.git/monitorex-hooks/pre-push.sha256" 2>/dev/null)"
+
+echo "== portability: a bypass mark's age is fail-closed (stat empty / junk / GNU / BSD / future) =="
+PY_MTIME='import os,sys; print(int(os.stat(sys.argv[1]).st_mtime))'
+mkshim stat-empty stat <<'EOF'
+exit 1
+EOF
+S_EMPTY="$TMP/shim-stat-empty"
+mkshim stat-junk stat <<'EOF'
+echo "  File: \"$3\""; echo "    ID: 0        Namelen: 255     Type: ext2/ext3"; exit 0
+EOF
+S_JUNK="$TMP/shim-stat-junk"
+mkshim stat-gnu stat <<EOF
+if [ "\$1" = -c ] && [ "\$2" = %Y ]; then exec python3 -c '$PY_MTIME' "\$3"; fi
+echo "  File: \"\$3\""; echo "stat: cannot read file system information for '%m'" >&2; exit 1
+EOF
+S_GNU="$TMP/shim-stat-gnu"
+mkshim stat-bsd stat <<EOF
+if [ "\$1" = -f ] && [ "\$2" = %m ]; then exec python3 -c '$PY_MTIME' "\$3"; fi
+echo "stat: illegal option -- c" >&2; exit 1
+EOF
+S_BSD="$TMP/shim-stat-bsd"
+FUTURE=209901010000   # touch -t: an mtime decades ahead (clock skew, restored backup)
+
+# pre-commit: the one-off commit mark (CONFIRM target=commit)
+pc_case() {   # label shim-dir(or "") touch-arg(or "") expect(honored|refused)
+    local r="$TMP/port-pc-$1" f out got
+    mkrepo "$r"; f="$r/.git/monitorex-locks/CONFIRM"; mkdir -p "${f%/*}"
+    printf 'target=commit\nts=x\n' > "$f"; [ -n "$3" ] && touch -t "$3" "$f"
+    out=$( cd "$r" && PATH="${2:+$2:}$PATH" sh "$HOOK" 2>&1 )
+    if echo "$out" | grep -q 'forbidden'; then got=refused; else got=honored; fi
+    if [ "$got" = "$4" ] && { { [ "$4" = honored ] && [ ! -f "$f" ]; } || { [ "$4" = refused ] && [ -f "$f" ]; }; }; then
+        ok "pre-commit mark, $1 — $4$([ "$4" = refused ] && echo ', not consumed')"
+    else bad "pre-commit mark, $1 — $4" "got $got, mark $([ -f "$f" ] && echo kept || echo consumed): $out"; fi
+}
+pc_case "stat prints nothing" "$S_EMPTY" "" refused
+pc_case "stat prints junk" "$S_JUNK" "" refused
+pc_case "GNU stat, fresh" "$S_GNU" "" honored
+pc_case "BSD stat, fresh" "$S_BSD" "" honored
+pc_case "GNU stat, expired" "$S_GNU" 202001010000 refused
+pc_case "mtime in the future" "" "$FUTURE" refused
+
+# pre-push: the delete-allow mark (deleting files from the protected branch)
+PD="$TMP/port-pd"; mkrepo "$PD"
+PDO="$TMP/port-pd.git"; git init -q --bare "$PDO"; git -C "$PDO" symbolic-ref HEAD refs/heads/main
+git -C "$PD" remote add origin "$PDO"; git -C "$PD" push -q origin main 2>/dev/null; git -C "$PD" fetch -q origin
+mkdir -p "$PD/.git/monitorex-hooks" "$PD/.git/monitorex-locks"
+cp "$PP" "$PD/.git/monitorex-hooks/pre-push"; git -C "$PD" config core.hooksPath "$PD/.git/monitorex-hooks"
+PDR=$(git -C "$PD" rev-parse origin/main)
+git -C "$PD" rm -q b.txt; printf 'remove b\n\nSession-Id: port-sess\n' > "$TMP/port-pd-msg"
+git -C "$PD" commit -q -F "$TMP/port-pd-msg"; PDS=$(git -C "$PD" rev-parse HEAD)
+PDM="$PD/.git/monitorex-locks/delete-allow"
+pd_case() {   # label shim-dir(or "") touch-arg(or "") expect(honored|refused)
+    local out got
+    printf 'b.txt\n' > "$PDM"; [ -n "$3" ] && touch -t "$3" "$PDM"
+    out=$( cd "$PD" && printf '%s\n' "refs/heads/main $PDS refs/heads/main $PDR" \
+        | PATH="${2:+$2:}$PATH" CLAUDE_CODE_SESSION_ID= MONITOREX_ACTOR=port-sess sh "$PD/.git/monitorex-hooks/pre-push" origin "$PDO" 2>&1 )
+    if echo "$out" | grep -q 'Deletion confirmed by a mark'; then got=honored
+    elif echo "$out" | grep -q 'DELETES files'; then got=refused; else got=error; fi
+    if [ "$got" = "$4" ] && { { [ "$4" = honored ] && [ ! -f "$PDM" ]; } || { [ "$4" = refused ] && [ -f "$PDM" ]; }; }; then
+        ok "pre-push delete-allow mark, $1 — $4$([ "$4" = refused ] && echo ', not consumed')"
+    else bad "pre-push delete-allow mark, $1 — $4" "got $got, mark $([ -f "$PDM" ] && echo kept || echo consumed): $out"; fi
+    rm -f "$PDM"
+}
+pd_case "real stat, fresh" "" "" honored
+pd_case "stat prints nothing" "$S_EMPTY" "" refused
+pd_case "stat prints junk" "$S_JUNK" "" refused
+pd_case "GNU stat, fresh" "$S_GNU" "" honored
+pd_case "GNU stat, expired" "$S_GNU" 202001010000 refused
+pd_case "mtime in the future" "" "$FUTURE" refused
+
+# plan-gate.sh: the human feat mark (CONFIRM target=feat), early mode
+PGTC="$PGT/.git/monitorex-locks/CONFIRM"; mkdir -p "${PGTC%/*}"
+pg_case() {   # label shim-dir(or "") touch-arg(or "") expect(honored|refused)
+    local rc got
+    printf 'target=feat\n' > "$PGTC"; [ -n "$3" ] && touch -t "$3" "$PGTC"
+    PATH="${2:+$2:}$PATH" pgt '[feat]: x'; rc=$?
+    if [ $rc -eq 0 ]; then got=honored; else got=refused; fi
+    [ "$got" = "$4" ] && ok "plan-gate feat mark, $1 — $4" || bad "plan-gate feat mark, $1 — $4" "rc=$rc"
+    rm -f "$PGTC"
+}
+pg_case "real stat, fresh" "" "" honored
+pg_case "stat prints nothing" "$S_EMPTY" "" refused
+pg_case "stat prints junk" "$S_JUNK" "" refused
+pg_case "GNU stat, fresh" "$S_GNU" "" honored
+pg_case "BSD stat, fresh" "$S_BSD" "" honored
+pg_case "BSD stat, expired" "$S_BSD" 202001010000 refused
+pg_case "mtime in the future" "" "$FUTURE" refused
+
+# Display-only sites: no arithmetic error, the age is shown as unknown
+GCF="$TMP/port-gc"; mkrepo "$GCF"; GCM="$GCF/.git/monitorex-locks/CONFIRM"; mkdir -p "${GCM%/*}"; printf 'target=feat\n' > "$GCM"
+out=$( cd "$GCF" && PATH="$S_JUNK:$PATH" bash "$ROOT/scripts/git-confirm.sh" status 2>&1 ); rc=$?
+[ $rc -eq 0 ] && echo "$out" | grep -q 'unknown' && echo "$out" | grep -q 'treated as absent' \
+    && ok "git-confirm.sh status: unreadable age — 'unknown, treated as absent'" || bad "git-confirm status junk stat" "rc=$rc $out"
+out=$( cd "$GCF" && PATH="$S_GNU:$PATH" bash "$ROOT/scripts/git-confirm.sh" status 2>&1 ); rc=$?
+[ $rc -eq 0 ] && echo "$out" | grep -q '^mark: ' && ok "git-confirm.sh status under GNU stat — fresh mark shown" || bad "git-confirm status GNU" "rc=$rc $out"
+GDM="$GCF/.git/monitorex-locks/delete-allow"; printf 'b.txt\n' > "$GDM"
+out=$( cd "$GCF" && PATH="$S_JUNK:$PATH" bash "$ROOT/scripts/git-allow-delete.sh" list 2>&1 ); rc=$?
+[ $rc -eq 0 ] && echo "$out" | grep -q 'treated as absent' && ok "git-allow-delete.sh list: unreadable age — treated as absent" || bad "git-allow-delete list junk stat" "rc=$rc $out"
+mkdir -p "$GCF/.git/monitorex-locks/commit"; printf 'actor=x\npurpose=take\nworktree=/w\n' > "$GCF/.git/monitorex-locks/commit/owner"
+out=$( cd "$GCF" && PATH="$S_JUNK:$PATH" bash "$GL" status 2>&1 ); rc=$?
+[ $rc -eq 0 ] && echo "$out" | grep -q 'age ?' && ok "git-lock.sh status: unreadable age — shown as '?'" || bad "git-lock status junk stat" "rc=$rc $out"
+rm -rf "$GCF/.git/monitorex-locks/commit"
+
+echo "== portability: the guard in a subdirectory of the main tree =="
+# --git-dir comes back absolute and --git-common-dir relative (../../.git) in a
+# subdirectory: comparing the raw strings took the main tree for a linked worktree.
+GSD="$TMP/port-gsd"; mkrepo "$GSD"; mkdir -p "$GSD/sub/deep"
+git -C "$GSD" worktree add -q "$TMP/port-gsd-wt" -b wt/gsd >/dev/null 2>&1; mkdir -p "$TMP/port-gsd-wt/sub"
+gcase "git add from a subdirectory of the main tree" deny "$GSD" Bash command "git add a.txt" "$GSD/sub/deep"
+gcase "cd sub/deep && git add in the main tree" deny "$GSD" Bash command "cd sub/deep && git add a.txt" "$GSD"
+gcase "git -C <main>/sub/deep add" deny "$GSD" Bash command "git -C $GSD/sub/deep add a.txt" "$OUTSIDE"
+gcase "git add from a subdirectory of a linked worktree" allow "$GSD" Bash command "git add a.txt" "$TMP/port-gsd-wt/sub"
+gcase "git add at the root of a linked worktree" allow "$GSD" Bash command "git add a.txt" "$TMP/port-gsd-wt"
+
+if [ -n "$KIT" ]; then
+    echo "== portability: native Windows stop and a failed detect (installer) =="
+    FW="$TMP/fakekit-win"; mkdir -p "$FW"
+    cp -R "$KIT/files" "$FW/files"; cp "$KIT/detect.py" "$KIT/settings-merge.py" "$FW/"
+    sed "s#/tmp/gg-accept.log#$TMP/gg-accept.log#g" "$KIT/install.sh" > "$FW/install.sh"
+    printf '#!/usr/bin/env bash\necho "  passed: 1   failed: 0"\n' > "$FW/files/scripts/test-git-guards.sh"
+    untouched() { [ -z "$(git -C "$1" status --porcelain)" ] && [ ! -e "$1/.gitguards.conf" ] && [ ! -e "$1/scripts" ] && [ ! -e "$1/githooks" ] && [ ! -e "$1/CLAUDE.md" ]; }
+    for u in MINGW64_NT-10.0-26200 MSYS_NT-10.0-26200 CYGWIN_NT-10.0-26200; do
+        k=${u%%_*}
+        mkshim "uname-$k" uname <<EOF
+echo $u
+EOF
+        US="$TMP/shim-uname-$k"
+        WR="$TMP/port-win-$k"; mkrepo "$WR"
+        out=$(env -u GG_ALLOW_UNSUPPORTED_OS -u GITHUB_ACTIONS PATH="$US:$PATH" GG_EMBEDDED=1 bash "$FW/install.sh" "$WR" 2>&1); rc=$?
+        [ $rc -ne 0 ] && echo "$out" | grep -q 'WSL 2' && untouched "$WR" \
+            && ok "install.sh on $k — stops with the WSL steps, repository untouched" || bad "install.sh on $k" "rc=$rc $out"
+    done
+    US="$TMP/shim-uname-MINGW64"
+    FP="$TMP/fakeplugin"; mkdir -p "$FP"
+    cp -R "$KIT/../scripts" "$KIT/../templates" "$KIT/../.claude-plugin" "$FP/"; cp -R "$FW" "$FP/git-guards"
+    WI="$TMP/port-win-init"; mkrepo "$WI"
+    out=$(env -u GG_ALLOW_UNSUPPORTED_OS -u GITHUB_ACTIONS PATH="$US:$PATH" bash "$FP/scripts/init.sh" "$WI" 2>&1); rc=$?
+    [ $rc -ne 0 ] && echo "$out" | grep -q 'WSL 2' && untouched "$WI" \
+        && ok "init.sh on MINGW64 — stops before any write" || bad "init.sh on MINGW64" "rc=$rc $out"
+    NG="$TMP/port-notgit"; mkdir -p "$NG"
+    out=$(env -u GITHUB_ACTIONS GG_ALLOW_UNSUPPORTED_OS=1 PATH="$US:$PATH" bash "$FW/install.sh" "$NG" 2>&1); rc=$?
+    [ $rc -ne 0 ] && echo "$out" | grep -q 'WSL 2' && ok "GG_ALLOW_UNSUPPORTED_OS alone (outside CI) — still stops" || bad "override outside CI" "rc=$rc $out"
+    out=$(env -u GITHUB_ACTIONS GG_ALLOW_UNSUPPORTED_OS=1 PATH="$US:$PATH" bash "$FP/scripts/init.sh" "$NG" 2>&1); rc=$?
+    [ $rc -ne 0 ] && echo "$out" | grep -q 'WSL 2' && ok "init.sh: GG_ALLOW_UNSUPPORTED_OS alone — still stops" || bad "init override outside CI" "rc=$rc $out"
+    out=$(GITHUB_ACTIONS=true GG_ALLOW_UNSUPPORTED_OS=1 PATH="$US:$PATH" bash "$FW/install.sh" "$NG" 2>&1); rc=$?
+    ! echo "$out" | grep -q 'WSL 2' && echo "$out" | grep -q 'unsupported OS' && echo "$out" | grep -q 'not a git repository' \
+        && ok "override inside CI — passes the stop with a warning banner" || bad "override in CI" "rc=$rc $out"
+
+    FD="$TMP/fakekit-baddetect"; cp -R "$FW" "$FD"
+    printf 'import sys\nprint("GG_PARTIAL=1")\nsys.exit(1)\n' > "$FD/detect.py"
+    DR="$TMP/port-detect"; mkrepo "$DR"
+    out=$(GG_EMBEDDED=1 bash "$FD/install.sh" "$DR" 2>&1); rc=$?
+    [ $rc -ne 0 ] && [ ! -e "$DR/.gitguards.conf" ] && ok "install.sh: detect fails — no half-written .gitguards.conf left" || bad "failed detect" "rc=$rc $(ls -A "$DR")"
+    out=$(GG_EMBEDDED=1 bash "$FW/install.sh" "$DR" 2>&1); rc=$?
+    [ $rc -eq 0 ] && grep -q '^GG_PROTECTED=' "$DR/.gitguards.conf" && ! grep -q GG_PARTIAL "$DR/.gitguards.conf" \
+        && ok "install.sh rerun after a failed detect — config written" || bad "rerun after failed detect" "rc=$rc $out"
+
+    [ "$(git -C "$KIT" check-attr eol -- files/scripts/wt-new.sh | sed 's/.*: //')" = lf ] \
+        && ok ".gitattributes: scripts check out with LF on any core.autocrlf" || bad ".gitattributes eol" "$(git -C "$KIT" check-attr eol -- files/scripts/wt-new.sh)"
+fi
 
 # Project tests: scripts/git-guards/test-local-*.sh. They are added by the project
 # itself, not by install.sh — so updating the kit does not overwrite them. All helpers are visible to them.
