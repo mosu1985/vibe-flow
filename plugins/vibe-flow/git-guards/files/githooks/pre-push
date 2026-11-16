@@ -9,8 +9,70 @@
 
 set -e
 
+# This hook runs standalone from $GIT_COMMON_DIR/monitorex-hooks and cannot source
+# scripts/git-guards/paths.sh: the block is inlined (test-git-guards.sh checks that it
+# is byte-identical to the source).
+# >>> gg-inline:paths >>>
+# Path helpers (vibe-flow 1.3.0; source: scripts/git-guards/paths.sh — keep copies identical).
+# MSYS mode = Git for Windows / MSYS2 / Cygwin uname AND cygpath on PATH; else POSIX.
+_gg_msys_v=""
+_gg_msys() {
+    if [ -z "$_gg_msys_v" ]; then
+        _gg_msys_v=posix
+        case "$(uname -s 2>/dev/null)" in
+            MINGW*|MSYS*|CYGWIN*) if command -v cygpath >/dev/null 2>&1; then _gg_msys_v=msys; fi ;;
+        esac
+    fi
+    [ "$_gg_msys_v" = msys ]
+}
+# gg_is_abs PATH: 0 for /…, X:/…, X:\… on any OS.
+gg_is_abs() {
+    case "${1-}" in /*|[A-Za-z]:/*|[A-Za-z]:\\*) return 0 ;; esac
+    return 1
+}
+# gg_path [BASE] PATH: the physical absolute path. A relative PATH resolves against
+# BASE, else $PWD; a missing tail is kept on the deepest existing ancestor. MSYS:
+# the C:/Long/Form git prints. rc 1 and no output on failure.
+gg_path() {
+    if [ $# -ge 2 ]; then _gg_b=$1; _gg_p=$2; else _gg_b=""; _gg_p=${1-}; fi
+    [ -n "$_gg_p" ] || return 1
+    if _gg_msys; then
+        case "$_gg_p" in [A-Za-z]:*) _gg_p=$(cygpath -u "$_gg_p" 2>/dev/null) || return 1 ;; esac
+        case "$_gg_b" in [A-Za-z]:*) _gg_b=$(cygpath -u "$_gg_b" 2>/dev/null) || return 1 ;; esac
+    fi
+    case "$_gg_p" in /*) ;; *) _gg_p="${_gg_b:-.}/$_gg_p" ;; esac
+    case "$_gg_p" in /*) ;; *) _gg_p="$PWD/$_gg_p" ;; esac
+    while :; do case "$_gg_p" in ?*/) _gg_p=${_gg_p%/} ;; *) break ;; esac; done
+    _gg_t=""
+    while [ ! -d "$_gg_p" ]; do
+        case "$_gg_p" in */*) ;; *) return 1 ;; esac
+        _gg_t="/${_gg_p##*/}$_gg_t"; _gg_p=${_gg_p%/*}
+        [ -n "$_gg_p" ] || _gg_p=/
+    done
+    _gg_p=$(cd "$_gg_p" 2>/dev/null && pwd -P) || return 1
+    case "$_gg_p" in */) _gg_p=${_gg_p%/} ;; esac
+    _gg_p="$_gg_p$_gg_t"
+    [ -n "$_gg_p" ] || _gg_p=/
+    if _gg_msys; then _gg_p=$(cygpath -alm "$_gg_p" 2>/dev/null) || return 1; fi
+    [ -n "$_gg_p" ] || return 1
+    printf '%s\n' "$_gg_p"
+}
+# gg_blob REV PATH: the file PATH at revision REV (repository of the current
+# directory) on stdout. 0 found, 1 absent (the tree has no such path), 2 error.
+# ls-tree + cat-file: no <rev>:<path> argument for MSYS to rewrite;
+# --no-replace-objects: a `git replace` cannot swap what is read. Silent.
+gg_blob() {
+    _gg_l=$(git --no-replace-objects ls-tree --full-tree "$1" -- "$2" 2>/dev/null) || return 2
+    [ -n "$_gg_l" ] || return 1
+    _gg_ty=${_gg_l#* }; _gg_sha=${_gg_ty#* }; _gg_ty=${_gg_ty%% *}
+    _gg_sha=${_gg_sha%%[!0-9a-f]*}
+    [ "$_gg_ty" = blob ] && [ -n "$_gg_sha" ] || return 2
+    git --no-replace-objects cat-file blob "$_gg_sha" 2>/dev/null || return 2
+}
+# <<< gg-inline:paths <<<
+
 COMMON=$(git rev-parse --git-common-dir)
-case "$COMMON" in /*) ;; *) COMMON="$(cd "$COMMON" && pwd -P)" ;; esac
+gg_is_abs "$COMMON" || COMMON=$(gg_path "$COMMON")
 ZERO="0000000000000000000000000000000000000000"
 
 # ── Project configuration ────────────────────────────────────────────────────
@@ -90,12 +152,27 @@ elif [ -f "$MAIN_CONF" ]; then
 fi
 
 # Policy text: the protected branch's config on origin, else the main working tree's.
+# Read with gg_blob (no <rev>:<path> argument — MSYS rewrote it, and the silent
+# failure fell back to the tree's copy). Absent on origin (a project adopting the
+# kit) → the main working tree's text. A read ERROR is not "absent" (Codex C1): the
+# built-in defaults below switch the release gate, the plan gate and the type check
+# off, and the tree's copy is whatever the branch wants — so the push stops.
 POLICY=""
 POLICY_FROM_ORIGIN=0
-if [ -n "$PROT_REF" ] && POLICY=$(git show "$PROT_REF:.gitguards.conf" 2>/dev/null); then
+_prc=1
+if [ -n "$PROT_REF" ]; then
+    _prc=0; POLICY=$(gg_blob "$PROT_REF" .gitguards.conf) || _prc=$?
+fi
+if [ "$_prc" = 0 ]; then
     POLICY_FROM_ORIGIN=1
-elif [ -f "$MAIN_CONF" ]; then
-    POLICY=$(cat "$MAIN_CONF")
+elif [ "$_prc" = 1 ]; then
+    POLICY=""
+    if [ -f "$MAIN_CONF" ]; then POLICY=$(cat "$MAIN_CONF"); fi
+else
+    echo "" >&2
+    echo "🔴 policy from ${PROT_REF#refs/remotes/} unreadable — run: git fetch origin; if it persists, report it" >&2
+    echo "" >&2
+    exit 1
 fi
 pol() { printf '%s\n' "$POLICY" | conf_get "$1"; }
 
@@ -137,11 +214,12 @@ ACTOR="${CLAUDE_CODE_SESSION_ID:-${MONITOREX_ACTOR:-}}"
 # then a worktree from an old base would bypass the guard.
 # Compare RESOLVED paths, not strings: on macOS /var/folders is a symlink to
 # /private/var, and the same directory yields two different strings.
+# gg_path also folds Windows' spellings (C:/…, /c/…) into one.
 HP=$(git config core.hooksPath || echo "")
 HP_R=""
-[ -n "$HP" ] && HP_R=$(cd "$HP" 2>/dev/null && pwd -P || echo "")
+[ -n "$HP" ] && HP_R=$(gg_path "$HP" 2>/dev/null || echo "")
 EXPECT="$COMMON/monitorex-hooks"
-EXPECT_R=$(cd "$EXPECT" 2>/dev/null && pwd -P || echo "$EXPECT")
+EXPECT_R=$(gg_path "$EXPECT" 2>/dev/null || echo "$EXPECT")
 if [ "$HP_R" != "$EXPECT_R" ]; then
      echo ""
      echo "🔴 core.hooksPath is not canonical: '${HP:-not set}'"

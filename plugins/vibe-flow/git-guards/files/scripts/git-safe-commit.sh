@@ -27,6 +27,14 @@ die() { printf '\n🔴 %s\n\n' "$*" >&2; exit 1; }
 warn() { printf '⚠️  %s\n' "$*" >&2; }
 info() { printf '   %s\n' "$*" >&2; }
 
+# Path, policy-blob and Python helpers of the kit (scripts/git-guards/): gg_path,
+# gg_is_abs, gg_blob, gg_python. They live in the same tree as this script.
+for gg_lib in paths.sh pyenv.sh; do
+    [ -f "$SCRIPT_DIR/git-guards/$gg_lib" ] \
+        || die "scripts/git-guards/$gg_lib missing — the kit in this tree is incomplete: reinstall it (/vibe-flow:init)"
+    . "$SCRIPT_DIR/git-guards/$gg_lib"
+done
+
 # ─── 0. Parse the CLI BEFORE anything else ──────────────────────────────────
 # Otherwise `--message-file` ends up in the pathspec and MSGFILE stays unset.
 MSGFILE=""
@@ -55,7 +63,7 @@ done
 # the main working tree. Same parser as githooks/pre-push and plan-gate.sh.
 GG_TOP=$(git rev-parse --show-toplevel 2>/dev/null || echo .)
 GG_COMMON=$(git rev-parse --git-common-dir)
-case "$GG_COMMON" in /*) ;; *) GG_COMMON="$(cd "$GG_COMMON" && pwd -P)" ;; esac
+gg_is_abs "$GG_COMMON" || GG_COMMON=$(gg_path "$GG_COMMON")
 GG_MAIN_CONF="$(dirname "$GG_COMMON")/.gitguards.conf"
 
 conf_raw() {       # $1 key; stdin — config text; value of the last KEY= line
@@ -92,12 +100,20 @@ if git remote get-url origin >/dev/null 2>&1; then
         fi
     done
 fi
-GG_POLICY=""
-if [ -n "$GG_PROT_REF" ] && GG_POLICY=$(git show "$GG_PROT_REF:.gitguards.conf" 2>/dev/null); then
-    :
-elif [ -f "$GG_MAIN_CONF" ]; then
-    GG_POLICY=$(cat "$GG_MAIN_CONF")
+# gg_blob: absent on origin → the main working tree's text; a read ERROR is not
+# "absent" (K8): the tree's copy and the defaults would drop the gate — refuse.
+gg_unreadable() {
+    die "policy from ${GG_PROT_REF#refs/remotes/} unreadable — run: git fetch origin; if it persists, report it"
+}
+GG_POLICY=""; gg_prc=1
+if [ -n "$GG_PROT_REF" ]; then
+    gg_prc=0; GG_POLICY=$(gg_blob "$GG_PROT_REF" .gitguards.conf) || gg_prc=$?
 fi
+case "$gg_prc" in
+    0) ;;
+    1) GG_POLICY=""; if [ -f "$GG_MAIN_CONF" ]; then GG_POLICY=$(cat "$GG_MAIN_CONF"); fi ;;
+    *) gg_unreadable ;;
+esac
 GG_TEST_CMD=$(printf '%s\n' "$GG_POLICY" | conf_get GG_TEST_CMD) || GG_TEST_CMD=""
 GG_PLAN_GATE=$(printf '%s\n' "$GG_POLICY" | conf_get GG_PLAN_GATE) || GG_PLAN_GATE=""
 
@@ -115,10 +131,15 @@ GG_PLAN_GATE=$(printf '%s\n' "$GG_POLICY" | conf_get GG_PLAN_GATE) || GG_PLAN_GA
 # New files are judged by history (HEAD and the protected branch), not by the
 # index: the isolated index does not exist yet at this point.
 if [ -n "$GG_PLAN_GATE" ]; then
-    if [ -n "$GG_PROT_REF" ] && git cat-file -e "$GG_PROT_REF:$GG_PLAN_GATE" 2>/dev/null; then
-        # A template with X's: GNU mktemp (Linux, WSL, Git Bash) rejects `-t NAME` without them.
+    # A template with X's: GNU mktemp (Linux, WSL, Git Bash) rejects `-t NAME` without them.
+    gg_gate=""; gg_src=1
+    if [ -n "$GG_PROT_REF" ]; then
         gg_gate=$(mktemp "${TMPDIR:-/tmp}/monitorex-gate.XXXXXX")
-        git show "$GG_PROT_REF:$GG_PLAN_GATE" > "$gg_gate"
+        gg_src=0; gg_blob "$GG_PROT_REF" "$GG_PLAN_GATE" > "$gg_gate" || gg_src=$?
+        [ "$gg_src" = 0 ] || rm -f "$gg_gate"
+        [ "$gg_src" -lt 2 ] || gg_unreadable
+    fi
+    if [ "$gg_src" = 0 ]; then
         gg_rc=0; bash "$gg_gate" "$MSGFILE" "$@" || gg_rc=$?
         rm -f "$gg_gate"
         [ "$gg_rc" = 0 ] || exit 1
@@ -150,31 +171,35 @@ fi
 ACTOR="${CLAUDE_CODE_SESSION_ID:-${MONITOREX_ACTOR:-}}"
 [ -n "$ACTOR" ] || die "no identity: set MONITOREX_ACTOR=<who you are>"
 
+# The kit's interpreter: python3 / python / py -3, the first real one >= 3.9 (pyenv.sh).
+gg_python || die "verify_staged.py needs Python 3.9+ — see above"
+
 COMMON=$(git rev-parse --git-common-dir)
-case "$COMMON" in /*) ;; *) COMMON="$(cd "$COMMON" && pwd -P)" ;; esac
+gg_is_abs "$COMMON" || COMMON=$(gg_path "$COMMON")
 LOCKDIR="$COMMON/monitorex-locks"
 LOCK="$LOCKDIR/commit"
 JOURNAL="$LOCKDIR/journal"
 IDXPATH=$(git rev-parse --git-path index)          # per-worktree, NOT $COMMON/index
-case "$IDXPATH" in /*) ;; *) IDXPATH="$(pwd -P)/$IDXPATH" ;; esac
+gg_is_abs "$IDXPATH" || IDXPATH="$(pwd -P)/$IDXPATH"
 IDXLOCK="$IDXPATH.lock"
 # uuidgen is optional on Debian/Ubuntu (uuid-runtime): fall back to the kernel, then Python.
-TOKEN=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null || python3 -c 'import uuid; print(uuid.uuid4())' 2>/dev/null || true)
-[ -n "$TOKEN" ] || die "cannot generate a lock token: no uuidgen, /proc/sys/kernel/random/uuid or python3"
+TOKEN=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null || "$GG_PY" -c 'import uuid; print(uuid.uuid4())' 2>/dev/null || true)
+[ -n "$TOKEN" ] || die "cannot generate a lock token: no uuidgen, /proc/sys/kernel/random/uuid or Python"
 mkdir -p "$LOCKDIR"
 
-IDX=""; T=""; OWN_IDXLOCK=0; OWN_COMMIT_LOCK=0; PHASE=""; NEW=""
+IDX=""; T=""; OWN_IDXLOCK=0; OWN_COMMIT_LOCK=0; PHASE=""; NEW=""; SYNC_TMP=""
 
 sync_index_to() {   # $1 = commit-ish whose tree goes into the shared index
-    local tmp
     # Next to the index, not in $TMPDIR: the same filesystem keeps `mv` an atomic
     # rename. Across filesystems (/tmp is often tmpfs on Linux) mv is copy+unlink,
     # and a parallel `git status` could read a half-written shared index.
-    tmp=$(mktemp "$IDXPATH.monitorex.XXXXXX") || return 1
-    if GIT_INDEX_FILE="$tmp" git read-tree "$1" 2>/dev/null && mv "$tmp" "$IDXPATH"; then
-        return 0
+    # SYNC_TMP, not a local: a TERM between read-tree and mv runs cleanup(), which
+    # removes the half-done temporary index (it used to be left next to .git/index).
+    SYNC_TMP=$(mktemp "$IDXPATH.monitorex.XXXXXX") || { SYNC_TMP=""; return 1; }
+    if GIT_INDEX_FILE="$SYNC_TMP" git read-tree "$1" 2>/dev/null && mv "$SYNC_TMP" "$IDXPATH"; then
+        SYNC_TMP=""; return 0
     fi
-    rm -f "$tmp"; return 1
+    rm -f "$SYNC_TMP"; SYNC_TMP=""; return 1
 }
 
 # ─── A SINGLE exit handler ──────────────────────────────────────────────────
@@ -184,6 +209,7 @@ cleanup() {
     local rc=$?
     [ -n "$IDX" ] && rm -f "$IDX"
     [ -n "$T" ] && rm -f "$T"
+    if [ -n "$SYNC_TMP" ]; then rm -f "$SYNC_TMP"; SYNC_TMP=""; fi
 
     # post-cas phase: the branch is already at NEW, but the shared index is still on
     # the old tree. Releasing the lock like this = leaving a diverged state in which
@@ -263,6 +289,32 @@ stage_paths() {      # IDX/HEAD_START are variables; $@ — paths
             GIT_INDEX_FILE="$IDX" git add -- "$p"
         fi
     done
+    keep_new_kit_scripts_executable
+}
+
+# K11. With core.filemode=false (Git for Windows) the exec bit never reaches git: a
+# kit script committed from Windows would land 100644 and stop running on Linux/macOS
+# clones. A NEW file (absent in HEAD_START) on the kit list whose first two bytes are
+# "#!" is staged executable. Existing files keep HEAD's mode (git's own default).
+# The list matches the .gitattributes block (attributes.py): scripts/*.sh,
+# scripts/git-guards/**, githooks/**, .claude/hooks/**.
+is_kit_path() {      # $1 = repository-relative path
+    case "$1" in
+        scripts/*/*) case "$1" in scripts/git-guards/*) return 0 ;; esac; return 1 ;;
+        scripts/*.sh|githooks/*|.claude/hooks/*) return 0 ;;
+    esac
+    return 1
+}
+keep_new_kit_scripts_executable() {
+    local f top
+    [ "$(git config --bool core.filemode 2>/dev/null || echo true)" = false ] || return 0
+    top=$(git rev-parse --show-toplevel)
+    GIT_INDEX_FILE="$IDX" git diff --cached --name-only -z --diff-filter=A "$HEAD_START" \
+        | while IFS= read -r -d '' f; do
+            [ -n "$f" ] && is_kit_path "$f" || continue
+            [ "$(head -c 2 "$top/$f" 2>/dev/null)" = '#!' ] || continue
+            GIT_INDEX_FILE="$IDX" git -C "$top" update-index --chmod=+x -- "$f"
+        done
 }
 
 IDX=$(mktemp "${TMPDIR:-/tmp}/monitorex-idx.XXXXXX")
@@ -271,7 +323,7 @@ stage_paths "$@"
 
 # ─── 7. Verify contents: the commit has exactly what was requested ──────────
 if ! GIT_INDEX_FILE="$IDX" git -c core.quotePath=false diff --cached -z --name-only "$HEAD_START" \
-     | python3 -B "$SCRIPT_DIR/git-guards/verify_staged.py" --expect "$@"; then
+     | "$GG_PY" -B "$SCRIPT_DIR/git-guards/verify_staged.py" --expect "$@"; then
     die "commit contents do not match the requested paths (see above)"
 fi
 
@@ -307,7 +359,7 @@ retry_or_die() {      # $@ — pathspec; NEW/HEAD_START/BR/TREE are variables
         # on top of someone else's commit and overwrite their change with our disk content.
         changed=$(git diff --name-only -z "$HEAD_START" "$new_head" || true)
         if printf '%s' "$changed" \
-           | python3 -B "$SCRIPT_DIR/git-guards/verify_staged.py" --intersects "$@"; then
+           | "$GG_PY" -B "$SCRIPT_DIR/git-guards/verify_staged.py" --intersects "$@"; then
             die "a neighbor changed the same files (attempt $attempt).
    Your commit is saved: refs/monitorex/recovery/$TOKEN
    View: scripts/git-recovery.sh show $TOKEN"

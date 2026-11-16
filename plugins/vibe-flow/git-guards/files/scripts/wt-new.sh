@@ -33,11 +33,16 @@ if [ ! -f "$GG_CONF_LIB" ]; then
     echo "   (scripts/wt-new.sh --resume <branch> --merge-main from the main folder) or reinstall the kit (/vibe-flow:init)" >&2
     exit 1
 fi
-. "$GG_CONF_LIB"
+. "$GG_CONF_LIB"           # also brings scripts/git-guards/paths.sh (gg_path, gg_is_abs, gg_is_msys)
+GG_PYENV_LIB="$ROOT/scripts/git-guards/pyenv.sh"
+[ -f "$GG_PYENV_LIB" ] || { echo "🔴 scripts/git-guards/pyenv.sh missing — the kit in this tree is incomplete: reinstall it (/vibe-flow:init)" >&2; exit 1; }
+. "$GG_PYENV_LIB"
 # Called once now and once more after the fetch below: the fresh origin config wins.
 load_conf() {
     local prev="${GG_PROT:-}|${GG_POLICY_SOURCE:-}|${GG_POLICY:-}"
-    gg_conf_init "$ROOT" || { echo "🔴 cannot read the repository at $ROOT" >&2; exit 1; }
+    # rc 2: the protected branch's policy is unreadable — conf.sh has said so. Stop
+    # before anything is created: no tree from the defaults or the tree's text (K8).
+    gg_conf_init "$ROOT" || { [ "$?" = 2 ] || echo "🔴 cannot read the repository at $ROOT" >&2; exit 1; }
     if [ "${1:-}" = again ] && [ "$prev" = "$GG_PROT|$GG_POLICY_SOURCE|$GG_POLICY" ]; then return 0; fi
     GG_PROTECTED=$GG_PROT
     GG_WT_DIR=$(gg_get GG_WT_DIR "")
@@ -92,7 +97,7 @@ MAIN=$(git -C "$ROOT" worktree list --porcelain | awk '/^worktree /{print substr
 # WT_BASE is computed after the fetch below — from the fresh config.
 
 COMMON=$(git -C "$ROOT" rev-parse --git-common-dir)
-case "$COMMON" in /*) ;; *) COMMON="$(cd "$ROOT/$COMMON" && pwd -P)" ;; esac
+gg_is_abs "$COMMON" || COMMON=$(gg_path "$ROOT" "$COMMON")
 has_ref() { git -C "$ROOT" rev-parse --verify -q "$1^{commit}" >/dev/null 2>&1; }
 
 # ── Watchdog ─────────────────────────────────────────────────────────────────
@@ -100,6 +105,21 @@ has_ref() { git -C "$ROOT" rev-parse --verify -q "$1^{commit}" >/dev/null 2>&1; 
 # route fetch hung for the system TCP timeout (~75 s). Hence our own watchdog.
 # The watcher kills its own `sleep` when the command finishes in time: otherwise
 # every call left a sleeping process behind for the full timeout.
+# kill_tree: a process and its children. On Windows (Git Bash) a native child
+# (git.exe, node.exe) does not get MSYS signals and there is no pkill: the Windows
+# pid tree is killed with taskkill instead.
+kill_tree() {   # $1 = pid, $2 = TERM | KILL; rc 1 when the process is already gone
+    local w=""
+    if gg_is_msys; then
+        w=$(cat "/proc/$1/winpid" 2>/dev/null || true)
+        case "$w" in
+            ''|*[!0-9]*) ;;
+            *) taskkill //T //F //PID "$w" >/dev/null 2>&1 && return 0 ;;
+        esac
+    fi
+    pkill -"$2" -P "$1" 2>/dev/null || true     # its children too (wrapper scripts)
+    kill -"$2" "$1" 2>/dev/null
+}
 run_with_timeout() {
     local secs="$1"; shift
     "$@" &
@@ -108,11 +128,10 @@ run_with_timeout() {
         trap 'kill "$s" 2>/dev/null; exit 0' TERM
         sleep "$secs" & s=$!
         wait "$s"
-        pkill -TERM -P "$pid" 2>/dev/null || true     # its children too (wrapper scripts)
-        kill -TERM "$pid" 2>/dev/null || exit 0
+        kill_tree "$pid" TERM || exit 0
         sleep 2 & s=$!
         wait "$s"
-        kill -KILL "$pid" 2>/dev/null || true
+        kill_tree "$pid" KILL || true
     ) </dev/null >/dev/null 2>&1 &
     local watcher=$!
     local rc=0
@@ -140,7 +159,7 @@ if [ "$ISSUE_SET" = "1" ]; then
         echo "🔴 gh (GitHub CLI) not found — it is needed to check issue #$ISSUE."
         echo "   Install it (https://cli.github.com) and run: gh auth login"
         exit 1; }
-    command -v python3 >/dev/null 2>&1 || { echo "🔴 python3 not found — needed to read the gh answer"; exit 1; }
+    gg_python || { echo "🔴 Python 3.9+ is needed to read the gh answer"; exit 1; }
 
     GH_OUT=$(mktemp); GH_ERR=$(mktemp); TMPFILES="$GH_OUT $GH_ERR"
     trap 'rm -f $TMPFILES' EXIT     # replaced by cleanup() below
@@ -166,7 +185,7 @@ if [ "$ISSUE_SET" = "1" ]; then
     # Title → slug: [a-z0-9-] only, at most 40 characters. The title is written by
     # anyone who can open an issue: no "../", no leading "-", no newlines, no
     # invisible format characters (Cf) may reach the branch name, the path or the output.
-    PARSED=$(python3 - "$ISSUE" "$GH_OUT" "$NAME" <<'PY' || true
+    PARSED=$("$GG_PY" - "$ISSUE" "$GH_OUT" "$NAME" <<'PY' || true
 import json, re, sys, unicodedata
 n, path, name = int(sys.argv[1]), sys.argv[2], sys.argv[3]
 try:
@@ -221,19 +240,28 @@ fi
 load_conf again
 PROT=$GG_PROTECTED
 WT_BASE="${GG_WT_DIR:-$(dirname "$MAIN")/$(basename "$MAIN")-wt}"
-case "$WT_BASE" in /*) ;; *) WT_BASE="$(cd "$MAIN" && cd "$(dirname "$WT_BASE")" && pwd)/$(basename "$WT_BASE")" ;; esac
+# gg_is_abs: GG_WT_DIR=D:/x on Windows is absolute too (it used to get MAIN glued in front).
+if ! gg_is_abs "$WT_BASE"; then
+    WT_BASE="$(cd "$MAIN" && cd "$(dirname "$WT_BASE")" && pwd)/$(basename "$WT_BASE")"
+fi
 
 # Guard files of a branch vs the protected branch on origin. An old branch brings
 # old copies: its install-git-guards.sh (run by `npm install` → prepare) would put
 # old hooks into the SHARED monitorex-hooks, and a session started in its tree
 # would load an old PreToolUse guard. Prints the differing paths.
 GUARD_FILES="scripts/install-git-guards.sh .claude/hooks/monitorex_git_guard.py"
+# The blob id through ls-tree: no <rev>:<path> argument (MSYS rewrites one). Empty
+# when the revision has no such file.
+blob_id() {   # $1 = revision, $2 = path
+    git -C "$ROOT" --no-replace-objects ls-tree --full-tree "$1" -- "$2" 2>/dev/null \
+        | awk '$2 == "blob" {print $3; exit}'
+}
 outdated_guards() {     # $1 = revision of the branch
     local ref="refs/remotes/origin/$PROT" f a b out=""
     has_ref "$ref" || return 0          # nothing to compare with
     for f in $GUARD_FILES; do
-        b=$(git -C "$ROOT" rev-parse -q --verify "$ref:$f" 2>/dev/null) || continue   # bootstrap
-        a=$(git -C "$ROOT" rev-parse -q --verify "$1:$f" 2>/dev/null || echo none)
+        b=$(blob_id "$ref" "$f"); [ -n "$b" ] || continue   # bootstrap
+        a=$(blob_id "$1" "$f"); [ -n "$a" ] || a=none
         [ "$a" = "$b" ] || out="$out $f"
     done
     printf '%s' "${out# }"
@@ -462,7 +490,14 @@ fi
 
 if [ -e "$DIR" ]; then
     echo "🔴 directory already taken: $DIR"
-    OCC=$(git -C "$ROOT" worktree list --porcelain | awk -v d="$DIR" '/^worktree /{w=substr($0, 10)} /^branch /{if (w==d) {sub("refs/heads/","",$2); print $2}}')
+    # Compared normalized: git lists C:/… on Windows, DIR may be spelled /c/….
+    DIR_N=$(gg_path "$DIR" 2>/dev/null || printf '%s' "$DIR"); OCC=""
+    while IFS="$(printf '\t')" read -r w b; do
+        [ -n "$w" ] || continue
+        if [ "$(gg_path "$w" 2>/dev/null || printf '%s' "$w")" = "$DIR_N" ]; then OCC=$b; fi
+    done <<EOF_WT
+$(git -C "$ROOT" worktree list --porcelain | awk '/^worktree /{w=substr($0, 10)} /^branch /{sub("refs/heads/","",$2); print w "\t" $2}')
+EOF_WT
     [ -n "$OCC" ] && echo "   branch $OCC is checked out there"
     [ -n "$RESUME" ] && echo "   Give your own directory name:  scripts/wt-new.sh --resume $BRANCH <name>"
     exit 1
@@ -542,7 +577,8 @@ CLAIM_KEEP=1
 # Claude Code `plansDirectory` (set by the kit) must exist; the folder is git-ignored,
 # so a fresh tree does not have it. Only when the main tree's .claude/settings.json sets
 # the key; read as JSON, never sourced; same rule as plans_dirs() in plan-gate.sh.
-PD=$(python3 - "$MAIN/.claude/settings.json" <<'PY' 2>/dev/null || true
+gg_python 2>/dev/null || true       # no Python: no plans folder, nothing else depends on it
+PD=$("${GG_PY:-python3}" - "$MAIN/.claude/settings.json" <<'PY' 2>/dev/null || true
 import json, os, re, sys
 try:
     v = json.load(open(sys.argv[1], encoding="utf-8")).get("plansDirectory")
@@ -587,6 +623,15 @@ done
 # was pulled without reinstalling (an up-to-date lockfile over outdated packages).
 # In both cases packages are installed in the tree instead of cloned.
 DEPS_OK=1
+# The same lockfile = the same blob, as git normalizes it for that path (attributes,
+# eol): a Windows checkout has CRLF on disk for the LF blob, and a byte comparison
+# forced a full reinstall every time. A missing file on either side = different.
+same_lockfile() {   # $1 = lockfile name
+    local a b
+    a=$(git -C "$DIR" hash-object --path="$1" -- "$MAIN/$1" 2>/dev/null) || return 1
+    b=$(git -C "$DIR" hash-object --path="$1" -- "$DIR/$1" 2>/dev/null) || return 1
+    [ -n "$a" ] && [ "$a" = "$b" ]
+}
 if [ -d "$MAIN/node_modules" ] && [ -f "$DIR/package.json" ]; then
     LOCK=""; MARKER=""; STALE_MAIN=0
     for pair in package-lock.json:.package-lock.json pnpm-lock.yaml:.modules.yaml \
@@ -598,7 +643,7 @@ if [ -d "$MAIN/node_modules" ] && [ -f "$DIR/package.json" ]; then
         break
     done
     WHY=""
-    if [ -n "$LOCK" ] && ! cmp -s "$MAIN/$LOCK" "$DIR/$LOCK"; then
+    if [ -n "$LOCK" ] && ! same_lockfile "$LOCK"; then
         WHY="$LOCK differs between the main folder and the tree"
     elif [ -n "$MARKER" ] && [ -f "$MAIN/$MARKER" ] && [ "$MAIN/$LOCK" -nt "$MAIN/$MARKER" ]; then
         WHY="the main folder's node_modules is older than its $LOCK"
@@ -644,12 +689,39 @@ fi
 bash "$ROOT/scripts/install-git-guards.sh" >/dev/null
 
 # ── Own dev server on a free port ────────────────────────────────────────────
+# Listening ports: lsof per candidate when present (macOS, most Linux); otherwise
+# ONE snapshot per run — netstat on Windows (Git Bash has no lsof), ss on Linux —
+# and the candidates are checked against it in memory. Nothing to ask: base port.
+LISTEN_TOOL=""; LISTEN_PORTS=" "
+init_port_probe() {
+    local raw=""
+    if command -v lsof >/dev/null 2>&1; then LISTEN_TOOL=lsof; return 0; fi
+    if gg_is_msys && command -v netstat >/dev/null 2>&1; then
+        # A listening TCP socket has the foreign address *:0 — a locale-independent
+        # test (the state column is translated on non-English Windows).
+        raw=$(netstat -ano -p TCP 2>/dev/null | awk '$1 == "TCP" && $3 ~ /:0$/ {print $2}') || raw=""
+    elif command -v ss >/dev/null 2>&1; then
+        raw=$(ss -ltn 2>/dev/null | awk 'NR > 1 {print $4}') || raw=""
+    else
+        return 0
+    fi
+    LISTEN_TOOL=snapshot
+    LISTEN_PORTS=" $(printf '%s\n' "$raw" | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p' | tr '\n' ' ')"
+}
+port_busy() {   # $1 = port
+    case "$LISTEN_TOOL" in
+        lsof) lsof -i:"$1" -sTCP:LISTEN >/dev/null 2>&1 ;;
+        snapshot) case "$LISTEN_PORTS" in *" $1 "*) return 0 ;; esac; return 1 ;;
+        *) return 1 ;;
+    esac
+}
 PORT=""
 if [ -n "$GG_DEV_CMD" ] && [ "$DEPS_OK" = "0" ]; then
     echo "  ⚠️  dev server not started: packages are not installed (see above)"
 elif [ -n "$GG_DEV_CMD" ]; then
     PORT="$GG_DEV_PORT_BASE"
-    while lsof -i:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; do PORT=$((PORT+1)); done
+    init_port_probe
+    while port_busy "$PORT"; do PORT=$((PORT+1)); done
     printf '%s\n' ".wt-dev.pid" \
         >> "$(git -C "$DIR" rev-parse --git-path info/exclude)"
 
@@ -663,7 +735,22 @@ elif [ -n "$GG_DEV_CMD" ]; then
     DEVLOG="$(git -C "$DIR" rev-parse --absolute-git-dir)/wt-dev.log"
     ( cd "$DIR" && exec env "$GG_DEV_PORT_ENV=$PORT" nohup sh -c "$GG_DEV_CMD" ) \
         < /dev/null > "$DEVLOG" 2>&1 &
-    echo $! > "$DIR/.wt-dev.pid"
+    DEV_PID=$!
+    if gg_is_msys; then
+        # Windows: the dev server is a native process (node.exe) that MSYS `kill` does
+        # not reach. The pid file keeps the WINDOWS pid of the launcher, whose tree
+        # wt-done.sh kills with taskkill. Unknown → "msys:<pid>": wt-done then says to
+        # stop it by hand instead of claiming it did.
+        WINPID=""; i=0
+        while [ "$i" -lt 20 ]; do
+            WINPID=$(cat "/proc/$DEV_PID/winpid" 2>/dev/null || true)
+            case "$WINPID" in ''|*[!0-9]*) WINPID="" ;; *) break ;; esac
+            sleep 0.1; i=$((i+1))
+        done
+        if [ -n "$WINPID" ]; then echo "$WINPID" > "$DIR/.wt-dev.pid"; else echo "msys:$DEV_PID" > "$DIR/.wt-dev.pid"; fi
+    else
+        echo "$DEV_PID" > "$DIR/.wt-dev.pid"
+    fi
 
     # Readiness marker: for Next it is the generated .next/types — without them
     # pre-push refuses, and the tree would be useless.

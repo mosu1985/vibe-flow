@@ -25,13 +25,28 @@ git rev-parse --git-dir >/dev/null 2>&1 || exit 0
 
 # Project configuration: read as TEXT from the protected branch (conf.sh), never
 # sourced. SessionStart must stay quiet: a missing library or a broken config
-# leaves the defaults.
+# leaves the defaults. One exception (K8): the protected branch's policy exists but
+# cannot be read — that is said out loud and the script stops, it does not guess.
 GG_BRANCH_PREFIX="wt/"
 GG_PROTECTED="main"
+# Path helpers (gg_path, gg_is_abs). A kit missing them (an old or partial tree)
+# keeps the pre-1.3.0 POSIX behaviour here: SessionStart stays quiet.
+if [ -f "$ROOT/scripts/git-guards/paths.sh" ]; then
+    . "$ROOT/scripts/git-guards/paths.sh"
+else
+    gg_is_abs() { case "$1" in /*) return 0 ;; esac; return 1; }
+    gg_path() { (cd "$1" 2>/dev/null && pwd -P); }
+fi
 GG_CONF_LIB="$ROOT/scripts/git-guards/conf.sh"
-if [ -f "$GG_CONF_LIB" ] && . "$GG_CONF_LIB" 2>/dev/null && gg_conf_init "$ROOT" 2>/dev/null; then
-    GG_PROTECTED=$GG_PROT
-    GG_BRANCH_PREFIX=$(gg_get GG_BRANCH_PREFIX "wt/" 2>/dev/null)
+if [ -f "$GG_CONF_LIB" ] && . "$GG_CONF_LIB" 2>/dev/null; then
+    gg_rc=0; gg_conf_init "$ROOT" 2>/dev/null || gg_rc=$?
+    if [ "$gg_rc" = 0 ]; then
+        GG_PROTECTED=$GG_PROT
+        GG_BRANCH_PREFIX=$(gg_get GG_BRANCH_PREFIX "wt/" 2>/dev/null)
+    elif [ "$gg_rc" = 2 ]; then
+        gg_conf_unreadable "$GG_PROT_REF"
+        exit 1
+    fi
 fi
 
 # Comparison base: both the local main branch and its remote snapshot. Work that
@@ -43,7 +58,7 @@ git rev-parse --verify -q "refs/remotes/origin/$GG_PROTECTED" >/dev/null 2>&1 &&
 if [ -z "$BASES" ] && [ "$MODE" = "--names" ]; then exit 0; fi
 
 COMMON=$(git rev-parse --git-common-dir 2>/dev/null || true)
-case "$COMMON" in /*|'') ;; *) COMMON="$(cd "$COMMON" 2>/dev/null && pwd -P || true)" ;; esac
+if [ -n "$COMMON" ] && ! gg_is_abs "$COMMON"; then COMMON="$(gg_path "$COMMON" 2>/dev/null || true)"; fi
 
 # Map "branch → its worktree"
 MAP=$(git worktree list --porcelain 2>/dev/null | awk '
@@ -68,15 +83,19 @@ if [ -n "$COMMON" ] && git remote get-url origin >/dev/null 2>&1; then
     if [ -n "$PROT" ]; then
         DEST="$COMMON/monitorex-hooks"; DRIFT=""; ANY=0
         for h in pre-commit pre-push plan-gate.sh prepare-commit-msg; do
-            want=$(git rev-parse -q --verify "refs/remotes/origin/$PROT:githooks/$h" 2>/dev/null) || continue
+            # The blob id through ls-tree: no <rev>:<path> argument for MSYS to rewrite.
+            want=$(git --no-replace-objects ls-tree --full-tree "refs/remotes/origin/$PROT" -- "githooks/$h" 2>/dev/null \
+                | awk '$2 == "blob" {print $3; exit}') || true
+            [ -n "$want" ] || continue
             ANY=1
             have=$(git hash-object "$DEST/$h" 2>/dev/null || echo missing)
             [ "$want" = "$have" ] || DRIFT="$DRIFT $h"
         done
         if [ "$ANY" = "1" ]; then
             HP=$(git config core.hooksPath 2>/dev/null || true)
-            HPR=$(cd "$HP" 2>/dev/null && pwd -P || echo "$HP")
-            DR=$(cd "$DEST" 2>/dev/null && pwd -P || echo "$DEST")
+            # Normalized (gg_path): git may store C:/… while the shell says /c/….
+            HPR=$(gg_path "$HP" 2>/dev/null || echo "$HP")
+            DR=$(gg_path "$DEST" 2>/dev/null || echo "$DEST")
             if [ -n "$DRIFT" ]; then
                 HOOK_WARN="🔴 Installed git hooks differ from origin/$PROT:${DRIFT}
    Barriers may be outdated or off. Reinstall: bash scripts/install-git-guards.sh

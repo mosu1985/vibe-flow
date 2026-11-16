@@ -13,10 +13,18 @@ Reads a NUL-separated list from stdin.
                         directory argument. An extra path → rc=1 with a list.
   --intersects <paths…> Whether stdin intersects the arguments.
                         Yes → rc=0 (for `if` in shell), no → rc=1.
+
+Paths are git paths: forward slashes on every OS, so they are normalized with
+posixpath (os.path on Windows would turn them into backslashes and no prefix
+would ever match). On Windows a backslash in an argument is a separator too.
 """
+from __future__ import annotations
 
 import os
+import posixpath
 import sys
+
+WINDOWS = os.sep == "\\"
 
 
 def read_nul() -> list[str]:
@@ -25,7 +33,9 @@ def read_nul() -> list[str]:
 
 
 def norm(p: str) -> str:
-    return os.path.normpath(p).lstrip("./")
+    if WINDOWS:
+        p = p.replace("\\", "/")
+    return posixpath.normpath(p).lstrip("./")
 
 
 def covered_by(path: str, expected: list[str]) -> bool:

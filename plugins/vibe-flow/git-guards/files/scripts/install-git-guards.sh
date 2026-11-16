@@ -24,8 +24,13 @@
 # Idempotent: identical content is left alone, different content is overwritten.
 set -eu
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+# Path and blob helpers (scripts/git-guards/paths.sh): git prints C:/… on Windows,
+# and the hooks are read from origin without a <rev>:<path> argument (MSYS rewrites it).
+[ -f "$ROOT/scripts/git-guards/paths.sh" ] || {
+    printf '\n🔴 install-git-guards: scripts/git-guards/paths.sh missing — reinstall the kit (/vibe-flow:init)\n\n' >&2; exit 1; }
+. "$ROOT/scripts/git-guards/paths.sh"
 COMMON=$(git -C "$ROOT" rev-parse --git-common-dir)
-case "$COMMON" in /*) ;; *) COMMON="$(cd "$ROOT/$COMMON" && pwd -P)" ;; esac
+gg_is_abs "$COMMON" || COMMON=$(gg_path "$ROOT" "$COMMON")
 DEST="$COMMON/monitorex-hooks"
 HOOKS="pre-commit pre-push plan-gate.sh prepare-commit-msg"
 die() { printf '\n🔴 install-git-guards: %s\n\n' "$*" >&2; exit 1; }
@@ -52,9 +57,17 @@ if g remote get-url origin >/dev/null 2>&1; then
     fi
 fi
 
+# gg_blob runs in the repository of the current directory: always from ROOT.
+blob() { (cd "$ROOT" && gg_blob "$@"); }
+
 MODE=bootstrap
-if [ -n "$PROT_REF" ] && g cat-file -e "$PROT_REF:githooks/pre-push" 2>/dev/null; then
-    MODE=origin
+if [ -n "$PROT_REF" ]; then
+    brc=0; blob "$PROT_REF" githooks/pre-push >/dev/null || brc=$?
+    case "$brc" in
+        0) MODE=origin ;;
+        1) ;;
+        *) die "githooks/pre-push on ${PROT_REF#refs/remotes/} cannot be read (git fetch origin?) — hooks left untouched" ;;
+    esac
 fi
 
 mkdir -p "$DEST"
@@ -70,13 +83,14 @@ fi
 for h in $HOOKS; do
     dst="$DEST/$h"; tmp="$dst.tmp.$$"
     if [ "$MODE" = origin ]; then
-        if ! g cat-file -e "$PROT_REF:githooks/$h" 2>/dev/null; then
+        brc=0; blob "$PROT_REF" "githooks/$h" > "$tmp" || brc=$?
+        if [ "$brc" = 1 ]; then
             # An older kit on origin that has no such file: install what origin has.
+            rm -f "$tmp"
             echo "  - $h not on ${PROT_REF#refs/remotes/} — skipped"
             continue
         fi
-        g show "$PROT_REF:githooks/$h" > "$tmp" 2>/dev/null \
-            || { rm -f "$tmp"; die "githooks/$h exists on ${PROT_REF#refs/remotes/} but git show failed"; }
+        [ "$brc" = 0 ] || { rm -f "$tmp"; die "githooks/$h exists on ${PROT_REF#refs/remotes/} but cannot be read"; }
     else
         src="$ROOT/githooks/$h"
         if [ ! -f "$src" ]; then
@@ -98,6 +112,8 @@ done
 
 printf '%s@%s\n' "$MODE" "$SRC_SHA" > "$DEST/.source.tmp.$$" && mv "$DEST/.source.tmp.$$" "$DEST/.source"
 
-g config core.hooksPath "$DEST"
-echo "  core.hooksPath = $DEST"
+# Normalized (gg_path): on Windows the form git prints (C:/…), one spelling for every reader.
+HOOKS_PATH=$(gg_path "$DEST") || HOOKS_PATH=$DEST
+g config core.hooksPath "$HOOKS_PATH"
+echo "  core.hooksPath = $HOOKS_PATH"
 echo "Done. Check: scripts/git-lock.sh status"

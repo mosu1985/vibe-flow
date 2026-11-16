@@ -44,9 +44,143 @@
 
 set -u
 
+# The installed copy runs standalone from $GIT_COMMON_DIR/monitorex-hooks and cannot
+# source scripts/git-guards/: the path and Python helpers are inlined (test-git-guards.sh
+# checks that both blocks are byte-identical to their sources).
+# >>> gg-inline:paths >>>
+# Path helpers (vibe-flow 1.3.0; source: scripts/git-guards/paths.sh — keep copies identical).
+# MSYS mode = Git for Windows / MSYS2 / Cygwin uname AND cygpath on PATH; else POSIX.
+_gg_msys_v=""
+_gg_msys() {
+    if [ -z "$_gg_msys_v" ]; then
+        _gg_msys_v=posix
+        case "$(uname -s 2>/dev/null)" in
+            MINGW*|MSYS*|CYGWIN*) if command -v cygpath >/dev/null 2>&1; then _gg_msys_v=msys; fi ;;
+        esac
+    fi
+    [ "$_gg_msys_v" = msys ]
+}
+# gg_is_abs PATH: 0 for /…, X:/…, X:\… on any OS.
+gg_is_abs() {
+    case "${1-}" in /*|[A-Za-z]:/*|[A-Za-z]:\\*) return 0 ;; esac
+    return 1
+}
+# gg_path [BASE] PATH: the physical absolute path. A relative PATH resolves against
+# BASE, else $PWD; a missing tail is kept on the deepest existing ancestor. MSYS:
+# the C:/Long/Form git prints. rc 1 and no output on failure.
+gg_path() {
+    if [ $# -ge 2 ]; then _gg_b=$1; _gg_p=$2; else _gg_b=""; _gg_p=${1-}; fi
+    [ -n "$_gg_p" ] || return 1
+    if _gg_msys; then
+        case "$_gg_p" in [A-Za-z]:*) _gg_p=$(cygpath -u "$_gg_p" 2>/dev/null) || return 1 ;; esac
+        case "$_gg_b" in [A-Za-z]:*) _gg_b=$(cygpath -u "$_gg_b" 2>/dev/null) || return 1 ;; esac
+    fi
+    case "$_gg_p" in /*) ;; *) _gg_p="${_gg_b:-.}/$_gg_p" ;; esac
+    case "$_gg_p" in /*) ;; *) _gg_p="$PWD/$_gg_p" ;; esac
+    while :; do case "$_gg_p" in ?*/) _gg_p=${_gg_p%/} ;; *) break ;; esac; done
+    _gg_t=""
+    while [ ! -d "$_gg_p" ]; do
+        case "$_gg_p" in */*) ;; *) return 1 ;; esac
+        _gg_t="/${_gg_p##*/}$_gg_t"; _gg_p=${_gg_p%/*}
+        [ -n "$_gg_p" ] || _gg_p=/
+    done
+    _gg_p=$(cd "$_gg_p" 2>/dev/null && pwd -P) || return 1
+    case "$_gg_p" in */) _gg_p=${_gg_p%/} ;; esac
+    _gg_p="$_gg_p$_gg_t"
+    [ -n "$_gg_p" ] || _gg_p=/
+    if _gg_msys; then _gg_p=$(cygpath -alm "$_gg_p" 2>/dev/null) || return 1; fi
+    [ -n "$_gg_p" ] || return 1
+    printf '%s\n' "$_gg_p"
+}
+# gg_blob REV PATH: the file PATH at revision REV (repository of the current
+# directory) on stdout. 0 found, 1 absent (the tree has no such path), 2 error.
+# ls-tree + cat-file: no <rev>:<path> argument for MSYS to rewrite;
+# --no-replace-objects: a `git replace` cannot swap what is read. Silent.
+gg_blob() {
+    _gg_l=$(git --no-replace-objects ls-tree --full-tree "$1" -- "$2" 2>/dev/null) || return 2
+    [ -n "$_gg_l" ] || return 1
+    _gg_ty=${_gg_l#* }; _gg_sha=${_gg_ty#* }; _gg_ty=${_gg_ty%% *}
+    _gg_sha=${_gg_sha%%[!0-9a-f]*}
+    [ "$_gg_ty" = blob ] && [ -n "$_gg_sha" ] || return 2
+    git --no-replace-objects cat-file blob "$_gg_sha" 2>/dev/null || return 2
+}
+# <<< gg-inline:paths <<<
+# >>> gg-inline:pyenv >>>
+# Python resolver (vibe-flow 1.3.0; source: scripts/git-guards/pyenv.sh — keep copies identical).
+# Candidates: python3, python, py -3. "Not a real Python": exit 9009/49/127 or a path
+# under WindowsApps (the Microsoft Store alias). Floor: Python 3.9.
+gg_py_fake() {   # RC PATH → 0 when this is not a real Python
+    case "${1-}" in 9009|49|127) return 0 ;; esac
+    case "${2-}" in
+        */[Ww][Ii][Nn][Dd][Oo][Ww][Ss][Aa][Pp][Pp][Ss]/*) return 0 ;;
+        *\\[Ww][Ii][Nn][Dd][Oo][Ww][Ss][Aa][Pp][Pp][Ss]\\*) return 0 ;;
+    esac
+    return 1
+}
+_gg_py_probe() { # CMD [ARG] → 0 and _gg_exe = sys.executable when it runs and is >= 3.9
+    _gg_exe=$("$@" -c 'import sys; sys.stdout.write(sys.executable if sys.version_info >= (3, 9) else "")' 2>/dev/null)
+    _gg_prc=$?
+    [ "$_gg_prc" = 0 ] && [ -n "$_gg_exe" ] || return 1
+    if gg_py_fake 0 "$_gg_exe"; then return 1; fi
+    return 0
+}
+# gg_python: export GG_PY (a verified interpreter path) or say why not; rc 0/1.
+# An inherited GG_PY is never trusted: it is run and checked like any candidate.
+gg_python() {
+    PYTHONUTF8=1; PYTHONIOENCODING=utf-8; export PYTHONUTF8 PYTHONIOENCODING
+    if [ -n "${GG_PY:-}" ] && _gg_py_probe "$GG_PY"; then GG_PY=$_gg_exe; export GG_PY; return 0; fi
+    for _gg_c in python3 python py; do
+        _gg_p=$(command -v "$_gg_c" 2>/dev/null) || continue
+        if gg_py_fake 0 "$_gg_p"; then continue; fi
+        if [ "$_gg_c" = py ]; then _gg_py_probe "$_gg_p" -3 || continue
+        else _gg_py_probe "$_gg_p" || continue
+        fi
+        GG_PY=$_gg_exe; export GG_PY; return 0
+    done
+    GG_PY=""
+    echo "🔴 no working Python 3.9+ found (tried python3, python, py -3) — install Python 3.9+ from python.org" >&2
+    return 1
+}
+# gg_hook_exec SCRIPT [ARGS...]: the hook wrappers' loop. Reads stdin once, runs
+# `<candidate> SCRIPT ARGS` with it; exits with the hook's own code. Skips (without
+# running) a missing candidate or one under WindowsApps; moves on after rc 9009, 49,
+# 127 ("not a real Python") or 86 (the hook's "interpreter below 3.9"). No candidate
+# left: exit 0 (fail-open, the owner's decision; the installer self-test is loud).
+# stdin goes to a mktemp file when mktemp and cat exist, else (a trimmed PATH) into
+# a shell variable through bash's `read -d ''` — this function runs only in bash.
+gg_hook_exec() {
+    PYTHONUTF8=1; PYTHONIOENCODING=utf-8; PYTHONDONTWRITEBYTECODE=1
+    export PYTHONUTF8 PYTHONIOENCODING PYTHONDONTWRITEBYTECODE
+    _gg_buf=""; _gg_in=""
+    if command -v mktemp >/dev/null 2>&1 && command -v cat >/dev/null 2>&1; then
+        _gg_buf=$(mktemp "${TMPDIR:-/tmp}/gg-hook.XXXXXX" 2>/dev/null) || _gg_buf=""
+    fi
+    trap '[ -z "$_gg_buf" ] || rm -f "$_gg_buf"' EXIT
+    trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
+    if [ -n "$_gg_buf" ]; then
+        cat > "$_gg_buf" || exit 0
+    else
+        IFS= read -r -d '' _gg_in || true
+    fi
+    for _gg_c in python3 python py; do
+        _gg_p=$(command -v "$_gg_c" 2>/dev/null) || continue
+        if gg_py_fake 0 "$_gg_p"; then continue; fi
+        if [ -n "$_gg_buf" ]; then
+            if [ "$_gg_c" = py ]; then "$_gg_p" -3 "$@" < "$_gg_buf"; else "$_gg_p" "$@" < "$_gg_buf"; fi
+        else
+            if [ "$_gg_c" = py ]; then printf '%s' "$_gg_in" | "$_gg_p" -3 "$@"; else printf '%s' "$_gg_in" | "$_gg_p" "$@"; fi
+        fi
+        _gg_rc=$?
+        case "$_gg_rc" in 9009|49|127|86) continue ;; esac
+        exit "$_gg_rc"
+    done
+    exit 0
+}
+# <<< gg-inline:pyenv <<<
+
 NOW=$(date +%s)
 COMMON=$(git rev-parse --git-common-dir 2>/dev/null) || { echo "🔴 plan gate: not a git repository" >&2; exit 2; }
-case "$COMMON" in /*) ;; *) COMMON=$(cd "$COMMON" && pwd -P) ;; esac
+gg_is_abs "$COMMON" || COMMON=$(gg_path "$COMMON") || { echo "🔴 plan gate: cannot resolve $COMMON" >&2; exit 2; }
 TOP=$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)
 MAIN_CONF="$(dirname "$COMMON")/.gitguards.conf"
 EMPTY_TREE=4b825dc642cb6eb9a060e54bf8d69288fbee4904
@@ -113,12 +247,20 @@ else
 fi
 
 # Contract: policy text — the protected branch on origin, else the main working tree.
+# Read with gg_blob: absent on origin (the gate is being adopted) → the main working
+# tree's text; a read ERROR (Codex C1) → refuse: the defaults below would switch the
+# gate off and the tree's copy is whatever the branch wants.
 POLICY=""
-if [ -n "$PROT_REF" ] && case "$PROT_REF" in refs/remotes/*) true ;; *) false ;; esac \
-   && POLICY=$(git show "$PROT_REF:.gitguards.conf" 2>/dev/null); then
-    :
-elif [ -f "$MAIN_CONF" ]; then
-    POLICY=$(cat "$MAIN_CONF")
+_prc=1
+case "$PROT_REF" in
+    refs/remotes/*) _prc=0; POLICY=$(gg_blob "$PROT_REF" .gitguards.conf) || _prc=$? ;;
+esac
+if [ "$_prc" = 1 ]; then
+    POLICY=""
+    if [ -f "$MAIN_CONF" ]; then POLICY=$(cat "$MAIN_CONF"); fi
+elif [ "$_prc" != 0 ]; then
+    echo "🔴 policy from ${PROT_REF#refs/remotes/} unreadable — run: git fetch origin; if it persists, report it" >&2
+    exit 1
 fi
 pol() { printf '%s\n' "$POLICY" | conf_get "$1"; }
 
@@ -151,8 +293,8 @@ CONFIRM="$COMMON/monitorex-locks/CONFIRM"
 # approval mark, which only the hook writes on the user's ExitPlanMode.
 project_plans_dir() {
     _s="$(dirname "$COMMON")/.claude/settings.json"
-    [ -f "$_s" ] && command -v python3 >/dev/null 2>&1 || { echo .plans; return 0; }
-    python3 - "$_s" <<'PY' 2>/dev/null || return 1
+    [ -f "$_s" ] && gg_python 2>/dev/null || { echo .plans; return 0; }
+    "$GG_PY" - "$_s" <<'PY' 2>/dev/null || return 1
 import json, re, sys
 try:
     v = json.load(open(sys.argv[1], encoding="utf-8")).get("plansDirectory", ".plans")
@@ -167,7 +309,8 @@ plans_dirs() {   # one per line
     _pd=$(project_plans_dir) || _pd=""
     if [ -n "$_pd" ]; then
         printf '%s\n' "$TOP/$_pd"
-        [ "$(dirname "$COMMON")" != "$TOP" ] && printf '%s\n' "$(dirname "$COMMON")/$_pd"
+        # Normalized: git's C:/… and the shell's /c/… are one directory on Windows.
+        [ "$(gg_path "$(dirname "$COMMON")")" != "$(gg_path "$TOP")" ] && printf '%s\n' "$(dirname "$COMMON")/$_pd"
     fi
     printf '%s\n' "$HOME/.claude/plans"
 }
@@ -194,8 +337,13 @@ matches_new_mask() {  # $1 repo-relative path
     set +f
     return 1
 }
+# Through ls-tree, not `git cat-file -e <rev>:<path>`: MSYS rewrites such an argument.
+# A failed read counts as "not there": the file is then new and needs a plan (fail-closed).
+in_tree() {   # $1 rev, $2 path → present at that revision
+    [ -n "$(git --no-replace-objects ls-tree --full-tree "$1" -- "$2" 2>/dev/null)" ]
+}
 in_protected() {   # $1 path → present in the protected branch
-    [ -n "$PROT_REF" ] && git cat-file -e "$PROT_REF:$1" 2>/dev/null
+    [ -n "$PROT_REF" ] && in_tree "$PROT_REF" "$1"
 }
 # New files a COMMIT brings in: added relative to its first parent (what the commit
 # itself introduces — a merge of main lists main's files here, and the next filters
@@ -224,7 +372,7 @@ paths_new_files() {    # $@ — pathspec relative to the current directory
         | sort -u | while IFS= read -r _f; do
         [ -n "$_f" ] && [ -f "$TOP/$_f" ] || continue
         matches_new_mask "$_f" || continue
-        git cat-file -e "HEAD:$_f" 2>/dev/null && continue
+        in_tree HEAD "$_f" && continue
         in_protected "$_f" && continue
         printf '%s\n' "$_f"
     done

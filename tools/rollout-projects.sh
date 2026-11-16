@@ -8,8 +8,11 @@
 #   GG_ROLLOUT_SHA=<sha> rollout-projects.sh prepare
 #                                 worktree wt/gg-update-<sha8> per project, files, commit
 #                                 (+ settings-merge.py: hooks and plansDirectory in
-#                                 .claude/settings.json, the plans folder in .gitignore);
-#                                 Next route types for pre-push (typegen, or GG_DEV_CMD once)
+#                                 .claude/settings.json, the plans folder in .gitignore;
+#                                 + attributes.py: the kit's eol=lf block in .gitattributes);
+#                                 Next route types for pre-push (typegen, or GG_DEV_CMD once);
+#                                 the guard self-test (selftest.sh) — a project whose guard
+#                                 does not block is reported and not recorded for ship
 #   (run vibe-flow:release-gate on every prepared worktree — pre-push requires it)
 #   GG_ROLLOUT_SHA=<sha> rollout-projects.sh ship
 #                                 push, PR, merge exactly the prepared commit (waits for the PR
@@ -150,6 +153,33 @@ plans_opt_in() {   # $1 = tree
     git -C "$t" status --porcelain -- .claude/settings.json .gitignore 2>/dev/null | sed 's/^...//'
 }
 
+# The kit's eol=lf block in .gitattributes (attributes.py, the same helper install.sh
+# uses): a project updated by rollout and cloned on Windows must get LF scripts too.
+# Prints .gitattributes when it changed. Uncommitted edits in it → not touched.
+attributes_opt_in() {   # $1 = tree
+    local t="$1"
+    [ -f "$GG/attributes.py" ] || return 0          # a pinned release older than 1.3.0
+    if [ -n "$(git -C "$t" status --porcelain -- .gitattributes 2>/dev/null)" ]; then
+        printf '  ⚠️  %s\n' ".gitattributes has uncommitted edits — the kit's eol=lf block not added" >&2
+        return 0
+    fi
+    python3 "$GG/attributes.py" "$t" >/dev/null \
+        || { printf '  ⚠️  %s\n' "attributes.py failed — the kit's eol=lf block not added" >&2; return 0; }
+    git -C "$t" status --porcelain -- .gitattributes 2>/dev/null | sed 's/^...//'
+}
+
+# The guard self-test (selftest.sh, the same check install.sh runs): the project's
+# registered guard must really deny in its main working tree. rc 1 + the reason.
+guard_selftest() {   # $1 = tree whose .claude/settings.json is checked
+    [ -f "$GG/selftest.sh" ] || return 0            # a pinned release older than 1.3.0
+    local out
+    if ! out=$(bash "$GG/selftest.sh" "$1" 2>&1); then
+        warn "guard self-test FAILED — $(printf '%s' "$out" | tail -1)"
+        return 1
+    fi
+    say "  guard self-test ✅"
+}
+
 sync_files() {
     local T="$1" rel dst
     pairs | while IFS="$(printf '\t')" read -r rel dst; do
@@ -170,14 +200,15 @@ sync_files() {
 # The kit files and a tracked CLAUDE.md as they are on ref $2 of project $1, into dir $3.
 # list compares with this view: prepare starts from origin, not from the main folder,
 # which may lag behind (an earlier rollout merged, the folder not pulled) or carry edits.
+# Files are read with gg_blob (ls-tree + cat-file): no <rev>:<path> argument.
 view_ref() {
     local P="$1" ref="$2" V="$3" rel dst
     pairs | while IFS="$(printf '\t')" read -r rel dst; do
-        git -C "$P" cat-file -e "$ref:$dst" 2>/dev/null || continue
-        mkdir -p "$V/$(dirname "$dst")"; git -C "$P" show "$ref:$dst" > "$V/$dst"
+        mkdir -p "$V/$(dirname "$dst")"
+        (cd "$P" && gg_blob "$ref" "$dst") > "$V/$dst" || rm -f "$V/$dst"
     done
     case "$(git -C "$P" ls-tree "$ref" -- CLAUDE.md | cut -c1-6)" in
-        100644|100755) git -C "$P" show "$ref:CLAUDE.md" > "$V/CLAUDE.md" ;;
+        100644|100755) (cd "$P" && gg_blob "$ref" CLAUDE.md) > "$V/CLAUDE.md" || rm -f "$V/CLAUDE.md" ;;
     esac
 }
 
@@ -191,11 +222,18 @@ claude_in_git() { git -C "$1" ls-files --error-unmatch CLAUDE.md >/dev/null 2>&1
 # version, and an older pinned release may not have it at all (Codex C1).
 GG_CONF_LIB="$SELF_DIR/../plugins/vibe-flow/git-guards/files/scripts/git-guards/conf.sh"
 [ -f "$GG_CONF_LIB" ] || die "no $GG_CONF_LIB — this vibe-flow checkout is incomplete"
+# gg_blob (ls-tree + cat-file) — next to conf.sh, the same version (Codex C1 above).
+. "${GG_CONF_LIB%/*}/paths.sh" || die "no paths.sh next to $GG_CONF_LIB — this vibe-flow checkout is incomplete"
+# rc 2: the project's policy on its protected branch exists but cannot be read (K8):
+# nothing is guessed — the caller skips the project. Other failures: defaults as before.
 conf() {   # $1 project, $2 key → value ("" if absent); GG_PROTECTED → the protected branch
     ( . "$GG_CONF_LIB"
-      if ! gg_conf_init "$1" >/dev/null 2>&1; then [ "$2" = GG_PROTECTED ] && printf 'main'; exit 0; fi
+      rc=0; gg_conf_init "$1" >/dev/null 2>&1 || rc=$?
+      if [ "$rc" = 2 ]; then exit 2; fi
+      if [ "$rc" != 0 ]; then [ "$2" = GG_PROTECTED ] && printf 'main'; exit 0; fi
       if [ "$2" = GG_PROTECTED ]; then printf '%s' "$GG_PROT"; else gg_get "$2" ""; fi )
 }
+UNREADABLE="its .gitguards.conf on the protected branch cannot be read (git fetch origin; if it persists, report it)"
 policy_source() { # $1 project → origin | local-branch | main-text | none (Codex C2: its own subshell)
     ( . "$GG_CONF_LIB"; gg_conf_init "$1" >/dev/null 2>&1 && printf '%s' "$GG_POLICY_SOURCE" )
 }
@@ -203,7 +241,7 @@ policy_source() { # $1 project → origin | local-branch | main-text | none (Cod
 wt_dir() {   # worktree directory of project $1, the same rule as wt-new.sh
     local P="$1" base; base="$(conf "$P" GG_WT_DIR)"
     [ -n "$base" ] || base="$(dirname "$P")/$(basename "$P")-wt"
-    case "$base" in /*) mkdir -p "$base" ;; *) base="$(cd "$P" && mkdir -p "$base" && cd "$base" && pwd)" ;; esac
+    if gg_is_abs "$base"; then mkdir -p "$base"; else base="$(cd "$P" && mkdir -p "$base" && cd "$base" && pwd)"; fi
     printf '%s/%s' "$base" "$NAME"
 }
 
@@ -348,7 +386,7 @@ list)
         T=$(mktemp -d)
         S="$P"; CM="$P/CLAUDE.md"; extra=""
         if has_origin "$P"; then
-            PROT=$(conf "$P" GG_PROTECTED)
+            PROT=$(conf "$P" GG_PROTECTED) || { warn "$(basename "$P"): $UNREADABLE — skipped"; rm -rf "$T"; continue; }
             if git -C "$P" fetch -q origin "$PROT" 2>/dev/null; then
                 S="$T/view"; mkdir -p "$S"; view_ref "$P" "origin/$PROT" "$S"
                 [ -f "$S/CLAUDE.md" ] && CM="$S/CLAUDE.md"
@@ -414,7 +452,7 @@ prepare)
         say "== $name"
         if ! has_origin "$P"; then
             # No remote: nothing to push and no PR — commit straight to the main folder
-            changed=$(sync_files "$P"; plans_opt_in "$P")
+            changed=$(sync_files "$P"; plans_opt_in "$P"; attributes_opt_in "$P")
             st="$(rb "$P/CLAUDE.md" --check)"
             case "$st" in update*|edited*)
                 if claude_in_git "$P"; then
@@ -434,6 +472,7 @@ prepare)
             # shellcheck disable=SC2086
             (cd "$P" && bash scripts/git-safe-commit.sh --message-file "$MSG" -- $changed 2>&1 | tail -1)
             (cd "$P" && bash scripts/install-git-guards.sh >/dev/null 2>&1) && say "  hooks reinstalled (no origin — done)"
+            guard_selftest "$P" || true
             continue
         fi
         W=$(wt_dir "$P"); M="$RUN/projects/$name"
@@ -445,10 +484,10 @@ prepare)
             fi
             continue
         fi
-        PROT=$(conf "$P" GG_PROTECTED)
+        PROT=$(conf "$P" GG_PROTECTED) || { warn "$UNREADABLE — skipped"; continue; }
         git -C "$P" fetch -q origin "$PROT" || { warn "fetch failed — skipped"; continue; }
         git -C "$P" worktree add -q --no-track -b "$BRANCH" "$W" "origin/$PROT" || { warn "worktree add failed — skipped"; continue; }
-        changed=$(sync_files "$W"; plans_opt_in "$W")
+        changed=$(sync_files "$W"; plans_opt_in "$W"; attributes_opt_in "$W")
         ignored=no
         if claude_in_git "$W"; then
             st="$(rb "$W/CLAUDE.md" --check)"
@@ -484,6 +523,10 @@ prepare)
         if [ "$commit" = "$base" ]; then
             warn "commit failed in $W — not recorded for ship"; continue
         fi
+        # The prepared settings.json, judged in the project's main working tree.
+        if ! guard_selftest "$W"; then
+            warn "the guard does not block for this project — $W not recorded for ship"; continue
+        fi
         printf 'project=%s\nworktree=%s\nbranch=%s\ncommit=%s\nignored_claude=%s\n' \
             "$P" "$W" "$BRANCH" "$commit" "$ignored" > "$M"
         say "  worktree: $W ($commit)"
@@ -506,7 +549,7 @@ ship)
         [ -d "$P" ] || { warn "$P is gone — skipped"; continue; }
         say "== $name"
         if [ -n "$W" ]; then
-            PROT=$(conf "$P" GG_PROTECTED)
+            PROT=$(conf "$P" GG_PROTECTED) || { warn "$UNREADABLE — skipped"; continue; }
             [ -d "$W" ] || { warn "worktree $W is gone — skipped"; continue; }
             [ "$(git -C "$W" rev-parse HEAD)" = "$COMMIT" ] \
                 || { warn "HEAD of $W is not the prepared commit $COMMIT — skipped"; continue; }
@@ -570,7 +613,7 @@ plugins)
     [ -f "$REG" ] || die "plugin registry not found: $REG"
     fetch_main
     SHA=$(git -C "$REPO" rev-parse origin/main)
-    MP=$(git -C "$REPO" show "$SHA:.claude-plugin/marketplace.json" \
+    MP=$( (cd "$REPO" && gg_blob "$SHA" .claude-plugin/marketplace.json) \
         | python3 -c 'import json,sys;print(json.load(sys.stdin)["name"])') || die "cannot read the marketplace name"
     say "marketplace $MP · reference: vibe-flow origin/main $SHA"
     if ! out=$("$CLI" plugin marketplace update "$MP" </dev/null 2>&1); then

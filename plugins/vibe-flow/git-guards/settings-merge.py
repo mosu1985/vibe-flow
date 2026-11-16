@@ -25,8 +25,15 @@ into the project. Added as ".plans" only when the key is absent (a project's own
 kept); then the folder is created and listed in .gitignore and in .git/info/exclude (the
 latter does not depend on the branch). A value outside the project (absolute, `..`) is left
 alone and reported — Claude Code refuses it anyway.
+
+Everything is written as UTF-8 with LF line ends on every OS, the status lines on
+stdout too: a piped stdout on Windows is cp1252, where the → of the first status
+line raised before settings.json was written, and it adds \\r to every line.
 """
 import json, os, re, subprocess, sys
+
+if sys.stdout is not None and hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace", newline="\n")
 
 root = sys.argv[1]
 path = os.path.join(root, ".claude", "settings.json")
@@ -109,7 +116,7 @@ else:
 if changed:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
+    with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
         json.dump(data, fh, ensure_ascii=False, indent=2)
         fh.write("\n")
     os.replace(tmp, path)          # atomic swap
@@ -117,20 +124,24 @@ if changed:
 
 
 def add_line(file, line):
-    """Append `line` to `file` unless an identical line is there. → True if appended."""
+    """Append `line` to `file` unless an identical line is there. → True if appended.
+    The tail is checked and written in bytes: LF on every OS, and no text-mode seek
+    into the middle of a multi-byte character."""
     try:
-        with open(file, encoding="utf-8") as fh:
+        with open(file, encoding="utf-8", errors="surrogateescape") as fh:
             if line in (l.rstrip("\r\n") for l in fh):
                 return False
     except FileNotFoundError:
         pass
-    with open(file, "a+", encoding="utf-8") as fh:
+    with open(file, "a+b") as fh:
         fh.seek(0, os.SEEK_END)
-        if fh.tell() > 0:
-            fh.seek(fh.tell() - 1)
-            if fh.read(1) != "\n":
-                fh.write("\n")
-        fh.write(line + "\n")
+        size = fh.tell()
+        needs_newline = False
+        if size > 0:
+            fh.seek(size - 1)
+            needs_newline = fh.read(1) != b"\n"
+        fh.seek(0, os.SEEK_END)
+        fh.write((b"\n" if needs_newline else b"") + line.encode("utf-8") + b"\n")
     return True
 
 
@@ -149,7 +160,8 @@ if not os.path.isdir(pdir):
     os.makedirs(pdir)
     print(u"+ %s/ created" % pd)
 ignore = "/%s/" % pd
-tracked = subprocess.run(["git", "-C", root, "ls-files", "--", pd], capture_output=True, text=True, timeout=10).stdout.strip()
+tracked = subprocess.run(["git", "-C", root, "ls-files", "--", pd], capture_output=True, encoding="utf-8",
+                         errors="surrogateescape", timeout=10, stdin=subprocess.DEVNULL).stdout.strip()
 if tracked:
     print(u"= %s/ is kept in git by the project — not ignored" % pd)
     sys.exit(0)
@@ -157,7 +169,8 @@ if add_line(os.path.join(root, ".gitignore"), ignore):
     print(u"+ %s in .gitignore" % ignore)
 try:
     common = subprocess.run(["git", "-C", root, "rev-parse", "--git-common-dir"],
-                            capture_output=True, text=True, timeout=10).stdout.strip()
+                            capture_output=True, encoding="utf-8", errors="surrogateescape",
+                            timeout=10, stdin=subprocess.DEVNULL).stdout.strip()
     if common:
         common = common if os.path.isabs(common) else os.path.join(root, common)
         info = os.path.join(common, "info")

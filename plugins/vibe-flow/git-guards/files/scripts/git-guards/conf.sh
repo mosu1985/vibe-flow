@@ -19,6 +19,20 @@
 # conf_raw: on values without a backslash inside double quotes it returns the same
 # (test-git-guards.sh checks that). Rules for this file: lines are read only with
 # `IFS= read -r`; no eval, no sourcing, no printf %b, no ${!name} built from data.
+#
+# The policy blob is read with gg_blob (paths.sh, sourced from next to this file):
+# 0 found, 1 absent — the bootstrap case, the main working tree's text applies —,
+# 2 unreadable — gg_conf_init says so and returns 2, and the caller STOPS (K8): the
+# built-in defaults and the tree's copy are exactly what a broken read must not
+# turn into policy.
+_gg_conf_lib=${BASH_SOURCE[0]%/*}
+if [ "$_gg_conf_lib" = "${BASH_SOURCE[0]}" ]; then _gg_conf_lib=.; fi
+if [ -f "$_gg_conf_lib/paths.sh" ]; then
+    . "$_gg_conf_lib/paths.sh"
+else
+    echo "🔴 scripts/git-guards/paths.sh missing next to conf.sh — the kit is incomplete: reinstall it (/vibe-flow:init)" >&2
+    return 1
+fi
 
 # gg_conf_raw KEY < text → the value of the last KEY= line.
 # rc 1: no such line; rc 2: an unterminated quote.
@@ -113,16 +127,34 @@ gg_conf_value() {
     return 2
 }
 
+# gg_conf_unreadable REF — the K8 stop message (stderr).
+gg_conf_unreadable() {
+    printf '🔴 policy from %s unreadable — run: git fetch origin; if it persists, report it\n' \
+        "$(gg_conf_ref_label "$1")" >&2
+}
+gg_conf_ref_label() {
+    case "$1" in
+        refs/remotes/*) printf '%s' "${1#refs/remotes/}" ;;
+        refs/heads/*)   printf '%s' "${1#refs/heads/}" ;;
+        *)              printf '%s' "$1" ;;
+    esac
+}
+# gg_conf_blob DIR REF → .gitguards.conf at REF in the repository at DIR (gg_blob's 0/1/2).
+gg_conf_blob() {
+    (cd "$1" 2>/dev/null || exit 2; gg_blob "$2" .gitguards.conf)
+}
+
 # gg_conf_init DIR — finds the protected branch and the policy text for the
 # repository at DIR. Sets GG_COMMON, GG_MAIN_CONF, GG_PROT, GG_PROT_REF,
 # GG_POLICY (text) and GG_POLICY_SOURCE: origin | local-branch | main-text | none.
+# rc 1: not a repository; rc 2: the protected branch's policy is unreadable (said
+# on stderr) — stop, never fall back.
 gg_conf_init() {
-    local dir="${1:-.}" h="" b="" t="" lb=""
+    local dir="${1:-.}" h="" b="" t="" lb="" brc=0
     GG_COMMON=$(git -C "$dir" rev-parse --git-common-dir 2>/dev/null) || return 1
-    case "$GG_COMMON" in
-        /*) ;;
-        *) GG_COMMON=$(cd "$dir" 2>/dev/null && cd "$GG_COMMON" 2>/dev/null && pwd -P) || return 1 ;;
-    esac
+    if ! gg_is_abs "$GG_COMMON"; then
+        GG_COMMON=$(gg_path "$dir" "$GG_COMMON") || return 1
+    fi
     GG_MAIN_CONF="$(dirname "$GG_COMMON")/.gitguards.conf"
     GG_PROT=""; GG_PROT_REF=""; GG_POLICY=""; GG_POLICY_SOURCE=none
 
@@ -137,11 +169,12 @@ gg_conf_init() {
         done
     fi
     if [ -n "$GG_PROT_REF" ]; then
-        if t=$(git -C "$dir" show "$GG_PROT_REF:.gitguards.conf" 2>/dev/null); then
-            GG_POLICY=$t; GG_POLICY_SOURCE=origin
-        elif [ -f "$GG_MAIN_CONF" ]; then
-            GG_POLICY=$(cat "$GG_MAIN_CONF"); GG_POLICY_SOURCE=main-text
-        fi
+        t=$(gg_conf_blob "$dir" "$GG_PROT_REF") || brc=$?
+        case "$brc" in
+            0) GG_POLICY=$t; GG_POLICY_SOURCE=origin ;;
+            1) if [ -f "$GG_MAIN_CONF" ]; then GG_POLICY=$(cat "$GG_MAIN_CONF"); GG_POLICY_SOURCE=main-text; fi ;;
+            *) gg_conf_unreadable "$GG_PROT_REF"; return 2 ;;
+        esac
         return 0
     fi
 
@@ -151,11 +184,22 @@ gg_conf_init() {
     for b in main master; do
         if git -C "$dir" rev-parse -q --verify "refs/heads/$b^{commit}" >/dev/null 2>&1; then lb=$b; break; fi
     done
-    if [ -n "$lb" ] && t=$(git -C "$dir" show "refs/heads/$lb:.gitguards.conf" 2>/dev/null); then
+    brc=1
+    if [ -n "$lb" ]; then
+        brc=0; t=$(gg_conf_blob "$dir" "refs/heads/$lb") || brc=$?
+        if [ "$brc" -ge 2 ]; then gg_conf_unreadable "refs/heads/$lb"; return 2; fi
+    fi
+    if [ "$brc" = 0 ]; then
         GG_POLICY=$t; GG_POLICY_SOURCE=local-branch
         GG_PROT=$(printf '%s\n' "$t" | gg_conf_value GG_PROTECTED) || GG_PROT=$lb
-        if [ "$GG_PROT" != "$lb" ] && t=$(git -C "$dir" show "refs/heads/$GG_PROT:.gitguards.conf" 2>/dev/null); then
-            GG_POLICY=$t
+        if [ "$GG_PROT" != "$lb" ] \
+           && git -C "$dir" rev-parse -q --verify "refs/heads/$GG_PROT^{commit}" >/dev/null 2>&1; then
+            brc=0; t=$(gg_conf_blob "$dir" "refs/heads/$GG_PROT") || brc=$?
+            case "$brc" in
+                0) GG_POLICY=$t ;;
+                1) ;;
+                *) gg_conf_unreadable "refs/heads/$GG_PROT"; return 2 ;;
+            esac
         fi
     elif [ -f "$GG_MAIN_CONF" ]; then
         GG_POLICY=$(cat "$GG_MAIN_CONF"); GG_POLICY_SOURCE=main-text

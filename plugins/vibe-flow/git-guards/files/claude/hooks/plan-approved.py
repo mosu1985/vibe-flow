@@ -30,16 +30,39 @@ Pure functions decide() / codex_found() / search_dirs() / target_repos() /
 header_hidden() / accept_repo() are tested directly by test-git-guards.sh: the «no
 Codex» branch must be testable on a machine that has Codex installed, so it is never
 tested through the machine's environment.
+
+Native Windows (vibe-flow 1.3.0): a header path may be `C:/…`, `C:\\…` or `/c/…`;
+`~` is HOME first (Git Bash sets it; os.path.expanduser reads USERPROFILE there);
+"inside HOME" is decided on one drive, never by a commonpath that raises across
+drives; a junction counts as a link (os.path.islink misses junctions before 3.12),
+and links are found by walking the components, because 8.3 short names (RUNNER~1)
+make realpath(p) differ from p with no link anywhere.
 """
+from __future__ import annotations
+
+import sys
+
+if sys.version_info < (3, 9):
+    # Internal status for the hook wrapper: "too old, try the next interpreter" (K2).
+    sys.exit(86)
+
 import hashlib
 import json
 import os
 import re
 import shutil
+import stat
 import subprocess
-import sys
 import tempfile
 import time
+
+WINDOWS = sys.platform == "win32"
+# A reparse point whose tag has the "name surrogate" bit redirects to another path:
+# symlinks, junctions, WSL symlinks. Cloud placeholders (OneDrive) carry other tags
+# and are ordinary directories for this purpose.
+REPARSE_TAG_NAME_SURROGATE = 0x20000000
+DEFAULT_PATHEXT = ".COM;.EXE;.BAT;.CMD"
+_MSYS_DRIVE = re.compile(r"/([A-Za-z])(?=/|$)")
 
 GATE_LINE = re.compile(r"(?m)^(Гейт: ✅ пройден|Gate: ✅ passed)")
 CODEX_SECTION = re.compile(r"(?m)^## .*Codex")
@@ -60,23 +83,56 @@ STANDARD_DIRS = ("~/.local/bin", "~/.codex/packages/standalone/current/bin",
                  "/opt/homebrew/bin", "/usr/local/bin", "~/.npm-global/bin")
 
 
+def _home():
+    """HOME first (Git Bash sets it), then the OS's own idea of the home directory."""
+    return os.environ.get("HOME") or os.path.expanduser("~")
+
+
+def _expanduser(path):
+    """os.path.expanduser, except that on Windows `~` is HOME first (K6 home())."""
+    if WINDOWS and (path == "~" or path.startswith(("~/", "~\\"))):
+        return _home() + path[1:]
+    return os.path.expanduser(path)
+
+
+def _native_drive(path):
+    """Windows: the Git Bash form `/c/x` → `C:/x`; anything else unchanged."""
+    m = _MSYS_DRIVE.match(path) if WINDOWS else None
+    return m.group(1).upper() + ":" + (path[2:] or "/") if m else path
+
+
 def search_dirs(extra=""):
     """Standard Codex locations — ALWAYS; GG_CODEX_SEARCH_PATHS may only ADD."""
-    dirs = [os.path.expanduser(d) for d in STANDARD_DIRS]
-    for d in (extra or "").split(":"):
+    dirs = [_expanduser(d) for d in STANDARD_DIRS]
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        dirs.append(os.path.join(appdata, "npm"))      # `npm install -g` on Windows
+    for d in (extra or "").split(os.pathsep):
         if d.strip():
-            dirs.append(os.path.expanduser(d.strip()))
+            dirs.append(_expanduser(d.strip()))
     return dirs
+
+
+def _program_files(directory, name):
+    """The files that would run `name` from `directory`: on Windows one per PATHEXT
+    extension (codex.cmd from npm), elsewhere the bare name."""
+    base = os.path.join(directory, name)
+    if not WINDOWS:
+        return [base]
+    exts = [e for e in (os.environ.get("PATHEXT") or DEFAULT_PATHEXT).split(os.pathsep) if e]
+    return [base + e for e in exts]
+
+
+def _runnable(path):
+    # Windows has no exec bit (os.access(X_OK) is always true): the PATHEXT
+    # extension, already in the name, is what makes a file runnable there.
+    return os.path.isfile(path) and (WINDOWS or os.access(path, os.X_OK))
 
 
 def codex_found(path_env, dirs):
     if shutil.which("codex", path=path_env or ""):
         return True
-    for d in dirs:
-        f = os.path.join(d, "codex")
-        if os.path.isfile(f) and os.access(f, os.X_OK):
-            return True
-    return False
+    return any(_runnable(f) for d in dirs for f in _program_files(d, "codex"))
 
 
 def _cells(line):
@@ -129,6 +185,7 @@ def decide(plan, found):
 
 TARGET_LINE = re.compile(r"^(?:Репозиторий|Repository):[ \t]*(.*)$")
 TARGET_PATH = re.compile(r"^[~/][^\s`]*$")
+DRIVE_TARGET_PATH = re.compile(r"^[A-Za-z]:[\\/][^\s`]*$")     # Windows only: C:/…, C:\…
 MAX_TARGETS = 5
 TARGETS_DEADLINE = 15.0
 _CTRL = re.compile(r"[\x00-\x1f\x7f]")
@@ -150,6 +207,11 @@ def header_hidden(plan):
                or l.lstrip().startswith(("```", "~~~")) for l in _header_lines(plan))
 
 
+def _target_like(token):
+    """An absolute or `~` path as the header must write it (drive forms on Windows only)."""
+    return bool(TARGET_PATH.match(token or "") or (WINDOWS and DRIVE_TARGET_PATH.match(token or "")))
+
+
 def target_repos(plan):
     """Raw paths the header names, one per `Репозиторий:` / `Repository:` line, in order."""
     out = []
@@ -163,9 +225,9 @@ def target_repos(plan):
             token = rest[1:end] if end > 0 else ""
         else:
             token = re.split(r"[\s(]", rest, maxsplit=1)[0].rstrip(",;")
-        if token and TARGET_PATH.match(token) and token not in out:
+        if token and _target_like(token) and token not in out:
             out.append(token)
-        elif token and not TARGET_PATH.match(token) and token.strip(",;"):
+        elif token and not _target_like(token) and token.strip(",;"):
             out.append(token)   # accept_repo refuses it with a reason (relative path)
     return out
 
@@ -173,7 +235,8 @@ def target_repos(plan):
 def _git_common(path):
     env = dict(os.environ, GIT_CONFIG_NOSYSTEM="1", GIT_OPTIONAL_LOCKS="0")
     r = subprocess.run(["git", "-c", "core.fsmonitor=", "-C", path, "rev-parse", "--git-common-dir"],
-                       capture_output=True, text=True, timeout=5, env=env)
+                       capture_output=True, encoding="utf-8", errors="surrogateescape",
+                       timeout=5, env=env, stdin=subprocess.DEVNULL)
     out = r.stdout.strip()
     if r.returncode != 0 or not out:
         return None
@@ -182,38 +245,82 @@ def _git_common(path):
 
 def expand_target(raw, home):
     """`~` / `~/…` against the given home (not the process HOME); `~user` → None."""
-    if raw == "~" or raw.startswith("~/"):
+    if raw == "~" or raw.startswith("~/") or (WINDOWS and raw.startswith("~\\")):
         return os.path.abspath(os.path.join(home, raw[2:]))
     if raw.startswith("~"):
         return None
-    return os.path.abspath(raw)
+    return os.path.abspath(_native_drive(raw))
+
+
+def _within(path, root):
+    """path is root or below it. Same drive first: commonpath raises across drives."""
+    if os.path.splitdrive(path)[0].casefold() != os.path.splitdrive(root)[0].casefold():
+        return False
+    try:
+        common = os.path.commonpath([path, root])
+    except ValueError:
+        return False
+    return os.path.normcase(common) == os.path.normcase(root)
+
+
+def _is_link(path):
+    """A symlink; on Windows also a junction or any other redirecting reparse point."""
+    if not WINDOWS:
+        return os.path.islink(path)
+    try:
+        st = os.lstat(path)
+    except (OSError, ValueError):
+        return False
+    if not getattr(st, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+        return False
+    return bool(getattr(st, "st_reparse_tag", 0) & REPARSE_TAG_NAME_SURROGATE)
+
+
+def _has_link(path):
+    """Any component of the absolute path is a link (walked, not realpath(p) != p)."""
+    cur = os.path.abspath(path)
+    while True:
+        if _is_link(cur):
+            return True
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return False
+        cur = parent
+
+
+def _resolves_elsewhere(path):
+    """realpath leaves this path (a link in it). Both sides normalized, so separators
+    and letter case do not count as a difference on Windows."""
+    return os.path.normcase(os.path.realpath(path)) != os.path.normcase(os.path.normpath(path))
 
 
 def accept_repo(raw, home):
     """→ (common dir, "") for a target the mark may go to, else (None, reason)."""
     if not home:
         return None, "HOME is not set — no target is accepted"
-    if not TARGET_PATH.match(raw or ""):
+    if not _target_like(raw):
         return None, "relative path — write an absolute path or ~/…"
     home_r = os.path.realpath(home)
     p = expand_target(raw, home)
     if p is None:
         return None, "~user paths are not supported — write ~/… or an absolute path"
-    if os.path.commonpath([p, home_r]) != home_r:
+    # Physical location against the physical HOME: an 8.3 HOME (C:\Users\RUNNER~1)
+    # and its long form are the same place. A link is refused below anyway.
+    if not _within(os.path.realpath(p), home_r):
         return None, "outside HOME (" + home_r + ")"
     if not os.path.isdir(p):
         return None, "does not exist or is not a directory"
-    if os.path.realpath(p) != p:
+    if _has_link(p):
         return None, "the path goes through a symlink — name the real directory"
     g = os.path.join(p, ".git")
     if not os.path.lexists(g):
         return None, "not a git repository"
-    if os.path.islink(g) or not os.path.isdir(g):
+    if _is_link(g) or not os.path.isdir(g):
         return None, "not the main working tree (a worktree or a gitdir: file) — name the main tree"
     common = _git_common(p)
     if common is None:
         return None, "not a git repository"
-    if common != os.path.realpath(g):
+    if os.path.normcase(common) != os.path.normcase(os.path.realpath(g)):
         return None, "not the main working tree — name the main tree"
     if not os.path.isfile(os.path.join(common, "monitorex-hooks", "plan-gate.sh")):
         return None, "the git-guards kit is not installed there (no monitorex-hooks/plan-gate.sh)"
@@ -254,10 +361,15 @@ def plans_dirs(proj):
     raw.append("~/.claude/plans")
     out = []
     for p in raw:
-        r = os.path.realpath(os.path.expanduser(p))
+        r = os.path.realpath(_expanduser(p))
         if r not in out:
             out.append(r)
     return out
+
+
+def _same_dir_in(path, dirs):
+    """path is one of dirs (realpath'd on both sides; letter case per the OS)."""
+    return os.path.normcase(path) in {os.path.normcase(d) for d in dirs}
 
 
 def copy_plan(common, name, text, source_dir):
@@ -267,10 +379,10 @@ def copy_plan(common, name, text, source_dir):
     is found by the target as it is) and only into a target that switched the folder on
     (plansDirectory in its settings.json) — elsewhere a stray, un-ignored folder would appear.
     A different file with the same name is never overwritten."""
-    shared = {os.path.realpath(os.path.expanduser("~/.claude/plans"))}
+    shared = {os.path.realpath(_expanduser("~/.claude/plans"))}
     if os.environ.get("GG_PLANS_DIR"):
-        shared.add(os.path.realpath(os.path.expanduser(os.environ["GG_PLANS_DIR"])))
-    if source_dir in shared:
+        shared.add(os.path.realpath(_expanduser(os.environ["GG_PLANS_DIR"])))
+    if _same_dir_in(source_dir, shared):
         return None
     main = os.path.dirname(os.path.realpath(common))
     try:
@@ -284,22 +396,24 @@ def copy_plan(common, name, text, source_dir):
     if d is None:
         return "%s: its plansDirectory is unusable — %s not copied there" % (main, name)
     dest_dir = os.path.join(main, d)
-    if os.path.islink(dest_dir):
+    if _is_link(dest_dir):
         return "%s: %s is a symlink — %s not copied there" % (main, d, name)
     os.makedirs(dest_dir, exist_ok=True)
-    if os.path.realpath(dest_dir) != dest_dir:
+    if _resolves_elsewhere(dest_dir):
         return "%s: %s goes through a symlink — %s not copied there" % (main, d, name)
     dest = os.path.join(dest_dir, name)
     if os.path.lexists(dest):
         try:
-            with open(dest, encoding="utf-8") as fh:
-                same = not os.path.islink(dest) and fh.read() == text
+            # newline="": the text exactly as written, CRLF included (the mark hashes it).
+            with open(dest, encoding="utf-8", newline="") as fh:
+                same = not _is_link(dest) and fh.read() == text
         except Exception:
             same = False
         return None if same else "%s: a different %s already in %s — not overwritten" % (main, name, d)
     fd, tmp = tempfile.mkstemp(dir=dest_dir, prefix=".tmp-")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        # newline="\n": no CRLF translation on Windows, the file is the approved text byte for byte.
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(text)
         os.replace(tmp, dest)
     except BaseException:
@@ -317,14 +431,14 @@ def write_mark(common, name, body):
     locks = os.path.join(common, "monitorex-locks")
     d = os.path.join(locks, "plan-approved")
     for x in (locks, d):
-        if os.path.islink(x):
+        if _is_link(x):
             raise OSError("symlink " + x)
     os.makedirs(d, exist_ok=True)
-    if os.path.realpath(d) != d:
+    if _resolves_elsewhere(d):
         raise OSError("symlink in " + d)
     fd, tmp = tempfile.mkstemp(dir=d, prefix=".tmp-")
     try:
-        with os.fdopen(fd, "w") as fh:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(body)
         os.replace(tmp, os.path.join(d, name))
     except BaseException:
@@ -335,20 +449,34 @@ def write_mark(common, name, body):
         raise
 
 
+def _say(message):
+    """Hook JSON on stdout, ASCII only: Windows encodes stdout as cp1252, where the
+    reasons' dashes and Cyrillic used to raise and lose the message (K5)."""
+    print(json.dumps(message, ensure_ascii=True))
+
+
 def _tell(reason):
-    print(json.dumps({"decision": "block",
-                      "reason": "Plan approval mark NOT written: " + reason + " A [feat] "
-                      "push citing this plan will be rejected by pre-push until the plan "
-                      "passes the gate and is approved again."}, ensure_ascii=False))
+    _say({"decision": "block",
+          "reason": "Plan approval mark NOT written: " + reason + " A [feat] "
+          "push citing this plan will be rejected by pre-push until the plan "
+          "passes the gate and is approved again."})
     sys.exit(0)
 
 
-def main():
+def _read_payload():
+    """The hook input as bytes, decoded as UTF-8 (K5); None when it is not a JSON object."""
     try:
-        p = json.loads(sys.stdin.read())
+        p = json.loads(sys.stdin.buffer.read().decode("utf-8-sig", "surrogateescape"))
     except Exception:
+        return None
+    return p if isinstance(p, dict) else None
+
+
+def main():
+    p = _read_payload()
+    if p is None:
         sys.exit(0)
-    if not isinstance(p, dict) or p.get("tool_name") != "ExitPlanMode":
+    if p.get("tool_name") != "ExitPlanMode":
         sys.exit(0)
     r = p.get("tool_response")
     if not isinstance(r, dict):
@@ -359,11 +487,11 @@ def main():
     if not isinstance(fp, str) or not fp.strip() or not isinstance(plan, str) or not plan.strip():
         _tell("ExitPlanMode returned no plan file path or no plan text.")
     try:
-        proj = os.environ.get("CLAUDE_PROJECT_DIR") or ""
+        proj = _native_drive(os.environ.get("CLAUDE_PROJECT_DIR") or "")
         plans = plans_dirs(proj)
-        real = os.path.realpath(os.path.expanduser(fp))
+        real = os.path.realpath(_expanduser(_native_drive(fp)))
         name = os.path.basename(real)
-        if (os.path.dirname(real) not in plans or ".." in name
+        if (not _same_dir_in(os.path.dirname(real), plans) or ".." in name
                 or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9._-]*\.md", name)):
             _tell("the plan file is not a <name>.md directly in any of the plans directories: "
                   + ", ".join(plans) + ".")
@@ -396,7 +524,9 @@ def main():
                 notes.append("Marks for the repositories named in the plan were NOT written: the plan header "
                              "contains text the approval window may not show (<!--, <details>, a code fence or control characters).")
             else:
-                home = os.environ.get("HOME") or ""
+                # HOME only: with HOME unset no target is accepted (fail-closed). On
+                # Windows outside Git Bash HOME may be absent; the profile is the home there.
+                home = os.environ.get("HOME") or (os.path.expanduser("~") if WINDOWS else "")
                 deadline = time.monotonic() + TARGETS_DEADLINE
                 ok_list, refused, not_copied = [], [], []
                 for i, raw in enumerate(targets):
@@ -410,7 +540,7 @@ def main():
                     try:
                         # The session's own repository named in the header: already written above.
                         exp = expand_target(raw, home) if home else None
-                        if exp and session_top and os.path.realpath(exp) == session_top:
+                        if exp and session_top and _same_dir_in(os.path.realpath(exp), [session_top]):
                             continue
                         common, why = accept_repo(raw, home)
                         if common is None:
@@ -440,7 +570,7 @@ def main():
                          + why + "). If you did not decide that, delete monitorex-locks/plan-approved/"
                          + name + ".")
         if notes:
-            print(json.dumps({"systemMessage": "\n".join(notes)}, ensure_ascii=False))
+            _say({"systemMessage": "\n".join(notes)})
     except SystemExit:
         raise
     except Exception:
