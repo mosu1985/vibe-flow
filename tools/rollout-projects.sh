@@ -472,7 +472,9 @@ prepare)
             # shellcheck disable=SC2086
             (cd "$P" && bash scripts/git-safe-commit.sh --message-file "$MSG" -- $changed 2>&1 | tail -1)
             (cd "$P" && bash scripts/install-git-guards.sh >/dev/null 2>&1) && say "  hooks reinstalled (no origin — done)"
-            guard_selftest "$P" || true
+            # Already committed (no origin, nothing to ship), but a guard that does not
+            # block is a failure of the run, as in the origin path (code review L1).
+            guard_selftest "$P" || { FAILED=1; warn "the guard does not block for this project — fix it before relying on the kit"; }
             continue
         fi
         W=$(wt_dir "$P"); M="$RUN/projects/$name"

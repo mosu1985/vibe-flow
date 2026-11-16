@@ -581,7 +581,9 @@ Bypassing review is a human decision: ask the user to run
 # `monitorex-$X` too: a name built from a variable is still the guard's directory.
 # Case-insensitive with either separator: `.git/MONITOREX-LOCKS` is the same
 # directory on APFS and NTFS; on Windows `.git.` and `.git:<stream>` are `.git`.
-BARRIER = re.compile(r"monitorex-(?:locks|hooks)\b|monitorex-[*?\[{$]", re.I)
+# A glob, `$` or backtick anywhere in the name after `monitorex-` (`monitorex-lock[s]`,
+# `monitorex-l?cks`, `monitorex-lo$A`) still expands to the guard's directory.
+BARRIER = re.compile(r"monitorex-(?:locks|hooks)\b|monitorex-[\w.-]*[*?\[{$`]", re.I)
 # git's remote-tracking refs on disk: rewriting them by hand forges origin/<protected>.
 FS_REFS = re.compile(r"\.git[. ]*(?::[^\\/\s]*)?[\\/]+(?:refs[\\/]+remotes|packed-refs)", re.I)
 # Ref NAMES in redirect targets (refs/remotes/… written by path relative to .git).
@@ -679,8 +681,17 @@ def split_assignments(seg: str) -> tuple[list[tuple[str, str]], str]:
     return out, rest
 
 
+# Quote removal happens in bash at run time, after the guard has looked: in
+# `.git/monitorex-"locks"`, `monitorex-lo''cks` or `monitorex-\locks` the raw text
+# does not spell the name, but the command writes there all the same. So the
+# barriers also run over a copy with quotes and backslashes dropped (code review H1).
+# The raw text is still checked: on Windows `\` is a separator there.
+_DEQUOTE = re.compile(r"""['"\\]""")
+
+
 def guarded(text: str) -> bool:
-    return bool(BARRIER.search(text) or FS_REFS.search(text))
+    flat = _DEQUOTE.sub("", text)
+    return any(rx.search(s) for rx in (BARRIER, FS_REFS) for s in (text, flat))
 
 
 def unquote(word: str) -> str:

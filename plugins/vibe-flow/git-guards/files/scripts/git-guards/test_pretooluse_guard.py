@@ -356,8 +356,20 @@ CASES = [
     ("bash 'scripts\\git-confirm.sh' feat --yes", True),
     ("sh.exe scripts/release-gate.sh override --yes", True),
     ("cd {MAIN}/src && " + STAGE + " .", True),
+    # Quotes, escapes and globs inside the path: bash removes them at run time, so
+    # `.git/monitorex-"locks"` IS the guard's directory (code review H1 — a forged
+    # release-gate verdict and a CONFIRM mark got through on every OS).
+    ("printf 'verdict=pass\\n' > .git/monitorex-\"locks\"/release-gate/abc", True),
+    ("printf 'target=feat\\n' > .git/monitorex-\"locks\"/CONFIRM", True),
+    ("printf x > .git/monitorex-lo''cks/CONFIRM", True),
+    ("printf x > .git/monitorex-\\locks/CONFIRM", True),
+    ("printf x > .git/monitorex-lock[s]/CONFIRM", True),
+    ("printf x > .git/monitorex-l?cks/CONFIRM", True),
+    ("tee .git/monitorex-\"locks\"/CONFIRM < /dev/null", True),
+    ("rm -rf .git/monitorex-\"hooks\"", True),
     # … and the same forms must not turn reading into a false rejection
     ("CAT .git/monitorex-locks/CONFIRM", False),
+    ("cat .git/monitorex-\"locks\"/CONFIRM", False),
     ('echo "GIT' + ' add ."', False),
     ("grep -n 'GIT" + " add' docs/", False),
     ("GIT status", False),

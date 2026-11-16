@@ -14,7 +14,8 @@
 #   2. the main working tree = the parent of TARGET's --git-common-dir (TARGET may be
 #      a linked worktree: its settings.json, the main tree's guard and policy);
 #   3. the EXACT registered command runs through `bash -c`, cwd = the main tree,
-#      CLAUDE_PROJECT_DIR = the main tree (on Windows twice: C:\… and /c/… forms), with
+#      CLAUDE_PROJECT_DIR = TARGET, so TARGET's own hooks run (on Windows twice:
+#      C:\… and /c/… forms), with
 #      four payloads, decisions read by the hook protocol (deny ⇔ rc 2, or rc 0 and a
 #      JSON permissionDecision "deny"; anything else but a clean allow is an error):
 #        git add x → deny · git commit -m "исправление" → deny (UTF-8)
@@ -103,14 +104,21 @@ COMMON=$(git -C "$TARGET" rev-parse --path-format=absolute --git-common-dir 2>/d
 COMMON=$(gg_path "$TARGET" "$COMMON") || fail "cannot resolve the git common dir of $TARGET"
 MAIN=${COMMON%/*}
 [ -d "$MAIN" ] || fail "cannot find the main working tree of $TARGET"
+# CLAUDE_PROJECT_DIR = TARGET: the registered command is
+# `…"$CLAUDE_PROJECT_DIR/.claude/hooks/monitorex-git-guard.sh"`, so this runs the
+# hooks of the tree under test. The rollout passes its prepared worktree, and must
+# test the guard it is about to ship, not the old one installed in the main tree
+# (code review M2). The payload cwd stays the main tree, and both share one common
+# dir, so the guard's decisions are the same.
+PROJ=$(gg_path "$TARGET") || fail "cannot resolve $TARGET"
 # The machine's native form of the lock path, as Claude Code would send it.
 LOCK_TARGET="$COMMON/monitorex-locks/x"
 if gg_is_msys; then
     LOCK_TARGET=$(cygpath -w "$LOCK_TARGET")
-    PROJECT_FORMS="$(cygpath -w "$MAIN")
-$(cygpath -u "$MAIN")"
+    PROJECT_FORMS="$(cygpath -w "$PROJ")
+$(cygpath -u "$PROJ")"
 else
-    PROJECT_FORMS=$MAIN
+    PROJECT_FORMS=$PROJ
 fi
 
 # ── 3. The guard, run exactly as registered ──────────────────────────────────

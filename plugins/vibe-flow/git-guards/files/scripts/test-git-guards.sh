@@ -2499,6 +2499,15 @@ if [ -n "$KIT" ]; then
     out=$(st_run "$TMP/st-wt"); rc=$?
     [ $rc -eq 0 ] && echo "$out" | grep -qF "$ST_OK" \
         && ok "selftest: run from a linked worktree — still judged in the main tree, passes" || bad "selftest: from a worktree" "rc=$rc $out"
+    # The rollout tests its prepared worktree: the guard under test is THAT tree's,
+    # not the healthy one installed in the main tree (code review M2).
+    cp "$TMP/st-wt/.claude/hooks/monitorex-git-guard.sh" "$TMP/st-wt-guard.bak"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/st-wt/.claude/hooks/monitorex-git-guard.sh"
+    out=$(st_run "$TMP/st-wt"); rc=$?
+    [ $rc -eq 1 ] && echo "$out" | grep -qF "$ST_BAD" \
+        && ok "selftest: an inert guard in the tested worktree fails even though the main tree's guard is healthy" \
+        || bad "selftest: worktree guard under test" "rc=$rc $out"
+    cp "$TMP/st-wt-guard.bak" "$TMP/st-wt/.claude/hooks/monitorex-git-guard.sh"
     S86="$TMP/st-py86"; mkdir -p "$S86"
     for n in python3 python py; do printf '#!/bin/sh\nexit 86\n' > "$S86/$n"; chmod +x "$S86/$n"; done
     out=$(PATH="$S86:$PATH" st_run "$ST"); rc=$?
