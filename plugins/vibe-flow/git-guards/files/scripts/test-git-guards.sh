@@ -1235,7 +1235,11 @@ mkdir -p "$TMP/pa-bin-codex"
 for t in python3 git; do mkwrap "$TMP/pa-bin-codex" "$t" "$(command -v "$t")"; done
 cp "$TMP/pc-has/codex" "$TMP/pa-bin-codex/codex"
 for n in ni.md ud.md; do echo plan > "$GG_PLANS_DIR/$n"; done
-out=$(pa_in ni.md "$(printf '| Codex | — | ⚪️ not installed |\n%s' "$PG_EN")" false | PATH="$TMP/pa-bin-codex" CLAUDE_PROJECT_DIR="$PA" "$BASH" "$CH/plan-approved.sh")
+# On Windows the hook is native Python: its subprocess git needs a real git.exe,
+# which a sh wrapper without .exe is not. The real git's directory holds no codex.
+PA_CODEX_PATH="$TMP/pa-bin-codex"
+[ "$IS_WIN" = 1 ] && PA_CODEX_PATH="$PA_CODEX_PATH:$(dirname "$(command -v git)")"
+out=$(pa_in ni.md "$(printf '| Codex | — | ⚪️ not installed |\n%s' "$PG_EN")" false | PATH="$PA_CODEX_PATH" CLAUDE_PROJECT_DIR="$PA" "$BASH" "$CH/plan-approved.sh")
 [ ! -f "$PAM/ni.md" ] && echo "$out" | grep -q 'codex-plan-critic' && echo "$out" | pa_block \
     && ok "hook: '⚪️ not installed' while codex is on PATH — no mark, block" || bad "hook: not installed + codex on PATH" "$out"
 out=$(pa_run ud.md "$(printf "| Codex | — | ❌ unavailable — user's decision |\n%s" "$PG_EN")" false)

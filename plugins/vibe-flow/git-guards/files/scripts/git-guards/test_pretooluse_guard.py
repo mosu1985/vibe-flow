@@ -765,8 +765,12 @@ def gg_paths_cases(tmp: str):
         ("posix: cmd_name('/usr/bin/GIT') == 'git'", lambda: (posix(), g().cmd_name("/usr/bin/GIT"))[1] == "git"),
         ("posix: cmd_name('BASH.EXE') == 'bash'", lambda: (posix(), g().cmd_name("BASH.EXE"))[1] == "bash"),
         ("posix: cmd_name('C:\\\\Program Files\\\\Git\\\\cmd\\\\git.exe') == 'git'", lambda: (posix(), g().cmd_name("C:\\Program Files\\Git\\cmd\\git.exe"))[1] == "git"),
-        ("posix: same_path of a file and a symlink to it",
-         (lambda: (posix(), g().same_path(f1, l1))[1] is True) if have_link else NA_SYMLINK),
+        # posixpath.realpath over a real NTFS path is not a configuration that exists:
+        # on Windows the guard always runs in Windows mode, so this POSIX filesystem
+        # case runs only off Windows (like the Windows-only cases run only on Windows).
+        *([("posix: same_path of a file and a symlink to it",
+            (lambda: (posix(), g().same_path(f1, l1))[1] is True) if have_link else NA_SYMLINK)]
+          if os.name != "nt" else []),
         ("posix: same_path of two different files is False", lambda: (posix(), g().same_path(f1, f2))[1] is False),
         ("posix: same_path with a NUL byte → None, never raises", lambda: (posix(), g().same_path("a\0b", f1))[1] is None),
         ("posix: posix_rel('/r/src/a.ts', '/r') == 'src/a.ts'", lambda: (posix(), g().posix_rel("/r/src/a.ts", "/r"))[1] == "src/a.ts"),
