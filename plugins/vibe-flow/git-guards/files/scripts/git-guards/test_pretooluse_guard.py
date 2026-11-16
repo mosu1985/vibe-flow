@@ -25,6 +25,10 @@ import subprocess
 import sys
 import tempfile
 
+# The gg_paths unit tests import it in-process: no __pycache__ in the kit checkout
+# (install.sh copies scripts/git-guards/* into projects).
+sys.dont_write_bytecode = True
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))   # the project, or the kit's files/
 WINDOWS = os.name == "nt"
@@ -370,6 +374,10 @@ CASES = [
     # … and the same forms must not turn reading into a false rejection
     ("CAT .git/monitorex-locks/CONFIRM", False),
     ("cat .git/monitorex-\"locks\"/CONFIRM", False),
+    # A `$`/glob in an unrelated monitorex-* name is not the guard's directory
+    # (bomond-loyalty ships a `monitorex-landing-full` package; release-gate review).
+    ("cp build.zip monitorex-landing-$VER.zip", False),
+    ("tar czf /tmp/monitorex-landing-$(date +%s).tgz dist", False),
     ('echo "GIT' + ' add ."', False),
     ("grep -n 'GIT" + " add' docs/", False),
     ("GIT status", False),

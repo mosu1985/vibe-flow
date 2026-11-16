@@ -71,13 +71,13 @@ the tree, said out loud (`monitorex-hooks/.source` = `origin@<sha>` or `bootstra
 ## Acceptance
 
 ```bash
-bash files/scripts/test-git-guards.sh     # from this directory: 538 checks on macOS (536 on Ubuntu; 550 on Windows, with the Windows-only cases)
+bash files/scripts/test-git-guards.sh     # from this directory: ≈540 checks on macOS and Ubuntu; ≈550 on Windows, with the Windows-only cases
 bash scripts/test-git-guards.sh           # in a project: fewer (settings-merge, detect, install.sh are not copied there)
 ```
 
 Everything runs in temporary repositories; the plans directories (`~/.claude/plans`,
 the project's `plansDirectory`) are replaced by a temporary `GG_PLANS_DIR` and a swapped `HOME`, `gh` and the test runner by stubs. The PreToolUse guard's
-393 unit cases (`scripts/git-guards/test_pretooluse_guard.py`) count as one check.
+≈400 unit cases (`scripts/git-guards/test_pretooluse_guard.py`) count as one check.
 
 **Python 3.9+** (not 3.8) is required; CI also runs the guard cases under a 3.9 floor on Ubuntu and macOS. On native Windows (Git Bash, beta) the suite runs in CI too; Windows-only cases run only there, and the only allowed N/A cases are symlink, `shasum` and `noexec`.
 

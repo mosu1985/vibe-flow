@@ -581,9 +581,13 @@ Bypassing review is a human decision: ask the user to run
 # `monitorex-$X` too: a name built from a variable is still the guard's directory.
 # Case-insensitive with either separator: `.git/MONITOREX-LOCKS` is the same
 # directory on APFS and NTFS; on Windows `.git.` and `.git:<stream>` are `.git`.
-# A glob, `$` or backtick anywhere in the name after `monitorex-` (`monitorex-lock[s]`,
-# `monitorex-l?cks`, `monitorex-lo$A`) still expands to the guard's directory.
-BARRIER = re.compile(r"monitorex-(?:locks|hooks)\b|monitorex-[\w.-]*[*?\[{$`]", re.I)
+# A glob, `$` or backtick in the name after `monitorex-` (`monitorex-lock[s]`,
+# `monitorex-l?cks`, `monitorex-lo$A`, `monitorex-*`) still expands to the guard's
+# directory — but only while the literal part so far can still spell locks/hooks:
+# `monitorex-landing-$VER.zip` is not the guard's (no false denial on a real package).
+BARRIER = re.compile(
+    r"monitorex-(?:locks|hooks)\b"
+    r"|monitorex-(?:l(?:o(?:c(?:ks?)?)?)?|h(?:o(?:o(?:ks?)?)?)?)?[*?\[{$`]", re.I)
 # git's remote-tracking refs on disk: rewriting them by hand forges origin/<protected>.
 FS_REFS = re.compile(r"\.git[. ]*(?::[^\\/\s]*)?[\\/]+(?:refs[\\/]+remotes|packed-refs)", re.I)
 # Ref NAMES in redirect targets (refs/remotes/… written by path relative to .git).

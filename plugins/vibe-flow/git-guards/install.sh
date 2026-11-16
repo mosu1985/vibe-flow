@@ -70,6 +70,7 @@ done
 # that installs without errors and fails on the very first commit.
 mkdir -p "$TARGET/scripts/git-guards"
 for f in "$GG"/files/scripts/git-guards/*; do
+    [ -f "$f" ] || continue     # e.g. __pycache__ left by a direct test run in a checkout
     n=$(basename "$f"); cp "$f" "$TARGET/scripts/git-guards/$n"
     case "$n" in *.sh|verify_staged.py) chmod +x "$TARGET/scripts/git-guards/$n";; esac
     say "+ scripts/git-guards/$n"
