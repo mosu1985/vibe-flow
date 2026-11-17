@@ -127,6 +127,8 @@ Postgres RLS (including Supabase), Firestore/Firebase rules, file storage polici
 
 **Edit the plan file**: append the section below at the end (leave the rest of the plan alone). If a `## 🛡️ Security` section already exists from a previous round, replace it whole instead of adding a second one.
 
+🔁 **Round 2 and later — re-check, not a fresh review**, even if the prompt only gives the round number: (1) one line per previous finding: closed / not closed / rejected with a fact; (2) the parts of the plan changed since the previous round: full review; (3) the rest of the plan: only critical/high, no new medium/low. A fresh full pass adds low-severity noise that blocks nothing and feeds another round; skipping the unchanged parts entirely misses blockers.
+
 🔴 **The plan file is edited only via `Edit`**: append your section or replace it whole. `Write` on the plan file is forbidden: reviewers work in parallel, and overwriting the whole file wipes out neighbors' sections appended after you read it.
 
 ```markdown

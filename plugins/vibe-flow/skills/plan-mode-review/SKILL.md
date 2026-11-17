@@ -170,9 +170,20 @@ The plan goes to implementation when **no open `critical` and `high` findings re
 **If the gate is not passed — auto-fix, up to 3 rounds:**
 
 1. Claude fixes the plan per the **accepted** findings
-2. Re-runs the reviewers whose area the fix touched — for a new score **and a new count of blocking findings**
+2. Re-runs the reviewers whose area the fix touched — for a new score **and a new count of blocking findings** — in **re-check mode**, adding to the prompt (with the round number and the list of plan sections/steps changed since the previous round):
+   ```
+   Re-check round N. Your section from round N−1 is in the plan file.
+   1. For each of your previous findings: closed / not closed / rejected with a
+      fact (the justification is in the plan) — one line each.
+   2. The parts changed since round N−1: <list> — review them in full.
+   3. The rest of the plan: look only for critical/high. Do not raise new
+      medium/low there — they do not block the gate and were the job of round 1.
+   Replace your section whole: the closure list, new findings, the new score.
+   ```
 3. Re-runs `vibe-flow:codex-plan-critic` (if installed) with the round number and the list of rejections **with justification**
 4. The gate is recomputed
+
+**Why re-check mode, not a fresh review and not "only the changes".** A measurement over 68 real plans: almost half of the security reviewer's runs were rounds 2–4, each re-reading the whole plan at full price and adding about three hundred new medium/low findings, which block nothing but feed the next round. Cutting a round down to "only the changed parts" is not safe either: almost half of that reviewer's unique blocking findings came from rounds 2–4. So a re-check keeps hunting blockers across the whole plan and drops only the low-severity noise.
 
 🔴 **The limit is 3 rounds, hard.** After the third failure — **stop**: show the user the scores, the round history, what was accepted and what was rejected, and exactly where the disagreement lies. After that the user decides: edit by hand, push the plan through as is, or abandon it. Running a fourth round is forbidden — it burns tokens on a non-converging argument.
 
