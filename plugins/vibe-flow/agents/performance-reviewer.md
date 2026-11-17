@@ -104,6 +104,8 @@ Input is the path to the plan file. Read the plan and the related files. Run it 
 
 **Edit the plan file**: append the section below at the end (leave the rest alone). If `## ⚡ Performance` already exists from a previous round, replace it whole.
 
+🔁 **Round 2 and later — re-check, not a fresh review**, even if the prompt only gives the round number: (1) one line per previous finding: closed / not closed / rejected with a fact; (2) the parts of the plan changed since the previous round: full review; (3) the rest of the plan: only critical/high, no new medium/low.
+
 🔴 **The plan file is edited only via `Edit`**: append your section or replace it whole. `Write` on the plan file is forbidden: reviewers work in parallel, and overwriting the whole file wipes out neighbors' sections appended after you read it.
 
 ```markdown
