@@ -58,6 +58,9 @@ jobs:
       - name: Node tests
         run: node --test tools/measure-plan-cost.test.mjs plugins/vibe-flow-vercel/scripts/wait-vercel-deploy.test.mjs
 
+      - name: Session store check
+        run: python3 plugins/vibe-flow/scripts/test_session_store.py
+
       - name: Guard latency (informational, never fails)
         working-directory: plugins/vibe-flow/git-guards
         run: |

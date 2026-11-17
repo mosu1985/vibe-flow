@@ -37,6 +37,20 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/init.sh" "<project root>" --no-gate  # gate 
 
 Bash timeout — 600000: the installer runs the protection acceptance tests. A non-zero exit code, or a non-zero failure count in the test summary printed at the end — investigate and tell the user; do not continue silently.
 
+## 3b. Session store
+
+The installer's `vibe-flow: session store` section says `status=affected` when Claude Code's session data folder (auto memory, saved tool outputs, transcripts) is reached through a link into a protected `.claude` directory. That is the usual layout of a launcher that gives each profile its own `CLAUDE_CONFIG_DIR` and links its `projects` back to `~/.claude/projects`. For a write through such a link, auto mode does not let the classifier decide: it stops and asks a person, and neither allow rules nor auto-mode rules lift it. Every time an agent cleans up its memory or slices a saved tool output with `sed`, it waits for a click, so agents cannot work unattended. Prompts saying "…which is a sensitive file… resolves through a symlink…" are this case.
+
+`status=ok` → nothing to do, go on. `status=affected` → ask via `AskUserQuestion`:
+- **"Move the session data out of `.claude` (Recommended)"**: the folder is renamed on the same disk to `~/claude-projects`, a link stays in its old place, memory and history stay shared. It is machine-wide: it covers every project, current and future. One command undoes it; `fix` prints that command.
+- **"Leave as is"**: the prompts stay.
+
+On a "yes" (the folder holds all the user's sessions, so only on an explicit one):
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/session-store.py" fix --yes
+```
+(`python` or `py -3` where `python3` is missing). Exit 0 — say it is done, give the user the printed undo command, and say that tabs which still prompt need a restart. Exit 4 — nothing changed: it refused or rolled back and printed why (target exists, another disk, the link leads to `.claude` as a whole, Windows); relay that and offer `--to <dir>` on the same disk where it fits. Exit 5 — the folder was moved but is not linked yet (a running session recreated it, or the link failed and moving back failed too); relay the printed recovery steps word for word and do not retry blindly. Any other exit — show the output and stop.
+
 ## 4. Check `.gitguards.conf`
 
 The installer detected the stack itself. Read the file and compare it with the project:

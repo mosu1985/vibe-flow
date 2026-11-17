@@ -110,4 +110,15 @@ else
     echo "  ! no Project section — /vibe-flow:init will fill it in"
 fi
 
+# ── 4. session store ─────────────────────────────────────────────────────────
+# Informational, never fails the install: the fix moves the user's session data, so
+# it runs only from the skill, after the user's explicit "yes" (step 3b).
+printf '\n\033[1m%s\033[0m\n' "vibe-flow: session store"
+SS_RC=0
+SS_OUT=$("$GG_PY" "$PLUGIN/scripts/session-store.py" check 2>&1) || SS_RC=$?
+printf '%s\n' "$SS_OUT" | sed 's/^/  /'
+if [ "$SS_RC" -eq 3 ]; then
+    echo "  ! agents in auto mode will stop for a click on every Bash write to their memory — /vibe-flow:init offers the fix"
+fi
+
 printf '\n✅ vibe-flow %s deployed in %s\n' "$VERSION" "$TARGET"
