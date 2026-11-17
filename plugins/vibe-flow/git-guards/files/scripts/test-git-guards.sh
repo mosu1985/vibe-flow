@@ -1612,6 +1612,27 @@ out=$(iw bash "$IW/scripts/wt-done.sh" pd-tracked --force 2>&1); rc=$?
 [ ! -e "$IW/docs/plans/t.md" ] && ok "wt-done: a plans folder tracked in git is not moved" || bad "wt-done: tracked plans moved" "$out"
 rm -rf "$IW/.plans" "$IW/.claude" "$IW/docs"
 
+echo "== wt-new / wt-done: Claude config kept out of git =="
+grep -qx '/CLAUDE.md' "$IW/.git/info/exclude" 2>/dev/null || printf '/CLAUDE.md\n/.claude/\n' >> "$IW/.git/info/exclude"
+echo "project rules" > "$IW/CLAUDE.md"; echo "not ignored" > "$IW/CLAUDE.local.md"
+mkdir -p "$IW/.claude/agents"; echo "own agent" > "$IW/.claude/agents/rev.md"
+out=$(iw bash "$IW/scripts/wt-new.sh" lc-link 2>&1); rc=$?
+LCW=$(git -C "$IW" worktree list --porcelain | awk '/^worktree /{p=substr($0,10)} /^branch refs\/heads\/wt\/lc-link$/{print p}')
+[ $rc -eq 0 ] && [ -n "$LCW" ] && grep -qx "project rules" "$LCW/CLAUDE.md" 2>/dev/null \
+    && grep -qx "own agent" "$LCW/.claude/agents/rev.md" 2>/dev/null && [ -d "$LCW/.claude/agents" ] && [ ! -L "$LCW/.claude/agents" ] \
+    && ok "wt-new: ignored CLAUDE.md and .claude/agents/* reach the tree, the folder is real" || bad "wt-new: local Claude config" "$out"
+if [ "$REAL_SYMLINKS" = 1 ]; then
+    [ -n "$LCW" ] && [ -L "$LCW/CLAUDE.md" ] && [ -L "$LCW/.claude/agents/rev.md" ] \
+        && ok "wt-new: the config is linked, not copied" || bad "wt-new: config copied instead of linked" "$(ls -la "$LCW" 2>&1)"
+else na "wt-new: the config is linked, not copied" "ln -s made a copy"; fi
+[ -n "$LCW" ] && [ ! -e "$LCW/CLAUDE.local.md" ] && ok "wt-new: a file git does not ignore is not linked" || bad "wt-new: unignored file linked" "$out"
+[ -n "$LCW" ] && [ -z "$(git -C "$LCW" status --porcelain -- CLAUDE.md .claude)" ] \
+    && ok "wt-new: the linked config leaves git status clean" || bad "wt-new: linked config in status" "$(git -C "$LCW" status --porcelain 2>&1)"
+out=$(iw bash "$IW/scripts/wt-done.sh" lc-link 2>&1); rc=$?
+[ $rc -eq 0 ] && [ ! -d "$LCW" ] && grep -qx "project rules" "$IW/CLAUDE.md" && grep -qx "own agent" "$IW/.claude/agents/rev.md" \
+    && ok "wt-done: the tree with linked config is removed, the main folder's files survive" || bad "wt-done: linked config" "$out"
+rm -rf "$IW/CLAUDE.md" "$IW/CLAUDE.local.md" "$IW/.claude"
+
 if [ -n "$KIT" ]; then
 echo "== settings-merge.py: plansDirectory and the plans folder =="
 SM="$TMP/sm"; mkrepo "$SM"
