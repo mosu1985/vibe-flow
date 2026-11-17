@@ -1621,6 +1621,10 @@ LCW=$(git -C "$IW" worktree list --porcelain | awk '/^worktree /{p=substr($0,10)
 [ $rc -eq 0 ] && [ -n "$LCW" ] && grep -qx "project rules" "$LCW/CLAUDE.md" 2>/dev/null \
     && grep -qx "own agent" "$LCW/.claude/agents/rev.md" 2>/dev/null && [ -d "$LCW/.claude/agents" ] && [ ! -L "$LCW/.claude/agents" ] \
     && ok "wt-new: ignored CLAUDE.md and .claude/agents/* reach the tree, the folder is real" || bad "wt-new: local Claude config" "$out"
+if [ "$REAL_SYMLINKS" = 1 ]; then
+    [ -n "$LCW" ] && [ -L "$LCW/CLAUDE.md" ] && [ -L "$LCW/.claude/agents/rev.md" ] \
+        && ok "wt-new: the config is linked, not copied" || bad "wt-new: config copied instead of linked" "$(ls -la "$LCW" 2>&1)"
+else na "wt-new: the config is linked, not copied" "ln -s made a copy"; fi
 [ -n "$LCW" ] && [ ! -e "$LCW/CLAUDE.local.md" ] && ok "wt-new: a file git does not ignore is not linked" || bad "wt-new: unignored file linked" "$out"
 [ -n "$LCW" ] && [ -z "$(git -C "$LCW" status --porcelain -- CLAUDE.md .claude)" ] \
     && ok "wt-new: the linked config leaves git status clean" || bad "wt-new: linked config in status" "$(git -C "$LCW" status --porcelain 2>&1)"

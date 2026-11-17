@@ -633,8 +633,11 @@ done
 # is a file to git: the ignore pattern `.claude/agents/` (folders only) does not match
 # it, the tree shows `?? .claude/` and wt-done.sh calls it uncommitted work.
 # Only paths git ignores are linked, so a link never ends up in a commit; a tracked
-# copy in the tree wins. A link, not a copy: an edit from the tree lands in the main
-# folder. On Windows without symlink rights `ln -s` makes a copy, which still works.
+# copy in the tree wins. A link, not a copy, so the tree sees the current rules. An
+# edit made from the tree reaches the main folder only while the link survives: a tool
+# that saves by replacing the file, or Windows without symlink rights (`ln -s` makes a
+# copy there), leaves a local copy, and wt-done.sh removes it with the tree, unasked.
+# Edit these files in the main folder.
 link_local() {   # $1 = path from the root → 0 if a link was made
     { [ -e "$DIR/$1" ] || [ -L "$DIR/$1" ]; } && return 1
     git -C "$DIR" check-ignore -q -- "$1" 2>/dev/null || return 1
