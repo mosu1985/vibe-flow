@@ -92,13 +92,17 @@ has "$out" '    ! scripts/wt-new.sh (edited by the project)' \
 
 # A version known only from git history also gets replaced — also when the files come
 # from the snapshot of origin/main, which has no history of its own (Codex C1)
+# 🔴 The old version is taken from $VF, the history rollout itself reads, not from $SRC:
+# a CI checkout of a branch also carries other branches of the remote, and a newer
+# wt-new.sh from a parallel PR (absent from this branch's history) was picked as "old"
+# and failed the case on a PR that did not touch git-guards at all.
 current="$(git hash-object "$GG/files/scripts/wt-new.sh")"
-old="$(git -C "$SRC" log --all -m --format= --raw --no-abbrev -- plugins/vibe-flow/git-guards/files/scripts/wt-new.sh \
+old="$(git -C "$VF" log --all -m --format= --raw --no-abbrev -- plugins/vibe-flow/git-guards/files/scripts/wt-new.sh \
     | awk '{print $4}' | grep -v '^0\{40\}$' | grep -vx "$current" | head -1)"
 if [ -z "$old" ]; then
     bad "no older version of wt-new.sh in git history (shallow clone?)"
 else
-    git -C "$SRC" cat-file -p "$old" > "$P/scripts/wt-new.sh"
+    git -C "$VF" cat-file -p "$old" > "$P/scripts/wt-new.sh"
     : > "$KNOWN"
     out="$(GG_ROLLOUT_ROOTS="$TMP/roots" GG_ROLLOUT_KNOWN="$KNOWN" rollout list)"
     has "$out" '    ~ scripts/wt-new.sh' \
