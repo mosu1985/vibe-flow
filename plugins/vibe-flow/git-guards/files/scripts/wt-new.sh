@@ -625,6 +625,32 @@ for f in .env.local .env.development.local; do
     [ -f "$MAIN/$f" ] && [ ! -f "$DIR/$f" ] && cp "$MAIN/$f" "$DIR/$f" && echo "  $f copied"
 done
 
+# Claude config the project keeps out of git: CLAUDE.md, CLAUDE.local.md, .claude/agents/*.
+# A session opened in the tree (`cd <tree> && claude`) reads them from the tree folder
+# and its parents; the main folder is not among them, so the session silently ran
+# without the project's rules and its own agents.
+# 🔴 A symlink per FILE, inside a real folder. A link to the .claude/agents folder itself
+# is a file to git: the ignore pattern `.claude/agents/` (folders only) does not match
+# it, the tree shows `?? .claude/` and wt-done.sh calls it uncommitted work.
+# Only paths git ignores are linked, so a link never ends up in a commit; a tracked
+# copy in the tree wins. A link, not a copy: an edit from the tree lands in the main
+# folder. On Windows without symlink rights `ln -s` makes a copy, which still works.
+link_local() {   # $1 = path from the root → 0 if a link was made
+    { [ -e "$DIR/$1" ] || [ -L "$DIR/$1" ]; } && return 1
+    git -C "$DIR" check-ignore -q -- "$1" 2>/dev/null || return 1
+    mkdir -p "$(dirname "$DIR/$1")" && ln -s "$MAIN/$1" "$DIR/$1" 2>/dev/null
+}
+LINKED=0
+for f in CLAUDE.md CLAUDE.local.md; do
+    [ -f "$MAIN/$f" ] && link_local "$f" && LINKED=$((LINKED+1))
+done
+if [ -d "$MAIN/.claude/agents" ]; then
+    for a in "$MAIN"/.claude/agents/*; do
+        [ -f "$a" ] && link_local ".claude/agents/${a##*/}" && LINKED=$((LINKED+1))
+    done
+fi
+[ "$LINKED" -gt 0 ] && echo "  local Claude config linked from the main folder ($LINKED files)"
+
 # ── Dependencies ─────────────────────────────────────────────────────────────
 # node_modules: a CLONE via APFS clonefile (`cp -Rc`), NOT a symlink. Turbopack
 # (Next 16) rejects a symlink pointing outside the project directory and fails
