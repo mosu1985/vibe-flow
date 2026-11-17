@@ -97,6 +97,34 @@ class SessionStoreTest(unittest.TestCase):
         self.assertIn("under .claude", out)
         self.assertFalse(os.path.islink(self.claude_store))
 
+    def test_fix_prints_exact_undo(self):
+        self.make_linked_layout()
+        rc, out = self.run_script("fix", "--yes")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("undo, while no session is writing: rm '%s' && mv '%s' '%s'"
+                      % (self.claude_store, self.target, self.claude_store), out)
+
+    def test_fix_refuses_link_to_whole_claude_dir(self):
+        claude_dir = os.path.join(self.home, ".claude")
+        os.makedirs(os.path.join(claude_dir, "projects"))
+        os.makedirs(self.profile)
+        os.symlink(claude_dir, os.path.join(self.profile, "projects"))
+        rc, out = self.run_script("check")
+        self.assertEqual(rc, 3, out)
+        rc, out = self.run_script("fix", "--yes")
+        self.assertEqual(rc, 4, out)
+        self.assertIn("not a `projects` folder", out)
+        self.assertFalse(os.path.islink(claude_dir))
+        self.assertFalse(os.path.lexists(self.target))
+
+    def test_fix_refuses_target_reached_through_link_into_claude(self):
+        self.make_linked_layout()
+        os.symlink(os.path.join(self.home, ".claude"), os.path.join(self.home, "sneaky"))
+        rc, out = self.run_script("fix", "--yes", "--to", os.path.join(self.home, "sneaky", "moved"))
+        self.assertEqual(rc, 4, out)
+        self.assertIn("under .claude", out)
+        self.assertFalse(os.path.islink(self.claude_store))
+
     def test_fix_honours_to(self):
         self.make_linked_layout()
         other = os.path.join(self.home, "data", "sessions")

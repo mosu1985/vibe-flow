@@ -14,11 +14,12 @@ saved tool output waits for a click, so agents cannot work unattended.
 
 The fix: rename the real directory, on the same disk, to a place outside `.claude`
 and leave a link in its old place. The launcher's link keeps working and now
-resolves to a path that is not protected. Memory and history stay shared.
-Undo, while no session is writing: rm ~/.claude/projects && mv ~/claude-projects ~/.claude/projects
+resolves to a path that is not protected. Memory and history stay shared. `fix`
+prints the exact undo command for the paths it used.
 
   check       exit 0: fine or nothing to do · exit 3: affected (prints the fix)
-  fix --yes   exit 0: fixed or nothing to do · exit 4: refused (says why) · exit 5: race
+  fix --yes   exit 0: fixed or nothing to do · exit 4: refused or rolled back, nothing
+              changed (says why) · exit 5: moved but not linked (prints recovery steps)
 """
 import os
 import sys
@@ -82,13 +83,17 @@ def fix(target):
         return 0
     if os.name == "nt":
         return refuse("on Windows a link needs extra rights; move %s out of .claude by hand" % real)
-    if names_claude(target):
-        return refuse("the target %s is itself under .claude" % target)
-    if os.path.lexists(target):
-        return refuse("%s already exists; pick another place with --to" % target)
+    # Move only the session store itself: a link to `.claude` as a whole would carry
+    # settings, hooks and plugins out of the protected directory too.
+    if os.path.basename(real) != "projects":
+        return refuse("%s is not a `projects` folder; move only the session store, by hand" % real)
     parent = os.path.dirname(target)
     if not os.path.isdir(parent):
         return refuse("the folder %s does not exist" % parent)
+    if names_claude(target) or names_claude(os.path.realpath(parent)):
+        return refuse("the target %s is itself under .claude" % target)
+    if os.path.lexists(target):
+        return refuse("%s already exists; pick another place with --to" % target)
     if os.path.islink(real) or not os.path.isdir(real):
         return refuse("%s is not a plain directory" % real)
     # Same disk only: a rename is instant and atomic for sessions that are writing; a
@@ -102,10 +107,19 @@ def fix(target):
         print("race: a running session recreated %s between the move and the link." % real)
         print("Your data is in %s. Move what is in %s into it, then replace %s with a link to it." % (target, real, real))
         return EXIT_RACE
+    except OSError as e:
+        try:
+            os.rename(target, real)
+        except OSError:
+            print("moved but not linked (%s), and moving back failed." % e)
+            print("Your data is in %s. Sessions need %s: make it a link to %s, or move the folder back." % (target, real, target))
+            return EXIT_RACE
+        return refuse("could not create the link (%s); moved back, nothing changed" % e)
     print("status=fixed")
     print("moved:  %s -> %s" % (real, target))
     print("linked: %s -> %s" % (real, target))
     print("store now resolves to %s" % os.path.realpath(store))
+    print("undo, while no session is writing: rm '%s' && mv '%s' '%s'" % (real, target, real))
     return 0
 
 
