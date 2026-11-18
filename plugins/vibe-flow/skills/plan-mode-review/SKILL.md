@@ -134,7 +134,7 @@ Copy the prohibitions ("do NOT call `ExitPlanMode` until…") into the project's
 
 ## CODEX CRITIC RULE
 
-**Why:** Claude reviewers are a single model checking itself. An external critic on a different model (Codex CLI; the model comes from the user's `~/.codex/config.toml`, reasoning effort `high`) catches what Claude has a blind spot for: its own architectural habits and whatever already "looks right".
+**Why:** Claude reviewers are a single model checking itself. An external critic on a different model (Codex CLI; the model comes from the user's `~/.codex/config.toml`, reasoning effort `xhigh`) catches what Claude has a blind spot for: its own architectural habits and whatever already "looks right".
 
 **The critic is optional to install but mandatory if installed.** `vibe-flow:codex-plan-critic` checks for its presence itself as the first step and returns one of three outcomes:
 
