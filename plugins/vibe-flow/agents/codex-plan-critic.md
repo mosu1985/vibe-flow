@@ -157,7 +157,7 @@ From the project root:
 ```bash
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 codex exec -s read-only -C "$ROOT" \
-  -c model_reasoning_effort=high \
+  -c model_reasoning_effort=xhigh \
   --output-schema "${CLAUDE_PLUGIN_ROOT}/skills/plan-mode-review/codex-critic-schema.json" \
   -o "$TMP/critic-round-N.json" \
   - < "$TMP/critic-prompt.txt" > "$TMP/critic-round-N.log" 2>&1
@@ -165,7 +165,7 @@ echo "rc=$?"
 ```
 
 - `-s read-only` — mandatory
-- `-c model_reasoning_effort=high` — the critic needs high effort, and the default config may have it lower. **The model is not pinned:** it is taken from `~/.codex/config.toml`, so the critic moves to a new model together with Codex
+- `-c model_reasoning_effort=xhigh` — the critic needs the maximum effort, and the default config may have it lower. **The model is not pinned:** it is taken from `~/.codex/config.toml`, so the critic moves to a new model together with Codex
 - `-` reads the prompt from stdin: the plan does not end up in argv and does not leak into shell history
 - Project is not a git repository → add `--skip-git-repo-check`
 - ⏱ The run takes minutes: call Bash with `timeout: 600000`. Hitting the timeout means "critic unavailable", not a reason to trim the plan
@@ -177,6 +177,7 @@ Codex is launched from the project root and reads `AGENTS.md` itself — do not 
 
 - **400 "The '<model>' model is not supported when using Codex with a ChatGPT account"** — the model from `~/.codex/config.toml` is unavailable when logged in with a ChatGPT account. The user fixes it: change `model` in the config to one available to their account, or log in with an API key (`printenv OPENAI_API_KEY | codex login --with-api-key` — the key from the environment, not in argv). **Do not substitute** the model yourself — return `❌ Critic unavailable` with this text and the hint
 - **401 / "not logged in" / expired session** — `codex login`
+- **400 about an unsupported `reasoning_effort` / `xhigh`** — the model does not support `xhigh`. Run the same command once more with `-c model_reasoning_effort=high` and put `high (the model does not support xhigh)` in the report's **Effort:** line
 - **Plan Mode does not let you write even to a temp folder** — Codex cannot write `-o`, and you cannot write the prompt. Return `❌ Critic unavailable: Plan Mode blocks writing to a temp folder` and a hint to the main session: with the user's consent, run the critic right after `ExitPlanMode` and BEFORE the first code edit
 
 ## 3️⃣ Step 3 — validate the answer
@@ -197,6 +198,7 @@ Codex crashed, returned no JSON or did not finish in time → `❌ Critic unavai
 **Verdict: ✅ pass / ❌ fail** — blocking (critical/high): N
 **Codex score: X.X / 10** (a quality metric, not the gate)
 **Model:** <from ~/.codex/config.toml or from the log>
+**Effort:** xhigh (or `high (the model does not support xhigh)`)
 **⚠️ Data:** the plan and code fragments are sent to an external provider (OpenAI)   ← round 1 only
 
 **Summary:** [summary from the answer]
