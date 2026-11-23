@@ -1,7 +1,7 @@
 # CI for vibe-flow: the git-guards acceptance suite and the Node tests on Linux
 # and macOS, the same suite on native Windows (Git Bash), the guard under the
-# Python 3.9 floor, and the rollout tool test. posix (ubuntu), posix (macos),
-# windows and floor must all be green before a merge.
+# Python 3.9 floor, and the rollout tool test with the admin-only-merge test.
+# posix (ubuntu), posix (macos), windows and floor must all be green before a merge.
 #
 # Keep it this way: read-only token, no secrets, no caches, no pull_request_target,
 # actions pinned to commit SHAs, and never interpolate ${{ github.event.* }} or
@@ -152,6 +152,9 @@ jobs:
         run: |
           git config --global user.name ci
           git config --global user.email ci@example.invalid
+
+      - name: admin-only-merge test (the --admin exception, fake gh)
+        run: bash tools/test-admin-only-merge.sh
 
       - name: Rollout tool test
         run: bash tools/test-rollout-projects.sh
