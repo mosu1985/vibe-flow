@@ -432,7 +432,12 @@ hint() {
    put the Plan: line into the merge commit's message as well.
 
    No approved plan for this work? Go through Plan Mode first.
-   Bypass is a human decision: ask the user to run
+   The plan exists but has "no approval mark"? It was approved before its gate
+   was finished. Write the external critic's section and the gate line into
+   the plan, then EnterPlanMode → ExitPlanMode: the user approves the final
+   text and the hook writes the mark. That is the way through, not the bypass.
+   Bypass is a human decision, for work that really goes without a plan: tell
+   the user the reason printed above and ask them to run
      ! scripts/git-confirm.sh feat --yes
    (lets one push through within 15 minutes).
 TXT

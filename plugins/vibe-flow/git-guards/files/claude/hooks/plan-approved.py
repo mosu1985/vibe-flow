@@ -26,6 +26,18 @@ worktree or a `gitdir:` file is refused), and the kit is installed there
 no foreign marks at all. The mark stays inside .git, where the model may not write in
 any version of the guard, so an old copy of this hook elsewhere is harmless.
 
+A refused plan is remembered (vibe-flow 1.3.5). When decide() refuses the approved text
+and the project has the plan gate on (a GG_PLAN_GATE / GG_PLAN_REQUIRED_TYPES /
+GG_PLAN_REQUIRED_NEW key in the main tree's .gitguards.conf), the hook writes
+    monitorex-locks/plan-pending/<session id>      ts=<epoch> plan=<name> dir=<plans dir>…
+into the session project's common dir. The PreToolUse guard (monitorex_git_guard.py)
+then denies this session's Write/Edit of repository files — the plans directories listed
+in `dir=` stay writable — until the plan is approved again and gets its mark (the hook
+removes the file) or a human deletes the file. WHY: a session that approved a plan before
+the external critic ran learned about the missing mark only at commit time, hours later,
+with the code already written — and asked the user for the [feat] bypass instead of
+finishing the gate. The barrier moves that discovery to the first edit.
+
 Pure functions decide() / codex_found() / search_dirs() / target_repos() /
 header_hidden() / accept_repo() are tested directly by test-git-guards.sh: the «no
 Codex» branch must be testable on a machine that has Codex installed, so it is never
@@ -468,6 +480,69 @@ def write_mark(common, name, body):
         raise
 
 
+PENDING_SID = re.compile(r"[A-Za-z0-9_-]{1,128}")
+PLAN_GATE_KEY = re.compile(r"(?m)^[ \t]*GG_PLAN_(?:GATE|REQUIRED_TYPES|REQUIRED_NEW)=")
+
+
+def plan_gate_on(main_tree):
+    """The project switched the plan gate on: one of its keys is in the main tree's
+    .gitguards.conf (the same keys plan-gate.sh looks for in the policy)."""
+    try:
+        with open(os.path.join(main_tree, ".gitguards.conf"), encoding="utf-8", errors="replace") as fh:
+            return bool(PLAN_GATE_KEY.search(fh.read()))
+    except OSError:
+        return False
+
+
+def pending_path(common, sid):
+    """<common>/monitorex-locks/plan-pending/<sid>, or None for an unusable session id."""
+    if not isinstance(sid, str) or not PENDING_SID.fullmatch(sid):
+        return None
+    return os.path.join(os.path.realpath(common), "monitorex-locks", "plan-pending", sid)
+
+
+def write_pending(common, sid, name, dirs):
+    """Remember that this session approved plan `name` without getting a mark.
+    → the file path, or None when nothing was written (never raises)."""
+    try:
+        path = pending_path(common, sid)
+        if path is None or not plan_gate_on(os.path.dirname(os.path.realpath(common))):
+            return None
+        d = os.path.dirname(path)
+        for x in (os.path.dirname(d), d):
+            if _is_link(x):
+                return None
+        os.makedirs(d, exist_ok=True)
+        if _resolves_elsewhere(d):
+            return None
+        body = "ts=%d\nplan=%s\n" % (int(time.time()), name)
+        body += "".join("dir=%s\n" % x for x in dirs if x and not _CTRL.search(x))
+        fd, tmp = tempfile.mkstemp(dir=d, prefix=".tmp-")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(body)
+            os.replace(tmp, path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        return path
+    except Exception:
+        return None
+
+
+def clear_pending(common, sid):
+    """The session got its mark: lift the edit barrier (never raises)."""
+    try:
+        path = pending_path(common, sid)
+        if path is not None and os.path.isfile(path) and not _is_link(path):
+            os.unlink(path)
+    except Exception:
+        pass
+
+
 def _say(message):
     """Hook JSON on stdout, ASCII only: Windows encodes stdout as cp1252, where the
     reasons' dashes and Cyrillic used to raise and lose the message (K5)."""
@@ -518,6 +593,21 @@ def main():
                             search_dirs(os.environ.get("GG_CODEX_SEARCH_PATHS", "")))
         ok, kind, reason = decide(plan, found)
         if not ok:
+            pending = None
+            try:
+                common = _git_common(proj) if proj and os.path.isdir(proj) else None
+                if common:
+                    pending = write_pending(common, p.get("session_id"), name, plans)
+            except Exception:
+                pending = None
+            if pending:
+                reason += (" Until this plan is approved again WITH the mark, this session's "
+                           "Write/Edit of repository files is denied (the plans directories stay "
+                           "writable): finish the gate now — run the external critic, write its "
+                           "section and the gate line into the plan, then EnterPlanMode -> "
+                           "ExitPlanMode. Do not start the implementation and do not plan on asking "
+                           "for the [feat] bypass later. Only a human lifts the barrier without a "
+                           "mark, by deleting " + _CTRL.sub(" ", pending) + ".")
             _tell("for " + name + ": " + reason)
         sid = _CTRL.sub(" ", str(p.get("session_id") or ""))
         body = "ts=%d\nsha256=%s\nsession=%s\nplan=%s\ncritic=%s\nsource=%s\n" % (
@@ -534,6 +624,7 @@ def main():
                     write_mark(common, name, body)
                     written.add(common)
                     session_top = os.path.dirname(common)
+                    clear_pending(common, p.get("session_id"))
         except Exception:
             pass
         # 2. The repositories the plan's header names.

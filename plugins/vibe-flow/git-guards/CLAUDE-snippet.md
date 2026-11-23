@@ -55,7 +55,10 @@ Paste into the project's CLAUDE.md ("Git" section).
   session) or the old `~/.claude/plans`. `pre-push` checks the approval mark written by the
   `plan-approved.sh` hook when the user approves `ExitPlanMode`; the plan must have
   a `Gate: ✅ passed` line and a `## … Codex` section — or, without Codex, the
-  `| Codex …` gate-table row `⚪️ not installed` / `❌ unavailable — user's decision`. No mark → push refused
+  `| Codex …` gate-table row `⚪️ not installed` / `❌ unavailable — user's decision`. No mark → push refused.
+  A plan approved before its gate was finished gets no mark, and the guard closes repository
+  files to the session until the plan is approved again with the mark: finish the gate first,
+  do not ask for the bypass instead
 - **Work in another repository than the session's** (session in A, commits in B) — put
   `Репозиторий: ~/dev/B` (or `Repository: …`) in the plan **header**, above the first
   `## `, one repository per line; the hook writes the mark into B as well. Without it
