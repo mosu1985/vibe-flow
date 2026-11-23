@@ -81,16 +81,18 @@ only through `tools/rollout-projects.sh` or the next `/vibe-flow:init`.
 The rollout replaces a project file only if it equals a known version of the
 canonical file. Never delete `tools/git-guards-known-blobs.txt`: without it, every
 older project file looks edited by the project and stops getting updates.
-Run `bash tools/test-rollout-projects.sh` after changing the rollout.
+Run `bash tools/test-rollout-projects.sh` after changing the rollout, and
+`bash tools/test-admin-only-merge.sh` after changing `plugins/vibe-flow/scripts/admin-only-merge.sh`
+(the only `gh pr merge --admin`, used by `push-to-production` and the rollout).
 
 ## CI and portability
 
 Every push runs `.github/workflows/test.yml`: the git-guards suite and the Node
 tests on Ubuntu and macOS (`posix`), the guard cases under the Python 3.9 floor on
 Ubuntu and macOS (`floor`), the suite on native Windows in Git Bash (`windows`), and
-the rollout test on Ubuntu (`rollout`, its own job because it runs the suite inside
-every prepared project). Merge only when `posix`, `floor`, `windows` and `rollout`
-are green.
+the rollout and admin-only-merge tests on Ubuntu (`rollout`, its own job because the
+rollout test runs the suite inside every prepared project). Merge only when `posix`,
+`floor`, `windows` and `rollout` are green.
 
 The scripts must run with both GNU tools (Linux, WSL, Git Bash) and BSD tools (macOS):
 

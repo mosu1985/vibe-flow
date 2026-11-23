@@ -901,6 +901,50 @@ A deliberate bypass is a human decision: ask the user to push themselves
 via `! git push --no-verify …` and explain exactly what gets skipped.""")
 
 
+# ── Merging past branch protection ───────────────────────────────────────────
+# `gh pr merge --admin` (and the merge API, which an admin token also pushes past the
+# rules) skips EVERY protection of the branch. vibe-flow runs it in one place only: the
+# plugin's admin-only-merge.sh, which first checks that nothing but a `main-admin-only`
+# ruleset would be skipped. A hand-typed bypass from a session or an agent is denied;
+# `bash …/admin-only-merge.sh <N>` is not a gh command line and passes.
+MERGE_API = re.compile(r"(?:^|/)pulls/[^/?]+/merge/?(?:\?|$)", re.I)
+
+
+def admin_merge(seg: str) -> bool:
+    words = command_words(seg)
+    if not words or gp.cmd_name(words[0]) != "gh":
+        return False
+    args = words[1:]
+    pos = [w for w in args if not w.startswith("-")]
+    if pos[:1] == ["pr"]:
+        return "merge" in pos[1:3] and any(w == "--admin" or w.startswith("--admin=") for w in args)
+    if pos[:1] != ["api"]:
+        return False
+    if "graphql" in pos[1:] and "mergePullRequest" in seg:
+        return True
+    method = ""
+    for i, w in enumerate(args):
+        if w in ("-X", "--method") and i + 1 < len(args):
+            method = args[i + 1]
+        elif w.startswith("--method="):
+            method = w.split("=", 1)[1]
+        elif w.startswith("-X") and len(w) > 2:
+            method = w[2:]
+    return method.upper() == "PUT" and any(MERGE_API.search(w) for w in pos[1:])
+
+
+if any(admin_merge(s) for s in segments):
+    emit_deny("""🔴 Merging past branch protection (`gh pr merge --admin`, `gh api -X PUT …/pulls/<N>/merge`, the GraphQL `mergePullRequest`) is forbidden to the model.
+
+`--admin` skips EVERY protection of the branch: required reviews, checks, deployments,
+signatures. The only allowed case is a merge refused with "base branch policy prohibits
+the merge" under a `main-admin-only` ruleset — the vibe-flow:push-to-production agent
+runs the plugin's admin-only-merge.sh, which checks that nothing else would be skipped.
+
+Otherwise return the refusal to the user. A deliberate bypass is a human decision:
+`! gh pr merge <N> --admin`.""")
+
+
 # ── What `origin/<protected>` means must not be rewritten in one command ─────
 # pre-push, the installer and the hook check below all trust refs/remotes/origin/*.
 # `git -c url.<local>.insteadOf=<origin> fetch` fills them with local commits

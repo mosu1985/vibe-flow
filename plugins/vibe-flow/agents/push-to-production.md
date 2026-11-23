@@ -68,13 +68,24 @@ Do this **only if** the prompt has a quoted "yes" to the question "Merge into `<
    cd "<tree>" && gh pr view --json number,state,url 2>/dev/null || gh pr create --fill --base <GG_PROTECTED>
    cd "<tree>" && gh pr merge <N> --merge
    ```
-   Only `--merge` (not `--squash`/`--rebase`, unless the project requires otherwise in `CLAUDE.md`), without `--admin` and without `--auto`. If the merge is rejected (CI checks, review, conflicts), return the reason verbatim, do not bypass.
-3. **No `gh`** → do not merge yourself, return the PR creation link: `https://github.com/<owner>/<repo>/compare/<GG_PROTECTED>...<branch>?expand=1` (`<owner>/<repo>` from `git remote get-url origin`). The user clicks merge.
+   Only `--merge` (not `--squash`/`--rebase`, unless the project requires otherwise in `CLAUDE.md`), without `--admin` and without `--auto`. If the merge is rejected (CI checks, review, conflicts), return the reason verbatim, do not bypass. The single exception is the next step.
+3. **The only `--admin` exception: a `main-admin-only` ruleset.** Some owners protect the production branch with a ruleset named exactly `main-admin-only`: only the admin role may merge, so an agent's bot token cannot. Then a plain `gh pr merge` is refused even for the admin who just said "yes". If the refusal text contains `base branch policy prohibits the merge`, run the plugin's script (Bash timeout up to 600000 ms: it may wait for running checks). It checks everything and, if allowed, merges itself:
+   ```bash
+   cd "<tree>" && bash "${CLAUDE_PLUGIN_ROOT}/scripts/admin-only-merge.sh" <N>
+   ```
+   | Exit code | Your action |
+   |---|---|
+   | 0 | merged with `--admin`: put the mark in the report |
+   | 3 | the exception does not apply: return the original refusal verbatim |
+   | anything else | return the script's output verbatim; no further attempts |
+
+   Why so narrow: `--admin` bypasses EVERY protection of the branch, including the ones a student set up for themselves. The script uses it only to get past a ruleset whose sole purpose is to stop bots. It refuses if a ruleset gives the branch any rule `--admin` would skip (required reviews, signatures, linear history, merge queue, required deployments, code scanning…); if the branch has classic branch protection at all, whatever it holds (its REST view hides some rules, so nobody can tell what would be skipped: the owner moves it to rulesets); if a review is pending or a required check is not green, or was reported by someone other than the app it is bound to; if any branch other than the base is protected (the merge pins the head, not the base, so a switched base would get `--admin` past that branch's rules). It pins the merge to the commit whose checks it saw. The checks live in a script because a list of steps is easy to skip. 🔴 Never type `gh pr merge --admin` yourself, not even after checking the same things by hand; in projects with git-guards a hook denies it.
+4. **No `gh`** → do not merge yourself, return the PR creation link: `https://github.com/<owner>/<repo>/compare/<GG_PROTECTED>...<branch>?expand=1` (`<owner>/<repo>` from `git remote get-url origin`). The user clicks merge.
 
 ## 📤 Report: right after the action
 ```
 ✅ Push done: <branch> → origin (<short-sha>)
-🔀 Merge into <GG_PROTECTED>: done — PR #N, merge commit <short-sha> / not requested (a separate question is needed: "merge = deploy?") / PR creation link: <url>
+🔀 Merge into <GG_PROTECTED>: done — PR #N, merge commit <short-sha> (+ "with --admin: main-admin-only exception", if the script merged it) / not requested (a separate question is needed: "merge = deploy?") / PR creation link: <url>
 👉 NEXT STEP (main session): if there was a merge and the project has a deploy monitor
    (for example vibe-flow-vercel:vercel-deploy-monitor), launch it as a separate
    top-level call with the merge commit SHA. I did NOT start monitoring.
@@ -89,6 +100,6 @@ or
 - Do NOT hand control back with "waiting / monitoring started"
 - NO `--no-verify`, NO `--force` / `--force-with-lease`
 - Do NOT push directly to the production branch and do NOT merge without a separate "yes" for the merge
-- NO `gh pr merge --admin` or other branch-protection bypasses
+- NO `gh pr merge --admin` or other branch-protection bypasses. The only exception: `admin-only-merge.sh` in the merge section, which decides and merges by itself; you never type `--admin`
 - Do NOT delete remote branches, do NOT push tags unless told to
 - Do NOT change code, only push and merge

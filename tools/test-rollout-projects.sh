@@ -227,6 +227,9 @@ case "$1 $2" in
   "pr view")
     br="$3"; f="$GH_STATE/$(basename "$org").pr"
     case "$*" in
+      *baseRefName*) [ -f "$f" ] || exit 1
+                     printf '{"baseRefName":"main","headRefOid":"%s","reviewDecision":""}\n' \
+                         "$(git --git-dir="$org" rev-parse "refs/heads/$(cat "$f")")" ;;
       *headRefOid*) [ -f "$f" ] && git --git-dir="$org" rev-parse "refs/heads/$(cat "$f")" ;;
       *state*)      [ -f "$f.merged" ] && echo MERGED || echo OPEN ;;
       *number*)     [ -f "$f" ] && [ "$br" != "1" ] && [ "$(cat "$f")" = "$br" ] && echo 1 || exit 1 ;;
@@ -236,14 +239,23 @@ case "$1 $2" in
     br=""; while [ $# -gt 0 ]; do [ "$1" = "--head" ] && br="$2"; shift; done
     printf '%s' "$br" > "$GH_STATE/$(basename "$org").pr"; echo "https://example.invalid/pull/1" ;;
   "pr merge")
-    if [ -f "$GH_STATE/refuse-once" ]; then
-        rm -f "$GH_STATE/refuse-once"; echo "X Pull request is not mergeable: the base branch policy prohibits the merge." >&2; exit 1
+    if [ -f "$GH_STATE/$(basename "$org").admin-only" ] && ! printf '%s\n' "$@" | grep -qx -- '--admin'; then
+        echo "X Pull request is not mergeable: the base branch policy prohibits the merge." >&2; exit 1
+    fi
+    if [ -f "$GH_STATE/$(basename "$org").refuse-once" ]; then
+        rm -f "$GH_STATE/$(basename "$org").refuse-once"; echo "X Pull request is not mergeable: the base branch policy prohibits the merge." >&2; exit 1
     fi
     f="$GH_STATE/$(basename "$org").pr"; br="$(cat "$f")"; want=""
     while [ $# -gt 0 ]; do [ "$1" = "--match-head-commit" ] && want="$2"; shift; done
     head="$(git --git-dir="$org" rev-parse "refs/heads/$br")"
     [ -n "$want" ] && [ "$want" = "$head" ] || exit 1
     git --git-dir="$org" update-ref refs/heads/main "$head" && touch "$f.merged" ;;
+  "api repos/{owner}/{repo}/rulesets") [ -f "$GH_STATE/$(basename "$org").ruleset" ] && echo 27891618 ;;
+  "api repos/{owner}/{repo}/rules/branches/main")
+    echo '[{"type":"deletion"},{"type":"non_fast_forward"},{"type":"update"}]' ;;
+  "api repos/{owner}/{repo}/branches?protected=true&per_page=100") echo '[[{"name":"main"}]]' ;;
+  "api repos/{owner}/{repo}/branches/main/protection")
+    echo '{"message":"Branch not protected","status":"404"}'; echo 'gh: Branch not protected (HTTP 404)' >&2; exit 1 ;;
   "repo view") exit 1 ;;
   *) exit 0 ;;
 esac
@@ -366,12 +378,33 @@ pgrep -f "sleep $DEVMARK" >/dev/null && { bad "the dev process is still running"
     || ok "the dev process is stopped after the types appear"
 
 printf '{"changed":1}\n' > "$WC/tsconfig.tsbuildinfo"     # the pre-push typecheck rewrites it
-touch "$GH_STATE/refuse-once"                             # required checks still running
+touch "$GH_STATE/pc.origin.git.refuse-once"               # pc: required checks still running
+touch "$GH_STATE/pd.origin.git.admin-only"                # pd: refused like main-admin-only, but no such ruleset
+pd_main="$(git --git-dir="$R6/pd.origin.git" rev-parse refs/heads/main)"
 out="$(GG_ROLLOUT_SHA="$SHA6" GG_ROLLOUT_ROOTS="$R6" rollout ship 2>&1)"
+section() { printf '%s\n' "$out" | awk -v p="$1" '/^== /{s=($2==p)} s'; }
+[ "$(git --git-dir="$R6/pd.origin.git" rev-parse refs/heads/main)" = "$pd_main" ] \
+    && ! grep -qE 'pr merge .*--admin' "$GH_LOG" && hasp "$(section pd)" 'no active ruleset named main-admin-only' \
+    && ok "ship: the same refusal without a main-admin-only ruleset → not merged, no --admin" \
+    || bad "ship without the ruleset: $(section pd | grep -E 'PR|merge' | head -3)"
 [ "$(git --git-dir="$R6/pc.origin.git" rev-parse refs/heads/main)" != "$(git -C "$R6/pc" rev-parse main)" ] \
-    && grep -q 'pr checks' "$GH_LOG" && ! hasp "$out" 'not merged' \
+    && grep -q '/pc/[^|]*|pr checks' "$GH_LOG" && ! hasp "$(section pc)" 'not merged' \
     && ok "ship: a merge refused while checks run waits for them and merges" \
-    || bad "ship did not wait for checks: $(printf '%s' "$out" | grep -E 'PR|merge' | head -3)"
+    || bad "ship did not wait for checks: $(section pc | grep -E 'PR|merge' | head -3)"
+pc_out="$out"
+touch "$GH_STATE/pd.origin.git.ruleset"                   # pd now has the ruleset: ship again
+pd_commit="$(sed -n 's/^commit=//p' "$TMP/state/$SHA6/projects/pd" 2>/dev/null)"
+: > "$GH_LOG"
+out="$(GG_ROLLOUT_SHA="$SHA6" GG_ROLLOUT_ROOTS="$R6" rollout ship 2>&1)"
+admin_sha="$(grep -E '/pd/[^|]*\|pr merge 1 --merge --admin --match-head-commit ' "$GH_LOG" | tail -1 | awk '{print $NF}')"
+[ -n "$admin_sha" ] && [ "$(git --git-dir="$R6/pd.origin.git" rev-parse refs/heads/main)" = "$admin_sha" ] \
+    && [ "$admin_sha" = "$pd_commit" ] \
+    && hasp "$out" 'merged with --admin (main-admin-only)' \
+    && ok "ship: main-admin-only ruleset → merged with --admin, pinned to the checked head" \
+    || bad "ship did not merge under main-admin-only: $(printf '%s' "$out" | grep -E 'PR|merge' | head -3)"
+grep -E 'pr merge .*--admin' "$GH_LOG" | grep -qv '/pd/' \
+    && bad "--admin used outside the main-admin-only repo" || ok "ship: --admin only in the repo with the ruleset"
+out="$pc_out"
 [ ! -d "$WC" ] && ! hasp "$out" 'left in place' \
     && ok "ship: a typecheck-rewritten build cache does not keep the worktree" \
     || bad "worktree kept because of tsconfig.tsbuildinfo"

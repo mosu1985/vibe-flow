@@ -44,6 +44,8 @@
 set -u
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="${GG_ROLLOUT_REPO:-$(cd "$SELF_DIR/.." && pwd)}"
+# The --admin exception lives in the plugin next to this script (not in the pinned snapshot)
+ADMIN_MERGE="$SELF_DIR/../plugins/vibe-flow/scripts/admin-only-merge.sh"
 ROOTS="${GG_ROLLOUT_ROOTS:-$HOME/dev $HOME/orca/projects}"
 STATE="${GG_ROLLOUT_STATE:-${XDG_CACHE_HOME:-$HOME/.cache}/vibe-flow-rollout}"
 CMD="${1:-list}"
@@ -344,7 +346,7 @@ manifest_get() { sed -n "s/^$2=//p" "$1" | head -1; }
 # created is usually required checks still running: wait for them (15 minutes at most),
 # then retry once. A check that never finishes leaves the PR open instead of hanging ship.
 merge_pr() {
-    local W="$1" n="$2" c="$3" err rc i none=0
+    local W="$1" n="$2" c="$3" err rc i none=0 out
     err=$(cd "$W" && gh pr merge "$n" --merge --match-head-commit "$c" 2>&1) && return 0
     say "  merge refused ($(printf '%s' "$err" | tail -1)) — waiting for the required PR checks…"
     for i in $(seq 1 60); do
@@ -358,6 +360,16 @@ merge_pr() {
     done
     [ "$rc" = 8 ] && { warn "PR #$n: required checks still pending after 15 minutes — not merged; re-run ship later"; return 1; }
     err=$(cd "$W" && gh pr merge "$n" --merge --match-head-commit "$c" 2>&1) && return 0
+    # The only --admin exception (a `main-admin-only` ruleset): the plugin's script decides and
+    # merges, the same one agents/push-to-production.md runs; pinned to the manifest commit.
+    if printf '%s' "$err" | grep -q 'base branch policy prohibits the merge'; then
+        out=$(cd "$W" && bash "$ADMIN_MERGE" "$n" "$c" 2>&1); rc=$?
+        case "$rc" in
+            0) say "  $(printf '%s' "$out" | tail -1)"; return 0 ;;
+            3) warn "PR #$n: merge refused — $(printf '%s' "$err" | tail -1) ($(printf '%s' "$out" | tail -1))"; return 1 ;;
+            *) warn "PR #$n: $(printf '%s' "$out" | tail -1)"; return 1 ;;
+        esac
+    fi
     warn "PR #$n: merge refused — $(printf '%s' "$err" | tail -1)"
     return 1
 }
