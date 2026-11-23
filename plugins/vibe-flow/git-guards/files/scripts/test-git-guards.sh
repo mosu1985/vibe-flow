@@ -1166,6 +1166,59 @@ printf '[feat]: x\n\nPlan: nocodex.md\n' > "$TMP/pa-m"
 out=$( cd "$PA" && sh githooks/plan-gate.sh "$TMP/pa-m" 2>&1 ); rc=$?
 [ $rc -eq 1 ] && echo "$out" | grep -q 'no approval mark' && ok "end to end: a plan the hook refused is rejected by plan-gate.sh" || bad "end to end: refused plan" "$out"
 
+echo "== plan approved without its mark: repository edits closed until the gate is finished =="
+# vibe-flow 1.3.5. A session approved a plan before the external critic ran, got no
+# mark, wrote the code anyway and asked the user for the [feat] bypass at commit time.
+PPD="$PA/.git/monitorex-locks/plan-pending"
+[ ! -e "$PPD" ] && ok "plan gate off in the project — a refused plan leaves no pending file" || bad "pending without the plan gate" "$(ls "$PPD" 2>&1)"
+pp_guard() {   # label expect(deny|allow) session tool path [project]
+    local o rc got
+    o=$(python3 -c 'import json,sys
+s,t,f,c=sys.argv[1:5]
+k="notebook_path" if t=="NotebookEdit" else "file_path"
+print(json.dumps({"session_id":s,"tool_name":t,"tool_input":{k:f},"cwd":c}))' "$3" "$4" "$5" "$PA" \
+        | CLAUDE_PROJECT_DIR="${6:-$PA}" bash "$CH/monitorex-git-guard.sh" 2>/dev/null); rc=$?
+    got=$(printf '%s' "$o" | decide "$rc")
+    [ "$got" = "$2" ] && ok "guard: $1 — $2" || bad "guard: $1 — $2" "got $got (rc $rc): $o"
+}
+mkdir -p "$PA/src" "$TMP/pp-out"; echo p > "$GG_PLANS_DIR/pp.md"
+out=$(pa_run pp.md $'# P\n\n## Codex\n' false '{"session_id":"pp-1"}')
+[ -f "$PPD/pp-1" ] && grep -q '^plan=pp.md$' "$PPD/pp-1" && grep -q '^ts=[0-9]*$' "$PPD/pp-1" && grep -q '^dir=' "$PPD/pp-1" \
+    && echo "$out" | pa_block && echo "$out" | grep -q 'plan-pending' \
+    && ok "refused plan, plan gate on — pending file written, the model is told how to finish the gate" || bad "pending file" "$out $(cat "$PPD/pp-1" 2>&1)"
+[ ! -f "$PAM/pp.md" ] && ok "refused plan — still no approval mark" || bad "refused plan got a mark"
+pp_guard "Write of a repository file while the plan waits for its gate" deny pp-1 Write "$PA/src/a.ts"
+pp_guard "Edit of a repository file while the plan waits" deny pp-1 Edit "$PA/src/a.ts"
+pp_guard "NotebookEdit while the plan waits" deny pp-1 NotebookEdit "$PA/src/n.ipynb"
+pp_guard "Edit in a worktree of the same repository while the plan waits" deny pp-1 Edit "$TMP/pa-wt/src/a.ts"
+pp_guard "session in a worktree, the plan waits" deny pp-1 Edit "$PA/src/a.ts" "$TMP/pa-wt"
+pp_guard "the plan file itself stays writable" allow pp-1 Edit "$GG_PLANS_DIR/pp.md"
+pp_guard "a reviewer's file in the plans directory stays writable" allow pp-1 Write "$GG_PLANS_DIR/pp-agent-a1.md"
+pp_guard "a file outside any repository (memory, temp) stays writable" allow pp-1 Write "$TMP/pp-out/note.md"
+pp_guard "another session is not affected" allow pp-2 Edit "$PA/src/a.ts"
+pp_guard "a session id that is not a file name — allow" allow "../pp-1" Edit "$PA/src/a.ts"
+out=$(printf '{"tool_name":"Bash","tool_input":{"command":"rm %s/pp-1"},"cwd":"%s","session_id":"pp-1"}' "$PPD" "$PA" \
+      | CLAUDE_PROJECT_DIR="$PA" bash "$CH/monitorex-git-guard.sh" 2>/dev/null); rc=$?
+[ "$(printf '%s' "$out" | decide "$rc")" = deny ] && [ -f "$PPD/pp-1" ] \
+    && ok "guard: the model cannot delete the pending file itself — deny" || bad "model deletes the pending file" "$out"
+printf 'ts=%s\nplan=pp.md\n' "$(( $(date +%s) - 90000 ))" > "$PPD/pp-old"
+pp_guard "a pending file older than a day is ignored" allow pp-old Edit "$PA/src/a.ts"
+printf 'plan=pp.md\n' > "$PPD/pp-bad"
+pp_guard "a pending file without ts is ignored" allow pp-bad Edit "$PA/src/a.ts"
+out=$(pa_run pp.md "$PA_GOOD" false '{"session_id":"pp-1"}')
+[ -f "$PAM/pp.md" ] && [ ! -e "$PPD/pp-1" ] && ok "approved again with the gate — mark written, pending file removed" || bad "pending not removed" "$out $(ls "$PPD")"
+pp_guard "repository files are open again after the mark" allow pp-1 Write "$PA/src/a.ts"
+out=$(pa_in pp.md $'# P\n' false '{"session_id":"pp-3"}' | CLAUDE_PROJECT_DIR="$TMP/pa-wt" bash "$CH/plan-approved.sh")
+[ -f "$PPD/pp-3" ] && ok "refused plan, session in a worktree — pending file goes to the shared common dir" || bad "pending from a worktree session" "$out"
+out=$(pa_run pp.md $'# P\n' false '{"session_id":"../evil"}')
+[ ! -e "$PA/.git/monitorex-locks/evil" ] && [ "$(ls "$PPD" | wc -l | tr -d ' ')" = 3 ] && echo "$out" | pa_block \
+    && ok "refused plan with an unusable session id — no pending file, the refusal still reaches the model" || bad "unusable session id" "$out $(ls "$PPD")"
+printf '[feat]: x\n\nPlan: nocodex.md\n' > "$TMP/pa-m"
+out=$( cd "$PA" && sh githooks/plan-gate.sh "$TMP/pa-m" 2>&1 )
+echo "$out" | grep -q 'ExitPlanMode' && echo "$out" | grep -q 'not the bypass' \
+    && ok "plan-gate.sh: a plan without a mark is sent to finish the gate, not to the bypass" || bad "plan-gate hint" "$out"
+rm -f "$PPD"/pp-*
+
 echo "== plan-approved.py: the gate without Codex (decide / codex_found) =="
 # The «no Codex» branch is tested on pure functions, never through the machine's
 # environment: the hook always checks the standard Codex locations, so on a machine

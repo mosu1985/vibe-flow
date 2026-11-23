@@ -36,6 +36,7 @@ import json
 import os
 import re
 import subprocess
+import time
 from typing import NoReturn
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -192,6 +193,9 @@ UNDECIDED_DENY = ("🔴 The guard could not check this write, and the path looks
 SERVICE_LIKE = re.compile(r"monitorex-|[\\/]worktrees[\\/]", re.I)
 
 
+_SEEN: dict[str, str] = {}           # what _write_lands_in_git worked out, for plan_pending_deny
+
+
 def looks_like_guard_state(path: str) -> bool:
     """The K13 fallback, without gg_paths: a `.git` component or the guard's names."""
     return bool(SERVICE_LIKE.search(path)) or has_git_component(path)
@@ -226,6 +230,7 @@ def _write_lands_in_git(path: str) -> bool | None:
     if common is None:
         return None
     common = os.path.realpath(common)
+    _SEEN["common"], _SEEN["real"] = common, real
     return inside(real, common) or inside(absp, common)
 
 
@@ -240,6 +245,90 @@ def write_verdict(path: str) -> bool | None:
         return None
 
 
+# ── A plan approved without its mark: no repository edits until the gate is finished ──
+# plan-approved.py (PostToolUse on ExitPlanMode) leaves
+# <common>/monitorex-locks/plan-pending/<session id> when the user approved a plan
+# that did not qualify for the approval mark (no gate line, the external critic not
+# settled) in a project with the plan gate on. Without this barrier the session went
+# on to write the code, met the plan gate only at commit time and asked the user for
+# the [feat] bypass. Here the first Write/Edit of a repository file is denied instead.
+#   - only this session (payload.session_id), only while the file is fresh;
+#   - writable: the plans directories the file lists (`dir=`) — the gate is finished
+#     by editing the plan — and anything outside a git working tree (memory, temp);
+#   - lifted by the hook when the plan is approved again and gets its mark, or by a
+#     human deleting the file (the model cannot: it is inside monitorex-locks/);
+#   - fail-OPEN on any doubt: it catches forgetfulness, the plan gate on commit and
+#     push stays the barrier. Edits made through Bash are not looked at.
+PENDING_TTL = 24 * 3600              # a session that old has moved on; the plan gate still holds
+PENDING_SID = re.compile(r"[A-Za-z0-9_-]{1,128}")
+
+
+def _existing_dir(path: str) -> str | None:
+    """The nearest existing directory at or above path."""
+    cur = path
+    for _ in range(64):
+        if os.path.isdir(cur):
+            return cur
+        up = os.path.dirname(cur)
+        if up == cur:
+            return None
+        cur = up
+    return None
+
+
+def plan_pending_deny() -> str | None:
+    """The deny text when this session has a plan waiting for its gate and the write
+    goes into a repository file; None — allow."""
+    common, real = _SEEN.get("common"), _SEEN.get("real")
+    sid = payload.get("session_id")
+    if not common or not real or not isinstance(sid, str) or not PENDING_SID.fullmatch(sid):
+        return None
+    pending = os.path.join(common, "monitorex-locks", "plan-pending", sid)
+    if not os.path.isfile(pending):
+        return None
+    ts, plan, dirs = None, "", []
+    with open(pending, encoding="utf-8", errors="replace") as fh:
+        for line in fh.read().splitlines():
+            key, _, value = line.partition("=")
+            if key == "ts" and value.isdigit():
+                ts = int(value)
+            elif key == "plan":
+                plan = value
+            elif key == "dir" and value:
+                dirs.append(value)
+    age = time.time() - ts if ts is not None else None
+    if age is None or age < -300 or age > PENDING_TTL:
+        return None
+    if any(inside(real, os.path.realpath(d)) or inside(real, d) for d in dirs):
+        return None
+    where = _existing_dir(os.path.dirname(real))
+    if where is None:
+        return None
+    rc, out = git_run(where, "rev-parse", "--is-inside-work-tree")
+    if rc != 0 or out != "true":
+        return None
+    return PLAN_PENDING_DENY % (plan or "the plan", pending)
+
+
+PLAN_PENDING_DENY = """🔴 Plan %s was approved, but it did NOT get the approval mark, so repository files are closed to this session.
+
+The approved text had no gate line or the external critic was not settled (the
+reason was printed right after ExitPlanMode). Code written now would meet the plan
+gate at commit time, hours later. Finish the gate first:
+
+1. run the external critic on the plan (codex-plan-critic), or settle it the way
+   the gate table allows;
+2. write its section and the `Gate: ✅ passed` line into the plan file — the plans
+   directory stays writable;
+3. EnterPlanMode → ExitPlanMode: the user approves the final text, the hook writes
+   the mark and this barrier is gone.
+
+Do not work around it through Bash and do not ask for the [feat] bypass instead.
+If the user decides to go on without the mark, they delete the file themselves:
+   ! rm "%s"
+"""
+
+
 def write_guard() -> NoReturn:
     ti = payload.get("tool_input")
     ti = ti if isinstance(ti, dict) else {}
@@ -251,6 +340,12 @@ def write_guard() -> NoReturn:
         emit_deny(GIT_DIR_DENY)
     if verdict is None and looks_like_guard_state(path):
         emit_deny(UNDECIDED_DENY)
+    try:
+        pending_deny = plan_pending_deny()
+    except Exception:                # noqa: BLE001 — a doubt: allow (the plan gate still holds)
+        pending_deny = None
+    if pending_deny:
+        emit_deny(pending_deny)
     allow()
 
 
