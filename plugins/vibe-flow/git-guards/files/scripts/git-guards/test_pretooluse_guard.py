@@ -49,6 +49,7 @@ OUTSIDE = os.path.realpath(tempfile.gettempdir()) if WINDOWS else "/private/tmp"
 
 STAGE = "git" + " add"          # assembled from pieces, otherwise the hook blocks
 COMMIT = "git" + " commit"      # running the tests themselves
+MERGE = "gh pr" + " merge"
 
 
 def fwd(path: str) -> str:
@@ -133,6 +134,24 @@ CASES = [
     ("git push -u origin wt/x", False),
     ("git push -n origin HEAD", False),
     ('echo "git push --no-verify"', False),
+    # merging past branch protection: only the plugin's admin-only-merge.sh may
+    (f"{MERGE} 5 --merge --admin", True),
+    (f"cd /tmp/wt && {MERGE} 5 --merge --admin --match-head-commit abc", True),
+    ("gh pr -R o/r merge 5 --admin=true", True),
+    ("GH_TOKEN=x gh.exe pr merge 5 --admin", True),
+    ("bash -c 'gh pr merge 5 --admin'", True),
+    ("gh api -X PUT repos/{owner}/{repo}/pulls/5/merge -f merge_method=merge", True),
+    ("gh api --method=put /repos/o/r/pulls/5/merge", True),
+    ("gh api -XPUT repos/o/r/pulls/5/merge?x=1", True),
+    ("gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: \"x\"}) { clientMutationId } }'", True),
+    (f"{MERGE} 5 --merge", False),
+    (f"{MERGE} 5 --merge --match-head-commit abc", False),
+    ("gh pr view 5 --json state", False),
+    ("gh api repos/o/r/pulls/5/merge", False),
+    ("gh api -X DELETE repos/o/r/git/refs/heads/wt/x", False),
+    ('cd /tmp/wt && bash "/opt/plugins/vibe-flow/scripts/admin-only-merge.sh" 5', False),
+    (f'echo "{MERGE} 5 --admin"', False),
+    (f"grep -E 'pr merge .*--admin' gh.log", False),
     # release-gate findings, round 3
     ("scripts/release-gate.sh --report scope pass --head abc --report r.md", True),
     ("scripts/release-gate.sh --report status override --yes", True),

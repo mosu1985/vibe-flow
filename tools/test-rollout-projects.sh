@@ -253,6 +253,7 @@ case "$1 $2" in
   "api repos/{owner}/{repo}/rulesets") [ -f "$GH_STATE/$(basename "$org").ruleset" ] && echo 27891618 ;;
   "api repos/{owner}/{repo}/rules/branches/main")
     echo '[{"type":"deletion"},{"type":"non_fast_forward"},{"type":"update"}]' ;;
+  "api repos/{owner}/{repo}/branches?protected=true&per_page=100") echo '[[{"name":"main"}]]' ;;
   "api repos/{owner}/{repo}/branches/main/protection")
     echo '{"message":"Branch not protected","status":"404"}'; echo 'gh: Branch not protected (HTTP 404)' >&2; exit 1 ;;
   "repo view") exit 1 ;;

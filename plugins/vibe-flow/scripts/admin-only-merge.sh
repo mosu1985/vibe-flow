@@ -13,10 +13,15 @@
 #   - no review is pending (reviewDecision is not REVIEW_REQUIRED / CHANGES_REQUESTED);
 #   - the branch rules are only deletion, non_fast_forward, update, creation,
 #     required_status_checks and pull_request without required reviews;
-#   - classic branch protection (if any) has no required reviews, signatures, linear history,
-#     conversation resolution, lock or push restrictions;
+#   - the branch has no classic branch protection at all: its REST view does not show every
+#     rule (required deployments and the merge queue are visible only in GraphQL), so whatever
+#     it holds, --admin could skip something unseen;
 #   - the checks are green (the required ones; with none required, none of the checks is red),
-#     every required check context has reported, and a branch that must be up to date is not behind;
+#     every required check context has reported green (a context bound to an app only by that
+#     app's check run), and a branch that must be up to date is not behind;
+#   - no branch but the base is protected: the merge API pins the head, not the base, so a token
+#     that can edit the PR could switch the base after these checks, and --admin would then
+#     bypass that other branch's rules unseen;
 #   - the merge is pinned to the head that was checked (--match-head-commit), and to the
 #     expected head if one is given.
 # Anything that cannot be read counts as a refusal (fail-closed).
@@ -58,6 +63,7 @@ trap 'rm -rf "$T"' EXIT
 # exit 2 = the response is not what GitHub returns.
 read -r -d '' PYCODE <<'PY'
 import json, re, sys
+from urllib.parse import quote
 
 def docs(path):
     """Every JSON document in the file: gh api --paginate prints one array per page."""
@@ -86,10 +92,15 @@ def on(v):        # a protection switch counts as set unless it is false or abse
 def zero(v):
     return type(v) is int and v == 0
 
-def ctx(v):
-    if not isinstance(v, str) or not v or "\n" in v or "\t" in v:
+def ctx(c):
+    """ctx <name> <app id or -> <name url-encoded>, tab-separated (no empty field: the shell's
+    `read` would merge two tabs and shift the fields)."""
+    name, app = c["context"], c.get("integration_id")
+    if not isinstance(name, str) or not name or "\n" in name or "\t" in name:
         raise ValueError("bad check context")
-    return "ctx\t" + v
+    if app is not None and type(app) is not int:
+        raise ValueError("bad integration_id")
+    return "ctx\t%s\t%s\t%s" % (name, "-" if app is None else app, quote(name, safe=""))
 
 def view(path):
     d = one(path)
@@ -115,8 +126,11 @@ def rules(path):
             if t in ("deletion", "non_fast_forward", "update", "creation"):
                 continue
             if t == "pull_request":
-                if not zero(p.get("required_approving_review_count")):
-                    bad.append("pull_request rule requires %s approving review(s)" % p.get("required_approving_review_count"))
+                c = p.get("required_approving_review_count")
+                if c is None:                   # absent: counted as required
+                    bad.append("pull_request rule without required_approving_review_count")
+                elif not zero(c):
+                    bad.append("pull_request rule requires %s approving review(s)" % c)
                 for k in ("require_code_owner_review", "require_last_push_approval", "required_review_thread_resolution"):
                     if on(p.get(k)):
                         bad.append("pull_request rule: " + k)
@@ -129,41 +143,11 @@ def rules(path):
                 lst = p.get("required_status_checks")
                 if not isinstance(lst, list):
                     raise ValueError("bad required_status_checks")
-                out += [ctx(c["context"]) for c in lst]
+                out += [ctx(c) for c in lst]
                 if on(p.get("strict_required_status_checks_policy")):
                     out.append("strict")
             else:
                 bad.append("rule " + t)
-    print("\n".join(out))
-    return bad
-
-def protection(path):
-    d, bad, out = one(path), [], []
-    if not isinstance(d, dict):
-        raise ValueError("not an object")
-    r = d.get("required_pull_request_reviews")
-    if r is not None:
-        if not isinstance(r, dict):
-            raise ValueError("bad required_pull_request_reviews")
-        if not zero(r.get("required_approving_review_count")):
-            bad.append("classic protection requires %s approving review(s)" % r.get("required_approving_review_count"))
-        for k in ("require_code_owner_reviews", "require_last_push_approval"):
-            if on(r.get(k)):
-                bad.append("classic protection: " + k)
-    for k in ("required_signatures", "required_linear_history", "required_conversation_resolution", "lock_branch"):
-        v = d.get(k)
-        if v is not None and (not isinstance(v, dict) or on(v.get("enabled"))):
-            bad.append("classic protection: " + k)
-    if d.get("restrictions") is not None:
-        bad.append("classic protection: push restrictions")
-    s = d.get("required_status_checks")
-    if s is not None:
-        if not isinstance(s, dict):
-            raise ValueError("bad required_status_checks")
-        out += [ctx(c) for c in (s.get("contexts") or [])]
-        out += [ctx(c["context"]) for c in (s.get("checks") or [])]
-        if on(s.get("strict")):
-            out.append("strict")
     print("\n".join(out))
     return bad
 
@@ -172,12 +156,47 @@ def present(path, need_path):
     if not isinstance(items, list):
         raise ValueError("not a list")
     good = {i["name"] for i in items if i.get("bucket") in ("pass", "skipping")}
-    need = sorted({l[4:] for l in open(need_path, encoding="utf-8").read().splitlines() if l.startswith("ctx\t")})
-    miss = [c for c in need if c not in good]
+    need = set()
+    for line in open(need_path, encoding="utf-8").read().splitlines():
+        f = line.split("\t")
+        if f[0] == "ctx" and f[2] == "-":         # not bound to an app: any check or status by name
+            need.add(f[1])
+    miss = sorted(c for c in need if c not in good)
     return [", ".join(miss)] if miss else []
 
+def apprun(path, name, app):
+    """The context is bound to app <app>: only that app's check runs count, all of them green."""
+    app, runs = int(app), []
+    for page in docs(path):
+        if not isinstance(page, dict) or not isinstance(page.get("check_runs"), list):
+            raise ValueError("not a check-runs page")
+        runs += page["check_runs"]
+    mine = [r for r in runs if r.get("name") == name
+            and isinstance(r.get("app"), dict) and r["app"].get("id") == app]
+    if not mine:
+        return ["no check run from app %d (a commit status with that name does not count)" % app]
+    bad = sorted({"%s/%s" % (r.get("status"), r.get("conclusion")) for r in mine
+                  if r.get("status") != "completed" or r.get("conclusion") not in ("success", "skipped", "neutral")})
+    return ["check run " + ", ".join(bad)] if bad else []
+
+def others(path, base):
+    """Protected branches other than the base (gh api --paginate --slurp: a list of pages)."""
+    names = []
+    for doc in docs(path):
+        if not isinstance(doc, list):
+            raise ValueError("not a list")
+        for page in doc:
+            for b in (page if isinstance(page, list) else [page]):
+                if not isinstance(b, dict) or not isinstance(b.get("name"), str):
+                    raise ValueError("bad branch")
+                names.append(b["name"])
+    other = sorted(set(names) - {base})
+    return ["other protected branches (%s) — --admin would bypass them if the PR base is switched"
+            % ", ".join(other)] if other else []
+
 try:
-    bad = {"view": view, "rules": rules, "protection": protection, "present": present}[sys.argv[1]](*sys.argv[2:])
+    bad = {"view": view, "rules": rules, "present": present, "apprun": apprun,
+           "others": others}[sys.argv[1]](*sys.argv[2:])
 except Exception as e:
     sys.stderr.write("unexpected response (%s: %s)" % (e.__class__.__name__, e))
     sys.exit(2)
@@ -190,7 +209,7 @@ judge() { # $1 reason if a protection is found, $2 what was read; then the parse
     "$PY" -I -c "$PYCODE" "$@" 2> "$T/err.py"; prc=$?
     case "$prc" in
         0) return 0 ;;
-        1) refuse "$why: $(cat "$T/err.py")" ;;
+        1) refuse "${why:+$why: }$(cat "$T/err.py")" ;;
         *) refuse "$what not readable: $(cat "$T/err.py")" ;;
     esac
 }
@@ -212,9 +231,10 @@ gh api "repos/{owner}/{repo}/rules/branches/$base" --paginate > "$T/rules" 2> "$
     || refuse "rules of branch $base not read: $(oneline < "$T/err")"
 judge "branch $base has protection --admin would skip" "rules of branch $base" rules "$T/rules" > "$T/need"
 
-# 5. Classic branch protection. 404 "Branch not protected" = none.
+# 5. Classic branch protection: any → refuse. Its REST view hides required deployments and the
+# merge queue, so the script cannot tell what --admin would skip. 404 "Branch not protected" = none.
 if gh api "repos/{owner}/{repo}/branches/$base/protection" > "$T/prot" 2> "$T/err"; then
-    judge "branch $base has protection --admin would skip" "branch protection of $base" protection "$T/prot" >> "$T/need"
+    refuse "branch $base has classic branch protection — --admin would skip it; move it to rulesets"
 elif ! grep -q 'Branch not protected' "$T/prot" "$T/err" 2>/dev/null; then
     refuse "branch protection of $base not read: $(oneline < "$T/err")"
 fi
@@ -227,29 +247,48 @@ if grep -qx 'strict' "$T/need"; then
 fi
 
 # 7. Checks. Pending (exit 8) → wait with --watch and judge that exit code.
-checks() { # $@ = extra flags → crc, cout
-    cout=$(gh pr checks "$n" "$@" 2>&1); crc=$?
-    if [ "$crc" = 8 ]; then cout=$(gh pr checks "$n" "$@" --watch 2>&1); crc=$?; fi
+# The table (stdout) holds check names, data from the PR; gh's own messages go to stderr, so
+# "no … checks reported" is looked for only there.
+checks() { # $@ = extra flags → crc, $T/c.out, $T/c.err
+    gh pr checks "$n" "$@" > "$T/c.out" 2> "$T/c.err"; crc=$?
+    if [ "$crc" = 8 ]; then gh pr checks "$n" "$@" --watch > "$T/c.out" 2> "$T/c.err"; crc=$?; fi
 }
 not_green() {
     local names
-    names=$(printf '%s\n' "$cout" | awk -F'\t' '$2=="fail"||$2=="cancel"||$2=="pending"{print $1}' | sort -u | paste -s -d, - | sed 's/,/, /g')
-    refuse "checks not green (gh pr checks exit $crc): ${names:-$(printf '%s\n' "$cout" | tail -1 | oneline)}"
+    names=$(awk -F'\t' '$2=="fail"||$2=="cancel"||$2=="pending"{print $1}' "$T/c.out" | sort -u | paste -s -d, - | sed 's/,/, /g')
+    refuse "checks not green (gh pr checks exit $crc): ${names:-$(tail -1 "$T/c.err" | oneline)}"
 }
 checks --required
 if [ "$crc" != 0 ]; then
-    printf '%s' "$cout" | grep -qi 'no required checks reported' || not_green
+    grep -qi 'no required checks reported' "$T/c.err" || not_green
     checks                                  # none required: none of the checks may be red
-    if [ "$crc" != 0 ] && ! printf '%s' "$cout" | grep -qi 'no checks reported'; then not_green; fi
-fi
-# A required check that never reported is absent from the lists above: match the contexts.
-if grep -q '^ctx' "$T/need"; then
-    gh pr checks "$n" --json name,bucket > "$T/checks" 2> "$T/err" \
-        || refuse "required checks configured ($(grep '^ctx' "$T/need" | cut -f2- | sort -u | paste -s -d, -)) but not reported: $(oneline < "$T/err")"
-    judge "required check(s) not reported or not green" "PR checks" present "$T/checks" "$T/need"
+    if [ "$crc" != 0 ] && ! grep -qi 'no checks reported' "$T/c.err"; then not_green; fi
 fi
 
-# 8. Merge, pinned to the head whose checks were seen.
+# 8. Every required context has reported green — absent from the lists above if it never ran.
+# Not bound to an app: matched by name among the PR's checks and statuses.
+if awk -F'\t' '$1=="ctx" && $3=="-"{f=1} END{exit !f}' "$T/need"; then
+    gh pr checks "$n" --json name,bucket > "$T/checks" 2> "$T/err" \
+        || refuse "required checks configured ($(awk -F'\t' '$1=="ctx" && $3=="-"{print $2}' "$T/need" | sort -u | paste -s -d, -)) but not reported: $(oneline < "$T/err")"
+    judge "required check(s) not reported or not green" "PR checks" present "$T/checks" "$T/need"
+fi
+# Bound to an app (integration_id): only that app's check run counts. A commit status with the
+# same name, which any token with statuses:write can set, does not.
+while IFS="$(printf '\t')" read -r kind name app enc <&3; do
+    [ "$kind" = ctx ] && [ "$app" != - ] || continue
+    gh api "repos/{owner}/{repo}/commits/$head/check-runs?check_name=$enc&per_page=100" --paginate \
+        > "$T/runs" 2> "$T/err" < /dev/null || refuse "check runs of $name not read: $(oneline < "$T/err")"
+    judge "required check $name" "check runs of $name" apprun "$T/runs" "$name" "$app"
+done 3< "$T/need"
+
+# 9. The merge API pins the head, not the base: `gh pr edit N --base X` between these checks and
+# the merge would make --admin bypass X's rules, which nobody looked at. So no branch but the
+# base may be protected (the list covers rulesets and classic protection alike).
+gh api 'repos/{owner}/{repo}/branches?protected=true&per_page=100' --paginate --slurp \
+    > "$T/protected" 2> "$T/err" < /dev/null || refuse "protected branches not read: $(oneline < "$T/err")"
+judge "" "protected branches" others "$T/protected" "$base"
+
+# 10. Merge, pinned to the head whose checks were seen.
 out=$(gh pr merge "$n" --merge --admin --match-head-commit "$head" 2>&1) \
     || refuse "gh pr merge --admin refused: $(printf '%s' "$out" | oneline)"
 printf 'merged with --admin (main-admin-only) — PR #%s, head %s\n' "$n" "$head"
