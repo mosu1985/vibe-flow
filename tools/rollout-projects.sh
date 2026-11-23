@@ -358,7 +358,39 @@ merge_pr() {
     done
     [ "$rc" = 8 ] && { warn "PR #$n: required checks still pending after 15 minutes — not merged; re-run ship later"; return 1; }
     err=$(cd "$W" && gh pr merge "$n" --merge --match-head-commit "$c" 2>&1) && return 0
+    if printf '%s' "$err" | grep -q 'base branch policy prohibits the merge' && admin_only_ruleset "$W"; then
+        merge_admin_only "$W" "$n" "$c" "$rc" && return 0
+        return 1
+    fi
     warn "PR #$n: merge refused — $(printf '%s' "$err" | tail -1)"
+    return 1
+}
+
+# The only --admin exception, the same as in agents/push-to-production.md: a ruleset named
+# exactly `main-admin-only` lets only the admin role update the branch (so an agent's bot token
+# cannot merge), and then a plain merge is refused even for the admin running ship.
+admin_only_ruleset() { # $1 worktree → 0 if the repository has that ruleset active
+    [ -n "$(cd "$1" && gh api 'repos/{owner}/{repo}/rulesets' \
+        --jq '.[] | select(.name=="main-admin-only" and .enforcement=="active") | .id' 2>/dev/null)" ]
+}
+
+# Retry with --admin only when no review is pending and nothing is red; pinned to $3 either way.
+# $4 is the exit code of `gh pr checks --required` from merge_pr (0 = required checks green).
+merge_admin_only() {
+    local W="$1" n="$2" c="$3" req="$4" review out rc err
+    review=$(cd "$W" && gh pr view "$n" --json reviewDecision --jq .reviewDecision 2>/dev/null) \
+        || { warn "PR #$n: review state not read — not merged"; return 1; }
+    case "$review" in
+        REVIEW_REQUIRED|CHANGES_REQUESTED) warn "PR #$n: review $review — not merged (--admin would skip it)"; return 1 ;;
+    esac
+    if [ "$req" != 0 ]; then                       # no required checks: none of the checks may be red
+        out=$(cd "$W" && gh pr checks "$n" 2>&1); rc=$?
+        [ "$rc" = 0 ] || printf '%s' "$out" | grep -qi 'no checks reported' \
+            || { warn "PR #$n: checks not green — not merged"; return 1; }
+    fi
+    err=$(cd "$W" && gh pr merge "$n" --merge --admin --match-head-commit "$c" 2>&1) \
+        && { say "  merged with --admin (main-admin-only ruleset)"; return 0; }
+    warn "PR #$n: merge with --admin refused — $(printf '%s' "$err" | tail -1)"
     return 1
 }
 
