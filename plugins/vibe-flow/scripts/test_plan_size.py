@@ -8,7 +8,9 @@ import tempfile
 import unittest
 
 SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plan-size.py")
-GATE = "## 🚦 Plan gate\n\n| Codex (external critic) | 7.0 | 0 ✅ |\n\nGate: ✅ passed\n"
+GATE_TABLE = "## 🚦 Plan gate\n\n| Codex (external critic) | 7.0 | 0 ✅ |\n\nGate: ✅ passed\n"
+# A plan the approval hook accepts: the gate line plus the critic's own section.
+GATE = "## 🧑‍⚖️ External Codex review\nC1 accepted\n\n" + GATE_TABLE
 
 
 class PlanSizeTest(unittest.TestCase):
@@ -164,7 +166,43 @@ class PlanSizeTest(unittest.TestCase):
         code, out = self.run_script("archive", self.plan, "--section", "🚦 Plan gate")
         self.assertEqual(code, 0, out)
         self.assertIn("no `Gate: ✅ passed` line", out)
+        self.assertNotIn("no `## … Codex` section", out)
+
+    def test_archiving_the_critic_section_warns_even_with_a_scored_codex_row(self):
+        # The scored row of a critic that ran does not settle the hook; only the section does.
+        self.write("# 🎯 Task\n\n## 🧑‍⚖️ External Codex review — round 1\nC1 accepted\n\n" + GATE_TABLE)
+        code, out = self.run_script("archive", self.plan, "--section",
+                                    "🧑‍⚖️ External Codex review — round 1")
+        self.assertEqual(code, 0, out)
         self.assertIn("no `## … Codex` section", out)
+
+    def test_a_codex_not_installed_row_settles_the_critic(self):
+        self.write("# 🎯 Task\n\n## 🛡️ Security\nold\n\n## 🚦 Plan gate\n"
+                   "| codex (external critic) | — | ⚪️ not installed |\n\nGate: ✅ passed\n")
+        code, out = self.run_script("archive", self.plan, "--section", "🛡️ Security")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("⚠️", out)
+
+    def test_a_longer_fence_holds_a_nested_fence_and_a_heading(self):
+        text = ("# 🎯 Task\n\n## A\n````markdown\n```bash\necho hi\n```\n## inner\n````\n"
+                "tail of A\n\n## B\nkeep\n" + GATE)
+        self.write(text)
+        code, out = self.run_script("archive", self.plan, "--section", "A")
+        self.assertEqual(code, 0, out)
+        plan, hist = self.read(self.plan), self.read(self.history)
+        self.assertNotIn("inner", plan)
+        self.assertNotIn("tail of A", plan)
+        self.assertIn("## B\nkeep", plan)
+        self.assertIn("## inner", hist)
+        self.assertIn("tail of A", hist)
+
+    @unittest.skipIf(os.name == "nt", "POSIX permission bits")
+    def test_archive_keeps_the_file_mode(self):
+        self.write(self.plan_with_iterations())
+        os.chmod(self.plan, 0o644)
+        self.assertEqual(self.run_script("archive", self.plan, "--section", "🛡️ Security")[0], 0)
+        self.assertEqual(os.stat(self.plan).st_mode & 0o777, 0o644)
+        self.assertEqual(os.stat(self.history).st_mode & 0o777, 0o644)
 
     def test_history_section_stays(self):
         self.write(self.plan_with_iterations())
@@ -176,9 +214,12 @@ class PlanSizeTest(unittest.TestCase):
         self.write(self.plan_with_iterations().replace("\n", "\r\n"))
         code, out = self.run_script("archive", self.plan, "--section", "🛡️ Security")
         self.assertEqual(code, 0, out)
-        plan = self.read(self.plan)
+        plan, hist = self.read(self.plan), self.read(self.history)
         self.assertIn("## 🔁 Iteration 2\r\nNew scope.\r\n", plan)
         self.assertNotIn("old findings", plan)
+        # No bare LF anywhere: the plan and its history keep the plan's line endings.
+        self.assertEqual(plan.count("\n"), plan.count("\r\n"), repr(plan[-200:]))
+        self.assertEqual(hist.count("\n"), hist.count("\r\n"), repr(hist[-200:]))
 
 
 if __name__ == "__main__":

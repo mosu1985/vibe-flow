@@ -3,7 +3,7 @@
 
 Claude Code's plan approval window (ExitPlanMode) refuses to offer approval for a
 plan it cannot show in full: the only choices left are "send feedback" and Esc.
-The plan text has to pass three limits (measured on Claude Code 2.1.3xx; if the
+The plan text has to pass four limits (measured on Claude Code 2.1.3xx; if the
 window says "too large" while this script says it fits, trust the window):
 
   1. at most 200,000 characters (UTF-16 code units, as JavaScript counts them);
@@ -34,6 +34,7 @@ import datetime
 import hashlib
 import os
 import re
+import stat
 import sys
 import tempfile
 import unicodedata
@@ -46,9 +47,21 @@ WARN_SHARE = 0.85
 LONG_LINE = 1000
 HISTORY_HEADING = "## 📚 Plan history"
 
-# The same gate line the plan-approved hook looks for (git-guards plan-approved.py).
+# What the plan-approved hook (git-guards plan-approved.py) needs in the approved
+# text: the gate line, and a `## … Codex` section or a `| Codex` row whose status
+# cell says the critic is not installed or the user decided to go without it.
 GATE_LINE = re.compile(r"(?m)^(Гейт: ✅ пройден|Gate: ✅ passed)")
-FENCE = re.compile(r"^\s*(```|~~~)")
+CODEX_SECTION = re.compile(r"(?m)^## .*Codex")
+CODEX_ROW = re.compile(r"^[ \t]*\|[ \t]*Codex\b", re.I)
+NOT_INSTALLED = re.compile(
+    "⚪️?[ \t]*(?:\\(?(?:critic|codex|критик)\\)?[ \t]+)*"
+    "(?:not installed|не установлен)[ \t.]*$",
+    re.I)
+USER_DECISION = re.compile(
+    "❌[ \t]*(?:unavailable|недоступен)[ \t]*[—–-][ \t]*"
+    "(?:user.?s decision|решение пользователя)[ \t.]*$",
+    re.I)
+FENCE = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
 HEADING = re.compile(r"^#{1,2} ")
 # Claude Code drops the emoji/text variation selectors before it measures lines.
 VARIATION_SELECTORS = re.compile("[︎️]")
@@ -73,15 +86,55 @@ def read_plan(path):
 
 
 def structure(lines):
-    """[(index, heading)] of the top-level headings (`# ` and `## `) outside code fences."""
-    out, fenced = [], False
+    """[(index, heading)] of the top-level headings (`# ` and `## `) outside code fences.
+    A fence closes only on a bare fence of the same character, at least as long as the
+    opening one, so a ```` block may hold ``` lines."""
+    out, opened = [], None
     for i, line in enumerate(lines):
-        if FENCE.match(line):
-            fenced = not fenced
+        m = FENCE.match(line.rstrip("\r"))
+        if m:
+            fence, rest = m.group(1), m.group(2)
+            if opened is None:
+                if not (fence[0] == "`" and "`" in rest):
+                    opened = fence
+                continue
+            if fence[0] == opened[0] and len(fence) >= len(opened) and not rest.strip():
+                opened = None
             continue
-        if not fenced and HEADING.match(line):
+        if opened is None and HEADING.match(line):
             out.append((i, line.rstrip("\r")))
     return out
+
+
+def _cells(line):
+    """Split a table line on unescaped `|` (as plan-approved.py does)."""
+    cells, cur, i = [], "", 0
+    while i < len(line):
+        ch = line[i]
+        if ch == "\\" and i + 1 < len(line) and line[i + 1] == "|":
+            cur += "|"
+            i += 2
+            continue
+        if ch == "|":
+            cells.append(cur)
+            cur = ""
+        else:
+            cur += ch
+        i += 1
+    cells.append(cur)
+    return [c.strip() for c in cells]
+
+
+def critic_settled(plan):
+    """The external-critic part the approval hook accepts is in the plan itself."""
+    if CODEX_SECTION.search(plan):
+        return True
+    for line in plan.splitlines():
+        if CODEX_ROW.match(line):
+            filled = [c for c in _cells(line) if c]
+            if filled and (NOT_INSTALLED.search(filled[-1]) or USER_DECISION.search(filled[-1])):
+                return True
+    return False
 
 
 def section_of(heads, i):
@@ -175,12 +228,17 @@ def history_path(path):
     return stem + "-history" + ext
 
 
-def write_atomic(path, data):
-    """A temp file next to the target (same filesystem), then a rename over it."""
+def write_atomic(path, data, mode_from):
+    """A temp file next to the target (same filesystem), then a rename over it. The
+    file keeps the permissions of `mode_from` (mkstemp would leave it 0600)."""
     fd, tmp = tempfile.mkstemp(prefix=".plan-size.", dir=os.path.dirname(os.path.abspath(path)))
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(data)
+        try:
+            os.chmod(tmp, stat.S_IMODE(os.stat(mode_from).st_mode))
+        except OSError:
+            pass
         os.replace(tmp, path)
     except BaseException:
         if os.path.exists(tmp):
@@ -198,6 +256,7 @@ def cmd_archive(path, wanted_text, wanted_lines, note):
         print("plan-size: cannot read %s: %s" % (path, e))
         return 2
     lines = text.split("\n")
+    nl = "\r\n" if "\r\n" in text else "\n"
     heads = [(i, h) for i, h in structure(lines) if h.startswith("## ")]
     starts = set()
     for want in wanted_text:
@@ -231,19 +290,21 @@ def cmd_archive(path, wanted_text, wanted_lines, note):
     hist = history_path(path)
     hist_name = os.path.basename(hist)
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    block = "\n\n# 📦 Moved out of the plan %s%s\n\n%s\n" % (
-        stamp, (" — " + note.strip()) if note and note.strip() else "", "\n\n".join(moved))
+    block = (nl * 2 + "# 📦 Moved out of the plan %s%s" + nl * 2 + "%s" + nl) % (
+        stamp, (" — " + note.strip()) if note and note.strip() else "", (nl * 2).join(moved))
     try:
         with open(hist, "rb") as f:
-            old_hist = f.read().decode("utf-8", "surrogateescape")
+            old_hist_raw = f.read()
+        old_hist = old_hist_raw.decode("utf-8", "surrogateescape")
     except FileNotFoundError:
-        old_hist = ("# 📚 History of %s\n\nSections moved out of the main plan so that the "
-                    "approval window can show it in full. Read-only: the plan is the source "
-                    "of truth.\n" % name)
-    new_plan = "\n".join(keep).rstrip("\r\n") + "\n"
+        old_hist_raw = None
+        old_hist = ("# 📚 History of %s" + nl * 2 + "Sections moved out of the main plan so that "
+                    "the approval window can show it in full. Read-only: the plan is the source "
+                    "of truth." + nl) % name
+    new_plan = "\n".join(keep).rstrip("\r\n") + nl
     if not any(line.rstrip("\r") == HISTORY_HEADING for line in keep):
-        new_plan += ("\n%s\n\nEarlier iterations, superseded review sections and full critic rounds "
-                     "are in `%s` (same directory).\n" % (HISTORY_HEADING, hist_name))
+        new_plan += (nl + HISTORY_HEADING + nl * 2 + "Earlier iterations, superseded review "
+                     "sections and full critic rounds are in `%s` (same directory)." + nl) % hist_name
     try:
         # A reviewer that is still writing would lose its edit: compare before replacing.
         with open(path, "rb") as f:
@@ -251,10 +312,23 @@ def cmd_archive(path, wanted_text, wanted_lines, note):
                 print("plan-size: the plan changed during the move (an agent is still writing "
                       "it?); nothing moved, retry when it is done")
                 return 2
-        write_atomic(hist, (old_hist.rstrip("\n") + block).encode("utf-8", "surrogateescape"))
-        write_atomic(path, new_plan.encode("utf-8", "surrogateescape"))
+        write_atomic(hist, (old_hist.rstrip("\r\n") + block).encode("utf-8", "surrogateescape"),
+                     hist if old_hist_raw is not None else path)
     except OSError as e:
-        print("plan-size: write failed: %s" % e)
+        print("plan-size: write failed: %s; nothing moved" % e)
+        return 2
+    try:
+        write_atomic(path, new_plan.encode("utf-8", "surrogateescape"), path)
+    except OSError as e:
+        # Put the history back, so a retry does not copy the same sections twice.
+        try:
+            if old_hist_raw is None:
+                os.unlink(hist)
+            else:
+                write_atomic(hist, old_hist_raw, hist)
+        except OSError:
+            pass
+        print("plan-size: write failed: %s; nothing moved" % e)
         return 2
     print("plan-size: moved %d section(s) to %s:" % (len(moved), hist_name))
     for chunk in moved:
@@ -262,9 +336,10 @@ def cmd_archive(path, wanted_text, wanted_lines, note):
     if not GATE_LINE.search(new_plan):
         print("⚠️ The plan has no `Gate: ✅ passed` line now: write the current gate table "
               "before ExitPlanMode.")
-    if not re.search(r"(?m)^## .*Codex", new_plan) and not re.search(r"(?m)^[ \t]*\|[ \t]*Codex\b", new_plan):
-        print("⚠️ The plan has no `## … Codex` section and no `| Codex` gate row now: the approval "
-              "hook needs one of them in the plan itself, not in the history file.")
+    if not critic_settled(new_plan):
+        print("⚠️ The plan has no `## … Codex` section now (and no `| Codex` gate row saying "
+              "`⚪️ not installed` or `❌ unavailable — user's decision`): the approval hook needs "
+              "one of them in the plan itself, not in the history file.")
     return 0
 
 
