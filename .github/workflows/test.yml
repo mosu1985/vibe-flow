@@ -61,6 +61,9 @@ jobs:
       - name: Session store check
         run: python3 plugins/vibe-flow/scripts/test_session_store.py
 
+      - name: Plan size check
+        run: python3 plugins/vibe-flow/scripts/test_plan_size.py
+
       - name: Guard latency (informational, never fails)
         working-directory: plugins/vibe-flow/git-guards
         run: |

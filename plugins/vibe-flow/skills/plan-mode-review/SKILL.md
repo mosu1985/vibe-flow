@@ -1,13 +1,13 @@
 ---
 name: plan-mode-review
-description: Mandatory Plan Mode procedure — live verification of assumptions about external systems, a batch of plan reviewers (plan-reviewer, access-control-reviewer, test-impact-reviewer, security-reviewer, performance-reviewer, project domain reviewers; after the batch, in a separate message, orchestration-router), scores against a single rubric, an external critic on a different model (codex-plan-critic, if Codex CLI is installed), and a defect-class gate (open critical/high findings block the plan; the score is a metric), up to 3 rounds of auto-fixing, mandatory user questions and the plan format. Load IMMEDIATELY after the plan is written to a file and BEFORE calling ExitPlanMode.
+description: Mandatory Plan Mode procedure — live verification of assumptions about external systems, a batch of plan reviewers (plan-reviewer, access-control-reviewer, test-impact-reviewer, security-reviewer, performance-reviewer, project domain reviewers; after the batch, in a separate message, orchestration-router), scores against a single rubric, an external critic on a different model (codex-plan-critic, if Codex CLI is installed), and a defect-class gate (open critical/high findings block the plan; the score is a metric), a plan size check so the approval window can show the plan, up to 3 rounds of auto-fixing, mandatory user questions and the plan format. Load IMMEDIATELY after the plan is written to a file and BEFORE calling ExitPlanMode.
 ---
 
 # Plan Mode procedure
 
 Copy the prohibitions ("do NOT call `ExitPlanMode` until…") into the project's `CLAUDE.md` as well, so they stay in force even if the skill fails to load.
 
-**Order:** write the plan to a file → **verify assumptions about external systems live** (LIVE FACTS RULE) → launch the reviewer batch (in one message, in parallel), **each reviewer gives a score and a count of blocking findings per the rubric** → when the batch is back, run `vibe-flow:orchestration-router` **in a separate message** → ask the user the mandatory questions → `vibe-flow:codex-plan-critic` (external review on a different model, if Codex is installed) → **defect-class gate** → show the simplified plan + reviewer sections + the breakdown of the critic's findings + the orchestration verdict → `ExitPlanMode` only after approval.
+**Order:** write the plan to a file → **verify assumptions about external systems live** (LIVE FACTS RULE) → launch the reviewer batch (in one message, in parallel), **each reviewer gives a score and a count of blocking findings per the rubric** → when the batch is back, run `vibe-flow:orchestration-router` **in a separate message** → ask the user the mandatory questions → `vibe-flow:codex-plan-critic` (external review on a different model, if Codex is installed) → **defect-class gate** → **size check** (`plan-size.py`, see PLAN SIZE RULE) → show the simplified plan + reviewer sections + the breakdown of the critic's findings + the orchestration verdict → `ExitPlanMode` only after approval.
 
 🔴 **Two-model gate:** if Codex CLI is installed, the plan goes to implementation only when **neither the Claude reviewers nor the external critic have any open `critical`/`high` findings**. One model cannot wave a plan through alone. If Codex is not installed, the Claude reviewers hold the gate (see CODEX CRITIC RULE). The score is computed and shown but is not the gate; for why, see PLAN GATE RULE.
 
@@ -68,7 +68,7 @@ Copy the prohibitions ("do NOT call `ExitPlanMode` until…") into the project's
 - 🔴 **Extension rule:** if the project's `.claude/agents/` has its own domain plan reviewers (their `description` says they review the plan in Plan Mode / before `ExitPlanMode`), launch them **in the same batch**, with the same rubric block. Self-excluding when the plan does not concern them is their own business
 - `security-reviewer` and `performance-reviewer` **do not duplicate** each other: security is safety and permissions, performance is load
 - 🔴 **Reviewers change the plan file ONLY via `Edit`** — append or replace their own section. `Write` on the plan file is forbidden: batch agents write to one file at the same time, and a whole-file overwrite wipes out the sections neighbors appended after the read. For a project domain reviewer that has `Write` in its `tools`, add this rule to its prompt
-- 🔴 **No temporary files in the plans directory.** The plans directory is the project's `plansDirectory` (the kit sets `.plans`, git-ignored) or, in older installs, the Claude config directory (`~/.claude/plans`, sometimes reached through a symlink), where Claude Code asks for manual confirmation on every write — even in bypass-permissions mode. Either way it is not a scratch space. Copies, slices (`sed -n … >`), round snapshots and drafts go only to the session scratchpad (or `mktemp -d` if there is none); in the plans directory only the plan file itself changes, and only via `Edit`. If a reviewer wrote its section into its own agent plan file (`<plan>-agent-<id>.md`) instead of the main one, the main session moves the section with `Read` + `Edit` of the main plan — not with `cp`, `>` or `Write`. Give each reviewer the absolute path of the main plan file and tell it to edit that file, not its own
+- 🔴 **No temporary files in the plans directory.** The plans directory is the project's `plansDirectory` (the kit sets `.plans`, git-ignored) or, in older installs, the Claude config directory (`~/.claude/plans`, sometimes reached through a symlink), where Claude Code asks for manual confirmation on every write — even in bypass-permissions mode. Either way it is not a scratch space. Copies, slices (`sed -n … >`), round snapshots and drafts go only to the session scratchpad (or `mktemp -d` if there is none); in the plans directory only the plan file itself changes, and only via `Edit` — plus its two permanent companions next to it: `<plan>-crew.md` (written by `team-planner`) and `<plan>-history.md` (written by `plan-size.py archive`, see PLAN SIZE RULE). If a reviewer wrote its section into its own agent plan file (`<plan>-agent-<id>.md`) instead of the main one, the main session moves the section with `Read` + `Edit` of the main plan — not with `cp`, `>` or `Write`. Give each reviewer the absolute path of the main plan file and tell it to edit that file, not its own
 - A reviewer with nothing to check in the plan **self-excludes** ("✅ not required") — that is a normal outcome, not a failure
 - **Report the results of all reviewers** to the user **BEFORE** `ExitPlanMode`, so the findings enter the plan before approval
 - **Do NOT call `ExitPlanMode`** until every reviewer in the batch has finished
@@ -127,6 +127,10 @@ Copy the prohibitions ("do NOT call `ExitPlanMode` until…") into the project's
   breaks. A finding without a scenario is downgraded to medium and does not
   hold the gate. Do not inflate severity "just in case" and do not deflate it
   to make the plan pass.
+
+  Keep every line of your section under 800 characters: a table cell that
+  needs a paragraph gets a short cell and a note in a list under the table.
+  Long lines can stop the approval window from showing the plan.
   ```
 - **Claude score = MINIMUM across all reviewers that ran.** Averaging is forbidden: one hole in data isolation must not be compensated by high scores for orchestration and tests
 - **Self-excluded reviewers** ("✅ not required") are **not included** in the minimum — they have nothing to score
@@ -221,13 +225,34 @@ If Codex is not installed — the critic row is `⚪️ not installed`, and the 
 
 The score stays in the table: it shows how good the plan is, and a low number with a passed gate is a legitimate reason to tell the user "it passed, but here are the points where the plan is weak".
 
+## PLAN SIZE RULE
+
+**Where the rule comes from.** A plan was approved, then the user asked for a change, and the second iteration was written into the same file on top of the first. The reviewers and the critic appended fresh sections, the old ones stayed, and so did the crew section with its ready prompts from the first approval. The plan grew to 185,000 characters with 14 lines longer than 1,000 characters (wide table rows, one-line prompts), and the approval window refused to offer approval at all: the only choice left was "tell Claude what to change". The window does not say which limit was hit, so the session could not tell why.
+
+**The approval window's limits** (`plan-size.py` knows the numbers): at most 200,000 characters, no line over 4,096 characters, and a budget on long lines, the sum of the squared line lengths. The last one is what usually trips: one 2,000-character line costs as much as 400 lines of 100 characters, so a dozen wide table rows use the budget up at half the character limit.
+
+- 🔴 **Before EVERY `ExitPlanMode`**, after the gate table is written, run (`python` or `py -3` where `python3` is missing):
+  ```
+  python3 "${CLAUDE_PLUGIN_ROOT}/scripts/plan-size.py" check "<absolute path of the plan file>"
+  ```
+  Exit 0: go on; a `⚠️ close to the limit` verdict means the next round may not fit, so trim now. Exit 1: do NOT call `ExitPlanMode`, the user would get a window with nothing to approve; trim (below) and check again. Exit 2: show the output
+- **Keep lines short from the start:** no line over ~800 characters. A table cell that needs a paragraph gets a short cell and a note in a list under the table; a long prompt or quote goes into a fenced block with line breaks. The reviewers get the same rule in the PLAN SCORING RULE block
+- **Trim by moving, not deleting.** Superseded material goes to the companion file `<plan>-history.md` next to the plan:
+  ```
+  python3 "${CLAUDE_PLUGIN_ROOT}/scripts/plan-size.py" archive "<plan>" --section "<heading without ##>" [--section …] [--line N] --note "<why>"
+  ```
+  It moves whole `## ` sections, leaves a `## 📚 Plan history` link in the plan, and refuses a heading that heads two sections (pick one with `--line N`, the heading's line number; the refusal lists them). What to move, in order: a previous iteration and everything that belonged to it; reviewer sections and critic rounds that a later round replaced; the long finding tables of earlier critic rounds (the current round's decisions stay). Then shorten the longest lines `check` names
+- 🔴 **What stays in the plan itself:** the current iteration (why, verify live, steps, files, risks, verification), the user's decisions, the current reviewer sections, the current `## 🚦 Plan gate` table with its `Gate:` line, and the current `## … Codex` section (or the `| Codex` row with its marker). The approval hook reads only the text the window approved: a gate line or a critic section in the history file does not count. `archive` warns when the plan is left without one
+- 🔴 **`archive` only while nobody else writes the plan:** not while the reviewer batch, the critic or `team-planner` is running. It is the one change to the plan made other than through `Edit` (it replaces the file whole); it refuses if the plan changed during the move, but it cannot see an agent that has already read the plan and will write later. Where the plans directory is inside the Claude config directory, Claude Code asks to confirm this write: confirm it
+- 🔴 **A new iteration of an approved plan** (the user asked for changes after approval, and the work goes back to Plan Mode in the same file): FIRST `archive` the previous iteration with its reviewer sections, critic rounds, gate table and `## 👥 Agent crew`; THEN write the new iteration and run the reviewers on it. An old section left in the plan reads as current, and every round doubles it
+
 ## TEAM CREATE RULE
 
 **After `ExitPlanMode`, act on the `orchestration-router` verdict** (the `## 🚀 Implementation orchestration` section in the plan):
 
 - **🔀 Agent crew** → automatically, without questions:
-  1. launch `vibe-flow:team-planner` with the path to the plan file → it determines the parallel groups, agent types, models and effort, and appends `## 👥 Agent crew` with ready-made prompts
-  2. 🔴 **Main path — parallel `Agent` calls:** each group from the section goes **in one message** (one `Agent` call per agent): `subagent_type`, `model`, `effort` — from the agent's row; the prompt — from the section verbatim (do not invent it anew) + the line `Worktree: <absolute path>`
+  1. launch `vibe-flow:team-planner` with the path to the plan file → it determines the parallel groups, agent types, models and effort, appends a compact `## 👥 Agent crew` section to the plan and writes the ready-made prompts to `<plan>-crew.md` next to it (the prompts are for the agents, not for the person approving; inside the plan they took up a third of it)
+  2. 🔴 **Main path — parallel `Agent` calls:** each group from the section goes **in one message** (one `Agent` call per agent): `subagent_type`, `model`, `effort` — from the agent's row; the prompt — from `<plan>-crew.md` verbatim (do not invent it anew) + the line `Worktree: <absolute path>`
   3. The next group — **only after the results of the previous one**: check that each agent did its part (files are in place, the "done" criterion is met); if one did not, refine the prompt and relaunch it
   4. Crew agents return their result as a **final reply**. There is no `SendMessage` chat — the prompts are self-contained
   5. Post-steps from the section, in order: `vibe-flow:test-runner` → [`vibe-flow:security-reviewer`, if the section requires it] → commit via `scripts/git-safe-commit.sh` → `vibe-flow:release-gate` → `vibe-flow:dev-server-restart` (each gets `Worktree: <path>`)
