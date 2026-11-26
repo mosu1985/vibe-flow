@@ -142,12 +142,12 @@ cd "<project root>" && { git remote get-url origin >/dev/null 2>&1 && echo origi
         "$(printf '%s' "$u" | sed -E 's#^[A-Za-z][A-Za-z0-9+.-]*://([^/@]*@)?([^/:]+).*#\2#; s#^[^@/:]+@([^:/]+):.*#\1#')" \
         "$(printf '%s' "$u" | sed -E 's#^[A-Za-z][A-Za-z0-9+.-]*://[^/]*/##; s#^[^@/]+@[^:/]+:##; s#/+$##; s#\.git$##')"
    ```
-   Host ≠ `github.com` → stop: "`origin` is not on GitHub — its visibility cannot be checked and the deploy agent does not work with it".
+   Host (compared case-insensitively) ≠ `github.com` → stop: "`origin` is not on GitHub — its visibility cannot be checked and the deploy agent does not work with it". An SSH host alias (`git@github.com-work:…`) also stops here: say so, and that the user can check visibility and run the first push themselves.
 2. 🔴 **Private:** `gh repo view '<owner>/<repo>' --json visibility --jq .visibility` prints exactly `PRIVATE`. Anything else, or an error → stop.
 3. 🔴 **The push goes there too:** `git remote get-url --push --all origin` gives exactly one address, and parsed the same way it is the same host and `<owner>/<repo>` (case-insensitive). Do not print it. Otherwise stop: a separate push URL could lead to a public mirror.
 4. **Secret files in the history** — every path that ever existed in the prod branch, including merge commits and both names of a rename (`--diff-filter=A` and `rev-list --objects` both miss some), plus the tracked files:
    ```bash
-   cd "<project root>" && set -o pipefail && { git -c core.quotePath=false log refs/heads/<GG_PROTECTED> -m --no-renames --name-only --format= -z && git ls-files -z; } | python3 -I -c '
+   cd "<project root>" && . scripts/git-guards/pyenv.sh && gg_python && set -o pipefail && { git -c core.quotePath=false log refs/heads/<GG_PROTECTED> -m --no-renames --name-only --format= -z && git ls-files -z; } | "$GG_PY" -I -c '
    import re, sys
    names = {p for p in sys.stdin.buffer.read().decode("utf-8", "replace").split("\0") if p}
    bad = re.compile(r"^(\.env(\..*)?|access\.md|.*credentials.*|.*secret.*|id_.*|kubeconfig|.*\.(pem|p12|key|keystore)|service[-_]account.*\.json)$")
@@ -158,7 +158,7 @@ cd "<project root>" && { git remote get-url origin >/dev/null 2>&1 && echo origi
            print(p)
    '
    ```
-   A non-zero exit → stop (the history could not be listed). Files found → show the list and warn: after the push they stay in the GitHub history even if deleted later — rotate those keys or clean the history first. Then `AskUserQuestion`: "Clean up first (Recommended)" / "Push anyway". The decision is the user's.
+   Python comes from the kit's resolver (`gg_python`: `python3`, `python`, `py -3`, skipping the Microsoft Store alias), never a bare `python3`. A non-zero exit → stop (no Python, or the history could not be listed) and say which. Files found → show the list and warn: after the push they stay in the GitHub history even if deleted later — rotate those keys or clean the history first. Then `AskUserQuestion`: "Clean up first (Recommended)" / "Push anyway". The decision is the user's.
 5. Only now — the first-push command for the human (tools, not product code; see step 8): `! git push -u origin <GG_PROTECTED> --no-verify`.
 
 ## 9. Report
