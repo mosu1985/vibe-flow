@@ -3,7 +3,7 @@ name: release-gate
 description: |
   Final gate before push: an Opus reviewer reads the WHOLE branch diff against
   the protected branch (usually main) and decides whether the code may be sent.
-  ALWAYS run it after implementation and commit, BEFORE asking the user "Push?",
+  ALWAYS run it after implementation and commit, BEFORE asking the user "Deploy <sha>?",
   no matter who wrote the code (the main session, subagents on Sonnet/Haiku, an
   agent crew). In projects with git-guards (installed by /vibe-flow:init) the
   pre-push hook will not send the branch without its verdict. The agent only

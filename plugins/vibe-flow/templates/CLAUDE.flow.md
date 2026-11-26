@@ -5,14 +5,15 @@
 > below or above the block.
 
 ## 🌍 Language
-- Talk to the user in their language. A confirmation ("yes", "push", "deploy") counts in any language.
+- Talk to the user in their language. A confirmation ("yes", "deploy", "+") counts in any language. "Push" alone means a push, not a deploy.
 
 ## 🚨 Critical rules
 
 ### 🚫 Deploy — only with the user's knowledge
 - **NEVER** deploy or push to the protected branch without the user's explicit "yes" in the current conversation
-- **ALWAYS** report that the work is ready to deploy and ask "Push?"
-- **BEFORE** asking "Push?" — get a ✅ verdict from `vibe-flow:release-gate` (see "Final gate")
+- **ALWAYS** report that the work is ready and ask one question: **"Deploy `<short-sha>`? (push `<branch>` + merge into `<prod-branch>`)"**. One "yes" covers the push, the PR and the merge of THAT commit; a reply that names only the push ("push it", "push only") is a push without a merge
+- **BEFORE** asking — get a ✅ verdict from `vibe-flow:release-gate` (see "Final gate")
+- 🔴 **Consent is the user's own reply after the report**, to a question that names the merge and the prod branch. An option picked earlier in a menu ("smoke test, then deploy") is the order of work, not consent. A new commit after the "yes" → ask again: the "yes" is bound to the commit
 - Irreversible actions (DB migrations, deleting data, mass mailings, writing to external services) also need the user's explicit "yes"
 
 ### 🔥 See it through
@@ -59,7 +60,7 @@ Two levels only.
   - at most 2 code files;
   - no new migrations or schema changes, no new API routes, cron jobs, webhooks or integrations, no new sections or modules;
   - does not touch permissions, auth, RLS, tenant isolation, money or calculations.
-- **S order:** worktree → code → tests (`test-runner`) → commit → **`release-gate`** → "Push?". The final gate and the user's yes before push apply to S too.
+- **S order:** worktree → code → tests (`test-runner`) → commit → **`release-gate`** → "Deploy `<sha>`?". The final gate and the user's yes before push apply to S too.
 - 🔴 **Everything else — the full procedure** (Plan Mode below). In doubt — full. Size only grows: if an S task touches any item above — stop, go to Plan Mode.
 - **The kit holds the line:** the plan gate in `pre-push` requires an approved plan for every `[feat]` and every new migration. Renaming the commit type to get into S is a bypass; `release-gate` catches it.
 
@@ -68,9 +69,9 @@ Two levels only.
 
 🔴 Prohibitions that always apply:
 - **DO NOT call `ExitPlanMode`** until the reviewers have finished and the user has read the simplified plan from `vibe-flow:plan-reviewer`
-- **Reviewer questions** (`🔴 USER QUESTION REQUIRED`, "what to do about tests") — ask via `AskUserQuestion` BEFORE `ExitPlanMode` and do not decide for the user
+- **Reviewer questions** (`🔴 USER QUESTION REQUIRED`, `❓ DECISION NEEDED`) — ask via `AskUserQuestion` BEFORE `ExitPlanMode` and do not decide for the user. A test recommendation without the marker is applied as is, without a question
 - **Verify assumptions about external systems live** (a query, a script) and write the fact into the plan, not "we'll check during implementation"
-- **Gate by defect class:** the plan goes to implementation when no `critical`/`high` findings remain open. A finding without a failure scenario is `medium`. At most 3 rounds of auto-fixing, then sort it out with the user
+- **Gate by defect class:** the plan goes to implementation when no `critical`/`high` findings remain open. A finding without a failure scenario is `medium`; so is a rare coincidence with recoverable harm, unless it is a dangerous class (another user's or customer's data or actions, a bypass of auth, signature or permissions incl. fail-open, secrets, money, irreversible data loss, a deploy or an external write without a "yes"). At most 3 rounds; the external critic re-checks in rounds 2–3. After round 3, findings all folded or rejected with a fact → go on without a question; ask the user only when a finding needs their decision
 - 🔴 **Plan gate on push:** a `[feat]` commit (and any commit that adds a new migration) carries the trailer line `Plan: <file>.md`. The installed `pre-push` checks it. A plan counts as approved when the user approved it in `ExitPlanMode` (the approval mark is written by a Claude Code harness hook, not by the model) and the plan contains the gate line plus the Codex critic section — or, **without Codex**, the gate-table row `| Codex … | ⚪️ not installed |` (Codex is not required: without it the gate goes by the Claude reviewers). It catches forgetfulness, not deception. Bypass — only by a human: `! scripts/git-confirm.sh feat --yes` (one-off, 15 minutes)
 - 🔴 **A plan approved before its gate was finished gets no mark** (the hook says so right after `ExitPlanMode`), and repository files are closed to the session until it does. Finish the gate at once: the critic's section and the gate line into the plan, then `EnterPlanMode` → `ExitPlanMode`. Do not write the code first and ask for the bypass at commit time; a bypass request always quotes the gate's reason
 
@@ -87,16 +88,15 @@ The user grants in advance automatic launch of vibe-flow agents under these rule
 2. Commit — only via `scripts/git-safe-commit.sh` (see "Git")
 3. **`vibe-flow:release-gate`** — final review of the whole branch diff
 4. `vibe-flow:dev-server-restart` — if the project has a dev server and code changed
-5. Report to the user + the question **"Push the branch?"**
-6. After a "yes": `git push -u origin <branch>` (the `vibe-flow:push-to-production` agent or the session itself)
-7. **A separate question: "Merge into `<prod-branch>`? This is a deploy to prod"**. After a "yes": `gh pr create --fill` → `gh pr merge <N> --merge`; no `gh` — give the user a link to create the PR on GitHub. Never `--admin`, except when the merge is refused with "base branch policy prohibits the merge" in a repository with an active ruleset named `main-admin-only`: then only through `vibe-flow:push-to-production`, which runs the plugin's `admin-only-merge.sh` (it refuses if `--admin` would skip any other protection of the branch); never `--admin` by hand (a git-guards hook denies it)
-8. After the merge — the deploy monitor, if there is one (for example `vibe-flow-vercel:vercel-deploy-monitor`), then `scripts/wt-done.sh <name>`
+5. Report to the user + one question: **"Deploy `<short-sha>`? (push `<branch>` + merge into `<prod-branch>`)"**
+6. After a "yes": the deploy **only through `vibe-flow:push-to-production`** (quote the answer and the question): it pushes exactly that commit, then the plugin's `deploy-merge.sh` finds or creates the PR into the prod branch, waits for CI and merges pinned to the commit (`--match-head-commit`); under a `main-admin-only` ruleset it hands over to `admin-only-merge.sh`. "Push only" → the agent pushes without a merge. CI still running when the agent returns → re-run it with the same quote, unless the user has changed or cancelled the deploy since. No agent → do not push or merge yourself: give the user the commands `git push origin <full sha>:refs/heads/<branch>`, `gh pr create --fill --base <prod-branch> --head <branch>`, `gh pr merge <N> --merge --match-head-commit <full sha>`. Never `--admin` by hand (a git-guards hook denies it)
+7. After the merge — the deploy monitor, if there is one (for example `vibe-flow-vercel:vercel-deploy-monitor`), then `scripts/wt-done.sh <name>`
 
 **The first push to a new repository** (the remote has no prod branch yet) is done by a human: `! git push -u origin <prod-branch> --no-verify`. The gate and the barriers have nothing to compare against while the remote is empty — tell the user this plainly.
 
 ## 🚦 Final gate — CRITICAL
 **Code goes to push only after the verdict of `vibe-flow:release-gate`** (Opus, effort `high`) — a review of the WHOLE branch diff against the protected branch, no matter who wrote the code.
-- **When:** after the commit, BEFORE asking "Push?". In the prompt: the path to the worktree, the path to the plan file, who wrote the code, the round number
+- **When:** after the commit, BEFORE asking "Deploy `<sha>`?". In the prompt: the path to the worktree, the path to the plan file, who wrote the code, the round number
 - 🔴 **Enforced by a hook:** `pre-push` refuses without a verdict for the HEAD tree (`GG_RELEASE_GATE=1` in `.gitguards.conf`). The verdict is bound to the **content**: after any edit — review again. If the diff has only `*.md`, no gate is needed
 - **❌ fail** → fix, commit, run again. **At most 3 rounds**, then stop and sort it out with the user
 - 🔴 **Only the agent itself sets the verdict.** The main session cannot approve its own code — the hook blocks it

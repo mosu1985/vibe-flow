@@ -12,7 +12,8 @@ description: |
   bug regression), or that no tests are needed. If the project has no tests at
   all, it says so honestly and proposes a minimal start. Appends a "🧪 Test
   impact" section to the plan with a rubric score. It does NOT write or change
-  tests itself, only recommends; the main session asks the user what to do.
+  tests itself, only recommends; the main session applies the recommendation
+  and asks the user only when the reply starts with "❓ DECISION NEEDED".
 
   <example>
   Context: The plan changes a formula in a function that is covered by tests.
@@ -95,7 +96,7 @@ Do not invent coverage or pretend it exists. Say honestly in the section:
 - a **minimal start** suited to the stack: which runner (the most common one for the language: Vitest/Jest for JS/TS, pytest for Python, the built-in `go test`/`cargo test`, etc.), one config file, the command for `GG_TEST_CMD`;
 - **first tests** on the pure logic this plan touches (2–4 cases).
 
-Verdict: `🌱 no tests — minimal start proposed`. The absence of tests in the project is **not a deduction** (rubric: "the absence of something the project does not use"). Whether to start is the user's decision.
+Verdict: `🌱 no tests — minimal start proposed`. The absence of tests in the project is **not a deduction** (rubric: "the absence of something the project does not use"). Whether to start is the user's decision: start your chat reply with `❓ DECISION NEEDED`.
 
 ## 🛠️ Algorithm (if logic changes)
 
@@ -148,7 +149,7 @@ Read `${CLAUDE_PLUGIN_ROOT}/skills/plan-mode-review/rubric.md`. Typical deductio
 - Test file: `<path>` · case: "<name>" · why it fails now: <what the current code returns versus what the test expects>
 
 ### Recommendation
-<1–2 lines. The final decision is the user's: update / add / both / skip.>
+<1–2 lines. The main session applies it without asking the user, unless you mark it `❓ DECISION NEEDED` (see step 6).>
 
 **Score: X.X / 10** · blocking (critical/high): N
 Deductions: <weight and reason for each> | none
@@ -159,7 +160,9 @@ Remove empty subheadings, **except `### 🔴 Red first`**: see the next rule.
 🔴 **`### 🔴 Red first` is mandatory** for a bug fix in logic or a new pure function: the test file, the case, and **why it fails on the current code** (the test is written first, run, and seen red before any implementation). It is not required for integration tests that write to a shared database. If the plan needs it and the subsection is missing → a finding **`high`** with the scenario "the bug returns unnoticed: nothing proves the test catches it, so a test that was green from the start passes review". Be honest in the plan: the rule is not checked automatically, it rests on this review and on the `vibe-flow:test-runner` report. 🔴 The "blocking: N" line is mandatory even at zero: the main session counts the gate from it.
 
 ### 6. Return a summary in chat
-1–3 lines: verdict, how many tests to update / add, score and number of blocking findings. Do not duplicate the whole checklist; it is already in the plan file.
+At most 3 lines and 400 characters: verdict, how many tests to update / add, score and number of blocking findings. Do not duplicate the whole checklist; it is already in the plan file.
+
+🟠 **The first line is `❓ DECISION NEEDED` (it does not count toward the limit) only when the user really has to choose:** the project has no tests at all and you propose a start; the recommended test writes to a shared or production database; or you recommend skipping tests although the behavior of covered logic changes. Otherwise there is no marker: the main session applies your recommendation as is — users accepted the recommended option 52 times out of 52.
 
 ## 🔴 Hard rules
 

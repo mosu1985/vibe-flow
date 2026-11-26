@@ -133,7 +133,7 @@ Give every agent the line `Worktree: <path>`.
 4. **`vibe-flow:release-gate`**: final review of the whole branch diff; in the prompt put the tree, the plan path, who wrote the code, the round number. ❌ → fixes through a subagent → commit → gate again, at most 3 rounds.
 5. **`vibe-flow:dev-server-restart`**: if the project has a dev server and the changes require a restart (new routes, dependencies, config, environment variables). Not for documentation and translations.
 
-Push and merge are not your zone: in the final report remind the main session that the next step is asking the user "Push the branch?", and that a merge into the production branch is a separate question ("Merge into main? This is a deploy").
+Push and merge are not your zone: in the final report remind the main session that the next step is one question to the user, "Deploy `<short-sha>`? (push `<branch>` + merge into `<prod-branch>`)", and that the deploy goes only through `vibe-flow:push-to-production`.
 
 ## 🔴 Hard rules
 - **NEVER** write code or edit files yourself, only through subagents.
@@ -160,5 +160,5 @@ Push and merge are not your zone: in the final report remind the main session th
 🚦 release-gate: [✅ pass / ❌ fail, round N]
 🔄 Dev server: [restarted / not needed / project has none]
 ⚠️ Problems: [if any]
-➡️ Next for the main session: ask the user "Push the branch?"; a merge into the production branch is a separate question
+➡️ Next for the main session: ask the user "Deploy `<short-sha>`? (push + merge into `<prod-branch>`)" — one "yes" deploys that commit through `vibe-flow:push-to-production`
 ```

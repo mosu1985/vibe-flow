@@ -70,7 +70,8 @@ You **do not critique the plan yourself** and **do not decide** whether to accep
 
 - **the path to the plan file** (required)
 - **the round number** (1, 2 or 3)
-- for rounds 2–3: **which findings of the previous round were accepted, which rejected and why**
+- **`Answer file:`** the exact path where Codex writes its JSON this round (the main session makes it unique, for example `<scratchpad>/codex-<plan name>-r<N>-<time>.json`). Write the answer only there and return this path. No path given → `$TMP/codex-<plan file name>-r<N>-$(date +%s).json`, and say so in the report
+- for rounds 2–3: **`Previous answer:`** the path of the previous round's JSON, **which findings were accepted, which rejected and why**, and **`Changed sections:`** the plan sections/steps changed since the previous round (the main session computes them by diff against its snapshot of the plan). No list of changed sections → run the round as a full review (as round 1) and say so in the report
 
 ## 0️⃣ Step 0 — is Codex there
 
@@ -95,7 +96,7 @@ CODEX=$(command -v codex || for d in ~/.local/bin ~/.codex/packages/standalone/c
 - Read the whole plan file. It already contains the reviewers' sections (`## 🧭 Plan review`, `## 🔒 Access control`, `## 🧪 Test impact`, `## 🚀 Implementation orchestration`, etc.) with their scores — pass them **together with the plan**, do not cut them out. Without them Codex will deduct points for what has already been handled.
 - The rubric: `${CLAUDE_PLUGIN_ROOT}/skills/plan-mode-review/rubric.md`.
 
-Assemble `$TMP/critic-prompt.txt`: the header (heredoc) + the rubric (`cat`) + the plan (`cat`) + the previous-round block. The header:
+Assemble `${OUT%.json}-prompt.txt` (next to the answer file): the header (heredoc) + the rubric (`cat`) + the plan (`cat`) + the previous-round block. The header:
 
 ```
 You are an independent critic of a change plan in a production project.
@@ -142,30 +143,46 @@ review their contents are not needed: it is enough to know that such a file exis
 
 [rounds 2–3 only:]
 <PREVIOUS_ROUND>
-Round N-1, your score was X.
+Round N-1, your score was X. Your previous findings, as JSON: [contents of the
+previous answer file]
 Accepted and folded into the plan: C1 — ..., C3 — ...
 Rejected with justification: C2 — rejected because ...
-Evaluate the plan again. You may repeat a rejected finding only if the
-justification for the rejection is factually wrong — then explain exactly how.
+
+This is a RE-CHECK round, not a fresh review:
+1. previous_findings: the status of EVERY previous finding — closed / open /
+   rejection_disputed (only if the justification is factually wrong; say how),
+   with the fact. Any finding that is open or rejection_disputed MUST also be
+   repeated in findings under the same id and severity.
+2. Sections changed since round N-1 (computed by diff): <list>. Review these
+   in full.
+3. The rest of the plan: report only NEW critical findings, or NEW high
+   findings of a dangerous class (see the rubric). Do not raise other new
+   high/medium/low there — they were the job of round 1.
+4. If a mechanism in the plan exists only to fix one of your previous
+   findings and you find a problem in it, prefer recommending a simpler fix
+   (drop the mechanism) over adding a new mechanism on top.
 </PREVIOUS_ROUND>
 ```
 
+No `Changed sections:` in your prompt → replace item 2 with "Review the whole plan" and item 3 with nothing (a full review), and say so in the report.
+
 ## 2️⃣ Step 2 — call Codex
 
-From the project root:
+From the project root (the plan's `Repository:` line names another repository → that one), with `OUT` = the answer file from the prompt:
 
 ```bash
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+EFFORT=xhigh   # round 1; rounds 2–3: high
 codex exec -s read-only -C "$ROOT" \
-  -c model_reasoning_effort=xhigh \
+  -c model_reasoning_effort="$EFFORT" \
   --output-schema "${CLAUDE_PLUGIN_ROOT}/skills/plan-mode-review/codex-critic-schema.json" \
-  -o "$TMP/critic-round-N.json" \
-  - < "$TMP/critic-prompt.txt" > "$TMP/critic-round-N.log" 2>&1
+  -o "$OUT" \
+  - < "${OUT%.json}-prompt.txt" > "${OUT%.json}.log" 2>&1
 echo "rc=$?"
 ```
 
 - `-s read-only` — mandatory
-- `-c model_reasoning_effort=xhigh` — the critic needs the maximum effort, and the default config may have it lower. **The model is not pinned:** it is taken from `~/.codex/config.toml`, so the critic moves to a new model together with Codex
+- Effort: **round 1 — `xhigh`**, the full review that finds most of the real defects; **rounds 2–3 — `high`**, a re-check. A measurement over 26 plans: at `xhigh` in every round the critic raised 6.2 blocking findings per run instead of 1.8 and no plan converged, while its rounds 2–3 found 3% real defects. **The model is not pinned:** it is taken from `~/.codex/config.toml`, so the critic moves to a new model together with Codex
 - `-` reads the prompt from stdin: the plan does not end up in argv and does not leak into shell history
 - Project is not a git repository → add `--skip-git-repo-check`
 - ⏱ The run takes minutes: call Bash with `timeout: 600000`. Hitting the timeout means "critic unavailable", not a reason to trim the plan
@@ -178,11 +195,12 @@ Codex is launched from the project root and reads `AGENTS.md` itself — do not 
 - **400 "The '<model>' model is not supported when using Codex with a ChatGPT account"** — the model from `~/.codex/config.toml` is unavailable when logged in with a ChatGPT account. The user fixes it: change `model` in the config to one available to their account, or log in with an API key (`printenv OPENAI_API_KEY | codex login --with-api-key` — the key from the environment, not in argv). **Do not substitute** the model yourself — return `❌ Critic unavailable` with this text and the hint
 - **401 / "not logged in" / expired session** — `codex login`
 - **400 about an unsupported `reasoning_effort` / `xhigh`** — the model does not support `xhigh`. Run the same command once more with `-c model_reasoning_effort=high` and put `high (the model does not support xhigh)` in the report's **Effort:** line
-- **Plan Mode does not let you write even to a temp folder** — Codex cannot write `-o`, and you cannot write the prompt. Return `❌ Critic unavailable: Plan Mode blocks writing to a temp folder` and a hint to the main session: with the user's consent, run the critic right after `ExitPlanMode` and BEFORE the first code edit
+- **Plan Mode does not let you write even to a temp folder** — Codex cannot write `-o`, and you cannot write the prompt. Return `❌ Critic unavailable: Plan Mode blocks writing to a temp folder` and a hint to the main session: run the critic right after `ExitPlanMode` and BEFORE the first code edit, without asking the user (they always agree; the gate guards the start of implementation, not the exit from the plan)
 
 ## 3️⃣ Step 3 — validate the answer
 
-- The `-o` file exists and parses as JSON (`jq . "$TMP/critic-round-N.json"` or `python3 -m json.tool …`) → otherwise return the error with the log tail (`tail -40`), **do not invent a score**
+- The `-o` file exists, was written by this run (newer than the prompt file) and parses as JSON (`jq . "$OUT"` or `python3 -m json.tool …`) → otherwise return the error with the log tail (`tail -40`), **do not invent a score**
+- 🔴 **Rounds 2–3: every previous finding is in `previous_findings`**, and every one with status `open` or `rejection_disputed` is repeated in `findings` under the same id and severity. A missing one — put it on a separate line of the report ("⚠️ previous C3 has status open but is not in findings — it still blocks"): the main session counts the gate from `findings` plus every previous finding left open, so a dropped blocker must never disappear silently
 - `score` is in the range 0–10
 - If `deductions` is empty and `score` < 10.0 → a review defect, note it in the report: a score without deductions is forbidden by the rubric
 - 🔴 **`verdict` must match the findings:** `pass` ⟺ there is no `critical`/`high`. A mismatch — note it in the report on a separate line, but **do not fix it yourself**: the main session must see the critic's answer as is
@@ -192,34 +210,18 @@ Codex crashed, returned no JSON or did not finish in time → `❌ Critic unavai
 
 ## 📤 Report format for the main session
 
+Short: the main session reads every finding from the JSON file, so the report does not retell them. At most 6 lines:
+
 ```
-## 🧑‍⚖️ External Codex review — round N
-
-**Verdict: ✅ pass / ❌ fail** — blocking (critical/high): N
-**Codex score: X.X / 10** (a quality metric, not the gate)
-**Model:** <from ~/.codex/config.toml or from the log>
-**Effort:** xhigh (or `high (the model does not support xhigh)`)
-**⚠️ Data:** the plan and code fragments are sent to an external provider (OpenAI)   ← round 1 only
-
-**Summary:** [summary from the answer]
-
-**Deductions:**
-- −4.0 — [reason]
-- −1.0 — [reason]
-
-**Findings:**
-
-| ID | Severity | Holds the gate | Gist | Code anchor | Applies to | Suggested change |
-|---|---|---|---|---|---|---|
-| C1 | critical | 🔴 yes | [title] | [evidence] | [plan_section] | [suggested_fix] |
-| C2 | medium | no | [title] | [evidence] | [plan_section] | [suggested_fix] |
-
-**Details for each:**
-- **C1** — [detail]
-  **Failure scenario:** [failure_scenario]
+🧑‍⚖️ Codex, round N: ✅ pass / ❌ fail — score X.X/10, blocking N (C1, C4: high; C2: critical)
+Previous: C1 closed · C3 open · C5 rejection disputed        ← rounds 2–3 only
+Model <from ~/.codex/config.toml or the log> · effort <actual: xhigh / high / high (the model does not support xhigh)>
+⚠️ The plan and code fragments were sent to an external provider (OpenAI)   ← round 1 only
+⚠️ <consistency notes from step 3, one per line, if any>
+JSON: <the answer file path>
 ```
 
-In the "Holds the gate" column — `🔴 yes` for `critical`/`high` with a failure scenario, `no` for `medium`/`low` **and** for blocking findings without a scenario (with the note "severity not confirmed").
+A blocking finding without a failure scenario is listed with the note "severity not confirmed": per the rules it does not hold the gate.
 
 Failure outcomes — one line instead of the report:
 - `⚪️ Critic not installed — <how to install>`

@@ -16,7 +16,7 @@ Task
                           each with its own model and effort (Opus / Sonnet / Haiku)
   └─ 🧪 Tests → commit in its own worktree
   └─ 🚦 release-gate ── Opus reads the ENTIRE branch diff; without its ✅ git won't allow the push
-  └─ 🚀 "Push?" ── only after your "yes" → deploy → deploy monitor
+  └─ 🚀 "Deploy <sha>?" ── one "yes" → push, PR, CI, merge of that commit → deploy monitor
 ```
 
 - **The plan is checked by several reviewers**, and it doesn't go into work while they still have serious concerns
@@ -74,7 +74,7 @@ The install ends with a guard self-test. If Python is broken after the install, 
 1. Describe the task. Claude creates a separate worktree for it (`scripts/wt-new.sh <name>` → folder `<project>-wt/<name>`) and suggests opening a new session there: `cd <path> && claude`. This way tasks and parallel sessions don't interfere with each other
 2. Complex task: Claude switches to plan mode, runs the plan through the reviewers and shows you a simplified version. Approve it, and Claude implements it alone or assembles a crew of agents
 3. Tests, commit and the final `release-gate` check happen automatically
-4. "Push the branch?" → "yes" → push. Separately: "Merge into main? This is a deploy" → "yes" → PR and merge
+4. "Deploy 1a2b3c4? (push the branch + merge into main)" → "yes" → push, PR, waiting for CI, merge of exactly that commit. "Push only" → just the push
 
 See started tasks: `scripts/wt-status.sh`. Close a finished one: `scripts/wt-done.sh <name>`.
 

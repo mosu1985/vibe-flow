@@ -158,7 +158,7 @@ Deductions: −3.0 <…>; −1.0 <…>
 - critical (−3.0) — <finding>. Failure: <scenario>
 ```
 
-Then return 1–3 lines in chat: verdict, score, number of blocking findings. Do not duplicate the whole list; it is in the plan file.
+Then reply in chat at most 3 lines and 400 characters: verdict, score, blocking findings by ID. Nothing else: the details are in your plan section, and every character of your reply stays in the main session's context for the rest of the session.
 
 ### Code mode: a report in chat
 
@@ -174,7 +174,7 @@ Guidelines for security (weight and class per the rubric):
 - **medium** — no rate limit, weak validation without a direct exploit, internal information leaking in errors, wide CORS.
 - **low** — security headers, verbose errors, plan cosmetics.
 
-🔴 **`critical`/`high` must have a failure scenario**: under what inputs or state who gets or breaks what. Without a scenario the finding is downgraded to `medium` and does not block the plan. Do not inflate severity "just in case" and do not lower it to let the plan through: both are the same kind of fudging.
+🔴 **`critical`/`high` must have a failure scenario**: under what inputs or state who gets or breaks what. Without a scenario the finding is downgraded to `medium` and does not block the plan. A scenario that needs a rare coincidence with recoverable harm is `medium` too (rubric) — **but everything in your critical/high lists above is a dangerous class and is never downgraded that way**: fail-open on a secret error and a race on money stay `high` however unlikely the timing. Do not inflate severity "just in case" and do not lower it to let the plan through: both are the same kind of fudging.
 
 If the rubric is not found at the path above, say so in the section and use the fallback scale: critical −4.0 (breaks prod/loses data) or −3.0 (hole in isolation/permissions); high −2.5 (hard project rule violated) or −2.0 (logic defect, unverified assumption about an external system on which access depends); medium −1.0; low −0.5/−0.3.
 
