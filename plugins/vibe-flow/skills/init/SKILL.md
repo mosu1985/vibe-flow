@@ -107,9 +107,59 @@ scripts/git-safe-commit.sh --message-file <file> -- scripts githooks .claude/hoo
 
 If refused → do not commit, but warn plainly: "worktrees will not work until these files are in a commit".
 
-**Then — push the installation to the prod branch (if there is a remote).** These are tools, not product code: there is nothing for the gate to review, and after the session restarts this commit would become "someone else's". So the push is done by a human, without hooks — give the ready command:
-- there is a remote: `! git push -u origin <GG_PROTECTED> --no-verify`
-- no remote: say the first push (once they connect GitHub) is the same command; until then the gate and the barriers have nothing to compare push against
+**Then — push the installation to the prod branch.** These are tools, not product code: there is nothing for the gate to review, and after the session restarts this commit would become "someone else's". So the push is done by a human, without hooks:
+- `origin` already has the prod branch (`git ls-remote --heads origin <GG_PROTECTED>` prints a line): give the ready command `! git push -u origin <GG_PROTECTED> --no-verify`
+- no `origin`, or `origin` has no prod branch yet: go to step 8b — this is the first push, and 8b gives the command only after its checks. Until then the gate and the barriers have nothing to compare push against
+
+## 8b. GitHub repository — private, checked before the first push
+
+Every project works through GitHub: the deploy agent pushes the branch, merges a PR and then syncs the project's main folder. Runs on install and on update. 🔴 8b is the only place that gives the first-push command: other agents and rules send the user here. 🔴 Never print the `origin` address — an HTTPS remote can carry an access token; print only the host and `<owner>/<repo>`.
+
+```bash
+cd "<project root>" && { git remote get-url origin >/dev/null 2>&1 && echo origin=yes || echo origin=no; } \
+  && { git ls-remote --heads origin <GG_PROTECTED> 2>/dev/null | grep -q . && echo base=yes || echo base=no; }
+```
+- `origin=yes base=yes` → the first push is done: skip 8b.
+- `origin=no` → part A, then part B.
+- `origin=yes base=no` (a new repository, or init run again after a failure) → part B.
+
+### A. Create a private repository
+1. `command -v gh && gh auth status` — no `gh` or not logged in → tell the user how to install it (https://cli.github.com) and run `gh auth login`, and that without GitHub the deploy agent cannot work; stop 8b.
+2. **Owner** = the active `gh` account: `gh api user --jq .login`. Show it in the question and pass it explicitly — a student may have several accounts.
+3. **Name** = the project folder name, normalized; empty → ask the user. Pass it only in single quotes:
+   ```bash
+   printf '%s' '<folder name>' | LC_ALL=C sed -E 's/[^A-Za-z0-9._-]+/-/g; s/-+/-/g; s/^[-.]+//; s/[-.]+$//'
+   ```
+4. 🔴 **An existing repository is never connected.** `gh repo view '<login>/<name>' --json visibility` exits 0 → it exists (maybe public, maybe with someone else's history): ask the user for another name. Connecting an existing repository is the user's own action, outside init. A non-zero exit whose error does not contain `Could not resolve to a Repository` (network, auth) → stop with the error, create nothing.
+5. `AskUserQuestion`: "Create a private GitHub repository `<login>/<name>`?" — "Create (Recommended)" / "Not now". 🔴 An external write: only after this "yes". "Not now" → warn that deploys stay manual until there is a repository; stop 8b.
+6. `gh repo create '<login>/<name>' --private --source "<project root>" --remote origin` — an empty private repository and the `origin` remote; nothing is pushed. Then part B.
+
+### B. Before the first push — every check must pass, otherwise stop without the push command
+1. **The host is GitHub** — print only the host and `<owner>/<repo>`:
+   ```bash
+   cd "<project root>" && u=$(git remote get-url origin 2>/dev/null) \
+     && printf 'host=%s repo=%s\n' \
+        "$(printf '%s' "$u" | sed -E 's#^[A-Za-z][A-Za-z0-9+.-]*://([^/@]*@)?([^/:]+).*#\2#; s#^[^@/:]+@([^:/]+):.*#\1#')" \
+        "$(printf '%s' "$u" | sed -E 's#^[A-Za-z][A-Za-z0-9+.-]*://[^/]*/##; s#^[^@/]+@[^:/]+:##; s#/+$##; s#\.git$##')"
+   ```
+   Host (compared case-insensitively) ≠ `github.com` → stop: "`origin` is not on GitHub — its visibility cannot be checked and the deploy agent does not work with it". An SSH host alias (`git@github.com-work:…`) also stops here: say so, and that the user can check visibility and run the first push themselves.
+2. 🔴 **Private:** `gh repo view '<owner>/<repo>' --json visibility --jq .visibility` prints exactly `PRIVATE`. Anything else, or an error → stop.
+3. 🔴 **The push goes there too:** `git remote get-url --push --all origin` gives exactly one address, and parsed the same way it is the same host and `<owner>/<repo>` (case-insensitive). Do not print it. Otherwise stop: a separate push URL could lead to a public mirror.
+4. **Secret files in the history** — every path that ever existed in the prod branch, including merge commits and both names of a rename (`--diff-filter=A` and `rev-list --objects` both miss some), plus the tracked files:
+   ```bash
+   cd "<project root>" && . scripts/git-guards/pyenv.sh && gg_python && set -o pipefail && { git -c core.quotePath=false log refs/heads/<GG_PROTECTED> -m --no-renames --name-only --format= -z && git ls-files -z; } | "$GG_PY" -I -c '
+   import re, sys
+   names = {p for p in sys.stdin.buffer.read().decode("utf-8", "replace").split("\0") if p}
+   bad = re.compile(r"^(\.env(\..*)?|access\.md|.*credentials.*|.*secret.*|id_.*|kubeconfig|.*\.(pem|p12|key|keystore)|service[-_]account.*\.json)$")
+   fine = re.compile(r"^(\.env\.(example|sample)|id_.*\.pub)$")
+   for p in sorted(names):
+       b = p.rsplit("/", 1)[-1].lower()
+       if bad.match(b) and not fine.match(b):
+           print(p)
+   '
+   ```
+   Python comes from the kit's resolver (`gg_python`: `python3`, `python`, `py -3`, skipping the Microsoft Store alias), never a bare `python3`. A non-zero exit → stop (no Python, or the history could not be listed) and say which. Files found → show the list and warn: after the push they stay in the GitHub history even if deleted later — rotate those keys or clean the history first. Then `AskUserQuestion`: "Clean up first (Recommended)" / "Push anyway". The decision is the user's.
+5. Only now — the first-push command for the human (tools, not product code; see step 8): `! git push -u origin <GG_PROTECTED> --no-verify`.
 
 ## 9. Report
 
@@ -125,6 +175,6 @@ Release-note format: ✅ what was deployed · 🎯 what changed in the way of wo
 /plugin marketplace update vibe-school
 /plugin update vibe-flow@vibe-school          (and the stack packages, if installed)
 ```
-then restart the session and run this skill from step 3: the installer will update the scripts and the rules block, and will not touch `.gitguards.conf` or the "Project" section. Commit the updated files (step 8).
+then restart the session and run this skill from step 3: the installer will update the scripts and the rules block, and will not touch `.gitguards.conf` or the "Project" section. Commit the updated files (step 8), then step 8b: a project without GitHub, or without its first push, gets it there.
 
 **All projects on this machine at once** (the vibe-flow repository is cloned locally): `tools/rollout-projects.sh plugins` updates the plugins in every install; then `list` (show the user the changes and the rules-block diff, ask "Apply this rules text?") → `GG_ROLLOUT_SHA=<sha> … prepare` → `vibe-flow:release-gate` on each worktree → ask "Merge into every project? This is a production deploy for: <projects with auto-deploy>" → `GG_ROLLOUT_SHA=<sha> … ship`.

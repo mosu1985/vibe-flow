@@ -54,9 +54,9 @@ Reply in the user's language. Your final text is a report for the main session, 
 
 **Is there something to compare against.**
 ```bash
-cd "<tree>" && git remote get-url origin && git fetch -q origin && git rev-parse --verify -q "origin/<GG_PROTECTED>"
+cd "<tree>" && git remote get-url origin >/dev/null 2>&1 && git fetch -q origin && git rev-parse --verify -q "origin/<GG_PROTECTED>"
 ```
-(The protected branch follows the kit rule — `origin/HEAD` → `main` → `master`; `scripts/release-gate.sh scope` prints it in its `base:` line. The tree's own `.gitguards.conf` does not decide it.) No `origin` remote or no `origin/<GG_PROTECTED>` → return "⏸️ the repository has no production branch on the remote yet. The first push of the main branch is done by a human: `! git push -u origin <branch> --no-verify`; review after that". Without a base on the remote the diff is undefined and the gate has nothing to compare against.
+(The protected branch follows the kit rule — `origin/HEAD` → `main` → `master`; `scripts/release-gate.sh scope` prints it in its `base:` line. The tree's own `.gitguards.conf` does not decide it.) No `origin` remote or no `origin/<GG_PROTECTED>` → return "⏸️ the repository has no production branch on the remote yet. The first push goes through `/vibe-flow:init` (step 8b): it checks that the repository is private and the history holds no secret files, then gives the command; review after that". Do not print the `origin` address (it can carry a token) and do not hand out the first-push command yourself. Without a base on the remote the diff is undefined and the gate has nothing to compare against.
 
 ```bash
 cd "<tree>" && scripts/release-gate.sh scope
