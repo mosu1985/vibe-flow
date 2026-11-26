@@ -147,6 +147,18 @@ set_reply checks-required '' 1 "no required checks reported on the 'wt/x' branch
 set_reply checks-all '' 1 "no checks reported on the 'wt/x' branch"
 run wt/x "$SHA" main
 refused "pull_request workflow present, checks never appear → refused" "CI"
+scenario
+set_reply checks-required '' 1 "no required checks reported on the 'wt/x' branch"
+printf '%s\n' "build${TAB}skipping${TAB}0${TAB}u${TAB}" > "$FAKE/checks-all.1.out"
+printf '%s\n' "build${TAB}skipping${TAB}0${TAB}u${TAB}" "ci${TAB}pass${TAB}1m${TAB}u${TAB}" > "$FAKE/checks-all.2.out"
+run wt/x "$SHA" main
+[ "$rc" = 0 ] && merged && [ "$(grep -c '^pr checks 7$' "$FAKE/log")" -ge 2 ] \
+    && ok "only skipped checks so far (pull_request CI) → waits for the real run, then merges" || bad "skipped only: rc=$rc $out"
+scenario; rm -rf "$FAKE/work/.github"
+set_reply checks-required '' 1 "no required checks reported on the 'wt/x' branch"
+set_reply checks-all "build${TAB}skipping${TAB}0${TAB}u${TAB}"
+run wt/x "$SHA" main
+[ "$rc" = 0 ] && merged && ok "only skipped checks and no pull_request CI in the project → merged" || bad "skipped no-ci: rc=$rc $out"
 scenario; rm -rf "$FAKE/work/.github"
 set_reply checks-required '' 1 "no required checks reported on the 'wt/x' branch"
 set_reply checks-all '' 1 "no checks reported on the 'wt/x' branch"

@@ -21,7 +21,7 @@
 #
 # Exit codes: 0 merged · 3 checks still running at the deadline, nothing merged: run again with
 # the same arguments · 1 refused or failed (one line saying why) · 2 usage.
-# Waits (seconds) can only be shortened through the environment, which fails closed:
+# Waits (seconds) can be tuned through the environment; a malformed value fails closed (deadline 0):
 # DEPLOY_MERGE_DEADLINE (480: with the head wait and the merge it stays under the agent's 600 s Bash timeout), DEPLOY_MERGE_CI_START (60),
 # DEPLOY_MERGE_HEAD_WAIT (30: GitHub updates a PR's head a few seconds after the push),
 # DEPLOY_MERGE_POLL (15).
@@ -46,6 +46,13 @@ branch="$1"; sha="$2"; base="${3:-}"
 case "$sha" in ''|*[!0-9a-f]*) usage ;; esac
 [ "${#sha}" -eq 40 ] || usage
 
+PY=""
+for p in python3 python; do    # the Microsoft Store alias fails this and is skipped
+    if command -v "$p" >/dev/null 2>&1 && "$p" -I -c 'import sys; sys.exit(sys.version_info < (3, 6))' >/dev/null 2>&1; then
+        PY="$p"; break
+    fi
+done
+[ -n "$PY" ] || refuse "python3 not found"
 T="$(mktemp -d "${TMPDIR:-/tmp}/deploy-merge.XXXXXX")" || refuse "no temp directory"
 trap 'rm -rf "$T"' EXIT
 
@@ -65,7 +72,7 @@ fi
 pr() {
     gh pr list --head "$branch" --state open --json number,baseRefName,headRefName,headRefOid,url,isCrossRepository \
         > "$T/list" 2> "$T/err" || refuse "PRs of $branch not readable: $(oneline < "$T/err")"
-    python3 -I - "$T/list" > "$T/list.out" 2> /dev/null <<'PY' || refuse "PRs of $branch not readable: unexpected response"
+    "$PY" -I - "$T/list" > "$T/list.out" 2> /dev/null <<'PY' || refuse "PRs of $branch not readable: unexpected response"
 import json, sys
 d = json.load(open(sys.argv[1]))
 if not isinstance(d, list):
@@ -120,7 +127,13 @@ wait_checks() { # $@ extra flags → 0 green · 4 none required · 5 none report
     while :; do
         gh pr checks "$n" "$@" > "$T/c.out" 2> "$T/c.err"; crc=$?
         case "$crc" in
-            0) return 0 ;;
+            0) # only skipped checks while the project has pull_request CI: the real runs may not
+               # exist yet (a pull_request run of skipped jobs lands before the push run)
+               if [ $# = 0 ] && has_pr_ci && [ -s "$T/c.out" ] \
+                   && awk -F'\t' '$2!="skipping"{f=1} END{exit f}' "$T/c.out"; then   # all skipped
+                   return 5
+               fi
+               return 0 ;;
             8) if [ "$SECONDS" -ge "$DEADLINE" ]; then
                    printf '%s: checks still running on PR #%s (%s) after %ss — nothing merged; run again with the same arguments\n' "$ME" "$n" "$sha" "$SECONDS"
                    exit 3
@@ -155,7 +168,7 @@ fi
 gh api "repos/{owner}/{repo}/rules/branches/$base" --paginate > "$T/rules" 2> "$T/err" \
     || refuse "rules of branch $base not read: $(oneline < "$T/err")"
 gh api "repos/{owner}/{repo}/branches/$base/protection/required_status_checks" > "$T/classic" 2> /dev/null || echo '{}' > "$T/classic"
-python3 -I - "$T/rules" "$T/classic" > "$T/need" 2> /dev/null <<'PY' || refuse "rules of branch $base not readable: unexpected response"
+"$PY" -I - "$T/rules" "$T/classic" > "$T/need" 2> /dev/null <<'PY' || refuse "rules of branch $base not readable: unexpected response"
 import json, sys
 need = set()
 raw = open(sys.argv[1]).read().strip() or "[]"
@@ -181,7 +194,7 @@ PY
 if [ -s "$T/need" ]; then
     while :; do
         gh pr checks "$n" --json name,bucket > "$T/cj" 2> "$T/err" || [ -s "$T/cj" ] || : > "$T/cj"
-        state=$(python3 -I - "$T/cj" "$T/need" 2> /dev/null <<'PY'
+        state=$("$PY" -I - "$T/cj" "$T/need" 2> /dev/null <<'PY'
 import json, sys
 try:
     got = {}
