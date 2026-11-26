@@ -111,6 +111,25 @@ set_reply checks-required '' 1 "no required checks reported on the 'wt/x' branch
 set_reply checks-all '' 1 "no checks reported on the 'wt/x' branch"
 run 5
 [ "$rc" = 0 ] && merged && ok "no checks required and none reported → merged" || bad "no checks at all: rc=$rc $out"
+scenario   # what real gh 2.x prints when the PR has no checks at all — also for --required (seen live 26.11.2026)
+set_reply rules '[{"type":"deletion"},{"type":"non_fast_forward"},{"type":"update"}]'
+set_reply checks-required '' 1 "no checks reported on the 'wt/x' branch"
+set_reply checks-all '' 1 "no checks reported on the 'wt/x' branch"
+run 5
+[ "$rc" = 0 ] && merged && ok "no checks at all, --required says \"no checks reported\" → merged" || bad "no checks, real gh text: rc=$rc $out"
+scenario   # same text, but the rules require contexts → step 8 still refuses
+set_reply checks-required '' 1 "no checks reported on the 'wt/x' branch"
+set_reply checks-all '' 1 "no checks reported on the 'wt/x' branch"
+set_reply checks-json '' 1 "no checks reported on the 'wt/x' branch"
+run 5; refused "\"no checks reported\" while contexts are required → refused" "required checks configured (legacy) but not reported"
+# Python on Windows (Git Bash) writes CRLF into a pipe: a wrapper adds \r to every line it prints.
+mkdir -p "$TMP/crlf"
+REALPY="$(command -v python3)"
+printf '#!/usr/bin/env bash\nset -o pipefail\n"%s" "$@" | sed "s/$/\\r/"\n' "$REALPY" > "$TMP/crlf/python3"
+chmod +x "$TMP/crlf/python3"
+scenario
+out="$(cd "$TMP/work" && FAKE="$FAKE" PATH="$TMP/crlf:$TMP/bin:$PATH" bash "$SCRIPT" 5 "$SHA" 2>&1)"; rc=$?
+[ "$rc" = 0 ] && merged && ok "CRLF from Python (Git Bash) → fields still match, merged" || bad "crlf: rc=$rc $out"
 scenario
 run 5 "$SHA"
 [ "$rc" = 0 ] && merged && ok "expected head equals the PR head → merged" || bad "expected head: rc=$rc $out"

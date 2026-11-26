@@ -83,7 +83,7 @@ for p in d[:1]:
         print(p.get(k, ""))
     print("cross" if p.get("isCrossRepository") else "same")
 PY
-    { read -r count; read -r n; read -r pbase; read -r phead; read -r poid; read -r url; read -r cross; } < "$T/list.out"
+    { read -r count; read -r n; read -r pbase; read -r phead; read -r poid; read -r url; read -r cross; } < <(tr -d '\r' < "$T/list.out")
     case "$count" in
         0) n=""; return 0 ;;
         1) ;;
@@ -191,6 +191,7 @@ except Exception:
     pass
 print("\n".join(sorted(need)))
 PY
+tr -d '\r' < "$T/need" > "$T/need.u" && mv "$T/need.u" "$T/need"   # CRLF from Python on Windows
 if [ -s "$T/need" ]; then
     while :; do
         gh pr checks "$n" --json name,bucket > "$T/cj" 2> "$T/err" || [ -s "$T/cj" ] || : > "$T/cj"
@@ -208,6 +209,7 @@ wait = [c for c in need if c not in red and not (got.get(c) and got.get(c) <= {"
 print("red " + ", ".join(red) if red else ("wait " + ", ".join(wait) if wait else "green"))
 PY
 )
+        state=${state//$'\r'/}
         case "$state" in
             green) break ;;
             red\ *) refuse "required check(s) not green on PR #$n: ${state#red }" ;;

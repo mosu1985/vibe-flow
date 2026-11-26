@@ -206,11 +206,12 @@ if bad:
 PY
 judge() { # $1 reason if a protection is found, $2 what was read; then the parser arguments
     local why="$1" what="$2" prc; shift 2
-    "$PY" -I -c "$PYCODE" "$@" 2> "$T/err.py"; prc=$?
+    # tr: Python on Windows (Git Bash) writes CRLF into a pipe, and `read` would keep the \r
+    "$PY" -I -c "$PYCODE" "$@" 2> "$T/err.py" | tr -d '\r'; prc=${PIPESTATUS[0]}
     case "$prc" in
         0) return 0 ;;
-        1) refuse "${why:+$why: }$(cat "$T/err.py")" ;;
-        *) refuse "$what not readable: $(cat "$T/err.py")" ;;
+        1) refuse "${why:+$why: }$(tr -d '\r' < "$T/err.py")" ;;
+        *) refuse "$what not readable: $(tr -d '\r' < "$T/err.py")" ;;
     esac
 }
 
@@ -260,7 +261,9 @@ not_green() {
 }
 checks --required
 if [ "$crc" != 0 ]; then
-    grep -qi 'no required checks reported' "$T/c.err" || not_green
+    # no checks at all: gh says "no checks reported" even for --required; step 8 still demands
+    # every context the rules require
+    grep -qiE 'no (required )?checks reported' "$T/c.err" || not_green
     checks                                  # none required: none of the checks may be red
     if [ "$crc" != 0 ] && ! grep -qi 'no checks reported' "$T/c.err"; then not_green; fi
 fi
