@@ -58,6 +58,9 @@ jobs:
       - name: Node tests
         run: node --test tools/measure-plan-cost.test.mjs plugins/vibe-flow-vercel/scripts/wait-vercel-deploy.test.mjs
 
+      - name: Main folder sync test (fast-forward only, nothing of the user's lost)
+        run: bash tools/test-sync-main-folder.sh
+
       - name: Session store check
         run: python3 plugins/vibe-flow/scripts/test_session_store.py
 
@@ -217,6 +220,9 @@ jobs:
       - name: Guard unit cases (test_pretooluse_guard.py)
         working-directory: plugins/vibe-flow/git-guards
         run: python3 files/scripts/git-guards/test_pretooluse_guard.py
+
+      - name: Main folder sync test (taskkill cuts a hanging native git fetch)
+        run: bash tools/test-sync-main-folder.sh
 
       - name: Guard latency (informational, never fails)
         working-directory: plugins/vibe-flow/git-guards
