@@ -214,6 +214,15 @@ printf '%s\n' "$(pr_json main wt/x "$OTHER")" > "$FAKE/list.2.out"
 run wt/x "$SHA" main
 refused "PR head moved after the checks → refused before the merge" "$OTHER"
 
+echo "== Python on Windows (Git Bash) writes CRLF into a pipe"
+mkdir -p "$TMP/crlf"
+printf '#!/usr/bin/env bash\nset -o pipefail\n"%s" "$@" | sed "s/$/\\r/"\n' "$(command -v python3)" > "$TMP/crlf/python3"
+chmod +x "$TMP/crlf/python3"
+scenario; set_reply rules "$REQ"; set_reply checks-json '[{"name":"ci","bucket":"pass"},{"name":"test","bucket":"pass"}]'
+out="$(cd "$FAKE/work" && FAKE="$FAKE" PATH="$TMP/crlf:$TMP/bin:$PATH" DEPLOY_MERGE_POLL=0 DEPLOY_MERGE_CI_START=2 DEPLOY_MERGE_DEADLINE=3 DEPLOY_MERGE_HEAD_WAIT=1 bash "$TMP/scripts/deploy-merge.sh" wt/x "$SHA" main 2>&1)"; rc=$?
+[ "$rc" = 0 ] && grep -qx "pr merge 7 --merge --match-head-commit $SHA" "$FAKE/log" \
+    && ok "CRLF from Python → PR fields and required contexts still match, merged" || bad "crlf: rc=$rc $out"
+
 echo "== merge refused by policy"
 scenario; set_reply merge '' 1 'GraphQL: base branch policy prohibits the merge'
 run wt/x "$SHA" main
