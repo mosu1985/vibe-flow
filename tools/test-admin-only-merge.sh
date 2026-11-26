@@ -130,6 +130,11 @@ chmod +x "$TMP/crlf/python3"
 scenario
 out="$(cd "$TMP/work" && FAKE="$FAKE" PATH="$TMP/crlf:$TMP/bin:$PATH" bash "$SCRIPT" 5 "$SHA" 2>&1)"; rc=$?
 [ "$rc" = 0 ] && merged && ok "CRLF from Python (Git Bash) → fields still match, merged" || bad "crlf: rc=$rc $out"
+crun() { out="$(cd "$TMP/work" && FAKE="$FAKE" PATH="$TMP/crlf:$TMP/bin:$PATH" bash "$SCRIPT" "$@" 2>&1)"; rc=$?; }
+scenario; set_reply view "{\"baseRefName\":\"main\",\"headRefOid\":\"$SHA\",\"reviewDecision\":\"REVIEW_REQUIRED\"}"
+crun 5; refused "CRLF: REVIEW_REQUIRED still refused" "REVIEW_REQUIRED"
+scenario; set_reply rules '[{"type":"required_status_checks","parameters":{"strict_required_status_checks_policy":true,"required_status_checks":[{"context":"legacy"}]}}]'; set_reply compare 3
+crun 5; refused "CRLF: strict policy and the branch behind → still refused" "behind"
 scenario
 run 5 "$SHA"
 [ "$rc" = 0 ] && merged && ok "expected head equals the PR head → merged" || bad "expected head: rc=$rc $out"

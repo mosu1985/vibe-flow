@@ -96,7 +96,7 @@ def ctx(c):
     """ctx <name> <app id or -> <name url-encoded>, tab-separated (no empty field: the shell's
     `read` would merge two tabs and shift the fields)."""
     name, app = c["context"], c.get("integration_id")
-    if not isinstance(name, str) or not name or "\n" in name or "\t" in name:
+    if not isinstance(name, str) or not name or "\n" in name or "\t" in name or "\r" in name:
         raise ValueError("bad check context")
     if app is not None and type(app) is not int:
         raise ValueError("bad integration_id")
