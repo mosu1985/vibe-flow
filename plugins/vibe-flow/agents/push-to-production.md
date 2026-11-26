@@ -57,24 +57,25 @@ If the hook refuses, you come back with a report and **do not fix** it yourself:
 
 ## 🔧 Push the approved commit
 
-```bash
-cd "<tree>" && BR=$(git symbolic-ref --short HEAD) || echo "detached HEAD"   # → refuse: "the tree is not on a branch"
-cd "<tree>" && FULL=$(git rev-parse HEAD) && echo "$BR $FULL"
-```
-- `BR` must not be the production branch (`<GG_PROTECTED>`): a deploy goes through a PR. Otherwise refuse.
-- `FULL` must start with `<short-sha>` from the quote (deploy) — otherwise refuse as above, nothing pushed.
+🔴 **One Bash call, exactly as written** — the shell does not keep variables between calls, and an empty `FULL` turns the push into `git push origin :refs/heads/<branch>`, which **deletes** the remote branch. Fill in only `<tree>`, `<GG_PROTECTED>` and `<short-sha>` (from the quote; for a push-only reply — the current `HEAD` you just reported):
 
 ```bash
-cd "<tree>" && git push origin "${FULL}:refs/heads/${BR}"
+cd "<tree>" && BR=$(git symbolic-ref --short -q HEAD) && FULL=$(git rev-parse HEAD) \
+  && [ -n "$BR" ] && [ -n "$FULL" ] || { echo "REFUSE: the tree is not on a branch"; exit 1; }
+[ "$BR" != "<GG_PROTECTED>" ] || { echo "REFUSE: the tree is on the production branch — a deploy goes through a PR"; exit 1; }
+case "$FULL" in "<short-sha>"*) ;; *) echo "REFUSE: HEAD is ${FULL}, the user approved <short-sha> — a new yes is needed"; exit 1 ;; esac
+git push origin "${FULL}:refs/heads/${BR}" && echo "PUSHED branch=${BR} sha=${FULL}"
 ```
-The commit itself, not the moving branch name: what is pushed is exactly what the user approved. If it fails, return the error and stop.
+- A line starting with `REFUSE:` — nothing was pushed: return it as is and stop
+- The commit itself, not the moving branch name: what is pushed is exactly what the user approved
+- `PUSHED branch=… sha=…` — take both values from this line **as literals** for the next step. The push failed — return the error and stop
 
 ## 🚀 Deploy: PR, CI, merge — only for a deploy "yes"
 
 ```bash
-cd "<tree>" && bash "${CLAUDE_PLUGIN_ROOT}/scripts/deploy-merge.sh" "$BR" "$FULL"
+cd "<tree>" && bash "${CLAUDE_PLUGIN_ROOT}/scripts/deploy-merge.sh" "<branch from the PUSHED line>" "<sha from the PUSHED line>"
 ```
-Bash timeout up to 600000 ms: the script waits for CI (up to 9 minutes). It finds the one open PR of the branch or creates it (`--base <production> --head <branch>`), refuses a PR into another base or with another head, waits for the required checks (when none are required — for every check, none red; when CI has not started yet — up to a minute for it to appear), reads the PR again and merges it with `--match-head-commit <the approved commit>`. A refusal "base branch policy prohibits the merge" (a `main-admin-only` ruleset) goes to the plugin's `admin-only-merge.sh <N> <approved commit>`, which merges with `--admin` only if nothing but that ruleset would be skipped. 🔴 Never type `gh pr merge` or `--admin` yourself: the checks live in the scripts because a list of steps is easy to skip; in projects with git-guards a hook denies `--admin`.
+Literal values, not `$BR`/`$FULL`: they do not survive between Bash calls (the script refuses empty arguments as a usage error). Bash timeout up to 600000 ms: the script waits for CI (up to 9 minutes). It finds the one open PR of the branch or creates it (`--base <production> --head <branch>`), refuses a PR into another base or with another head, waits for the required checks (when none are required — for every check, none red; when CI has not started yet — up to a minute for it to appear), reads the PR again and merges it with `--match-head-commit <the approved commit>`. A refusal "base branch policy prohibits the merge" (a `main-admin-only` ruleset) goes to the plugin's `admin-only-merge.sh <N> <approved commit>`, which merges with `--admin` only if nothing but that ruleset would be skipped. 🔴 Never type `gh pr merge` or `--admin` yourself: the checks live in the scripts because a list of steps is easy to skip; in projects with git-guards a hook denies `--admin`.
 
 | Exit code | Your action |
 |---|---|

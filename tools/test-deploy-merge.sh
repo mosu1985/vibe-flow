@@ -74,7 +74,7 @@ scenario() {
     set_reply merge ''
     set_reply merged-commit 'abcabcabcabcabcabcabcabcabcabcabcabcabca'
 }
-run() { out="$(cd "$FAKE/work" && FAKE="$FAKE" PATH="$TMP/bin:$PATH" DEPLOY_MERGE_POLL=0 DEPLOY_MERGE_CI_START=2 DEPLOY_MERGE_DEADLINE=3 bash "$TMP/scripts/deploy-merge.sh" "$@" 2>&1)"; rc=$?; }
+run() { out="$(cd "$FAKE/work" && FAKE="$FAKE" PATH="$TMP/bin:$PATH" DEPLOY_MERGE_POLL=0 DEPLOY_MERGE_CI_START=2 DEPLOY_MERGE_DEADLINE=3 DEPLOY_MERGE_HEAD_WAIT=1 bash "$TMP/scripts/deploy-merge.sh" "$@" 2>&1)"; rc=$?; }
 merged() { grep -q '^pr merge' "$FAKE/log" || grep -q '^admin-only-merge' "$FAKE/log"; }
 refused() { # $1 test name, $2 substring the reason must contain
     if [ "$rc" = 1 ] && ! merged && printf '%s' "$out" | grep -qF -- "$2"; then
@@ -153,6 +153,18 @@ scenario
 set_reply checks-required "ci${TAB}fail${TAB}1m${TAB}u${TAB}" 1
 run wt/x "$SHA" main
 refused "required check red → refused with its name" "ci"
+
+echo "== the head right after the push"
+scenario
+printf '%s\n' "$(pr_json main wt/x "$OTHER")" > "$FAKE/list.1.out"
+printf '%s\n' "$(pr_json main wt/x "$SHA")" > "$FAKE/list.2.out"
+run wt/x "$SHA" main
+[ "$rc" = 0 ] && grep -qx "pr merge 7 --merge --match-head-commit $SHA" "$FAKE/log" \
+    && ok "GitHub still shows the previous head right after the push → waits, then merges the approved commit" \
+    || bad "head lag: rc=$rc $out"
+scenario
+run wt/x "" main
+[ "$rc" = 2 ] && ! merged && ok "empty sha (a variable lost between shell calls) → usage, nothing merged" || bad "empty sha: rc=$rc $out"
 
 echo "== the head moves while waiting"
 scenario

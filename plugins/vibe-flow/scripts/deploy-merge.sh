@@ -21,14 +21,18 @@
 # the same arguments · 1 refused or failed (one line saying why) · 2 usage.
 # Waits (seconds) can only be shortened through the environment, which fails closed:
 # DEPLOY_MERGE_DEADLINE (540, under the agent's 600 s Bash timeout), DEPLOY_MERGE_CI_START (60),
+# DEPLOY_MERGE_HEAD_WAIT (30: GitHub updates a PR's head a few seconds after the push),
 # DEPLOY_MERGE_POLL (15).
+# Not awaited: CI that runs only on `push` (no pull_request trigger) and reports nothing yet —
+# required checks still hold such a merge on GitHub's side.
 set -u
 ME="$(basename "$0")"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 DEADLINE="${DEPLOY_MERGE_DEADLINE:-540}"
 CI_START="${DEPLOY_MERGE_CI_START:-60}"
+HEAD_WAIT="${DEPLOY_MERGE_HEAD_WAIT:-30}"
 POLL="${DEPLOY_MERGE_POLL:-15}"
-for v in "$DEADLINE" "$CI_START" "$POLL"; do case "$v" in ''|*[!0-9]*) DEADLINE=0 ;; esac; done
+for v in "$DEADLINE" "$CI_START" "$HEAD_WAIT" "$POLL"; do case "$v" in ''|*[!0-9]*) DEADLINE=0 ;; esac; done
 
 usage() { printf 'usage: %s <branch> <approved full sha> [<production branch>]\n' "$ME" >&2; exit 2; }
 refuse() { printf '%s: refused — %s\n' "$ME" "$1"; exit 1; }
@@ -59,7 +63,7 @@ fi
 pr() {
     gh pr list --head "$branch" --state open --json number,baseRefName,headRefName,headRefOid,url,isCrossRepository \
         > "$T/list" 2> "$T/err" || refuse "PRs of $branch not readable: $(oneline < "$T/err")"
-    python3 - "$T/list" > "$T/list.out" 2> /dev/null <<'PY' || refuse "PRs of $branch not readable: unexpected response"
+    python3 -I - "$T/list" > "$T/list.out" 2> /dev/null <<'PY' || refuse "PRs of $branch not readable: unexpected response"
 import json, sys
 d = json.load(open(sys.argv[1]))
 if not isinstance(d, list):
@@ -80,14 +84,26 @@ PY
     [ "$cross" = same ] || refuse "PR #$n of $branch comes from a fork"
     [ "$phead" = "$branch" ] || refuse "PR #$n head branch is $phead, not $branch"
     [ "$pbase" = "$base" ] || refuse "open PR #$n of $branch targets $pbase, not $base — close it or retarget it first"
-    [ "$poid" = "$sha" ] || refuse "PR #$n head is $poid, approved $sha — a new \"yes\" is needed for the new commit"
+    [ "$poid" = "$sha" ] || head_moved=1
+}
+# The PR, waiting up to HEAD_WAIT seconds for its head to become the approved commit (right after a
+# push GitHub may still show the previous head); anything else is refused at once by pr().
+pr_at_sha() {
+    local start=$SECONDS
+    while :; do
+        head_moved=0; pr
+        [ -z "$n" ] || [ "$head_moved" = 0 ] && return 0
+        [ $((SECONDS - start)) -lt "$HEAD_WAIT" ] \
+            || refuse "PR #$n head is $poid, approved $sha — a new \"yes\" is needed for the new commit"
+        sleep "$POLL"
+    done
 }
 
-pr
+pr_at_sha
 if [ -z "$n" ]; then
     gh pr create --fill --base "$base" --head "$branch" > "$T/create" 2> "$T/err" \
         || refuse "PR not created: $(oneline < "$T/err")"
-    pr
+    pr_at_sha
     [ -n "$n" ] || refuse "PR of $branch created but not found: $(oneline < "$T/create")"
 fi
 
@@ -133,7 +149,7 @@ if [ "$r" != 0 ]; then
 fi
 
 # 3. Read the PR again (the head may have moved while waiting), then merge pinned to the commit.
-pr
+pr_at_sha
 [ -n "$n" ] || refuse "the PR of $branch is no longer open"
 if gh pr merge "$n" --merge --match-head-commit "$sha" > "$T/m.out" 2> "$T/m.err"; then
     how=""
