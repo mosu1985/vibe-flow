@@ -10,7 +10,9 @@
 #   1. The PR: exactly one open PR of <branch> from this repository; it must target the production
 #      branch and its head must be the approved commit. No open PR → one is created
 #      (--base <production> --head <branch>).
-#   2. CI on that commit: required checks first; when none are required, every check, none red.
+#   2. CI on that commit: required checks first — and every context the branch rules require must
+#      have reported green, not only those already reported; when none are required, every check,
+#      none red.
 #      When nothing is reported yet but the project has a pull_request workflow, wait up to
 #      DEPLOY_MERGE_CI_START seconds for the checks to appear — then refuse ("CI did not start").
 #   3. The PR is read again (the head may have moved while waiting) and merged with
@@ -20,15 +22,15 @@
 # Exit codes: 0 merged · 3 checks still running at the deadline, nothing merged: run again with
 # the same arguments · 1 refused or failed (one line saying why) · 2 usage.
 # Waits (seconds) can only be shortened through the environment, which fails closed:
-# DEPLOY_MERGE_DEADLINE (540, under the agent's 600 s Bash timeout), DEPLOY_MERGE_CI_START (60),
+# DEPLOY_MERGE_DEADLINE (480: with the head wait and the merge it stays under the agent's 600 s Bash timeout), DEPLOY_MERGE_CI_START (60),
 # DEPLOY_MERGE_HEAD_WAIT (30: GitHub updates a PR's head a few seconds after the push),
 # DEPLOY_MERGE_POLL (15).
-# Not awaited: CI that runs only on `push` (no pull_request trigger) and reports nothing yet —
-# required checks still hold such a merge on GitHub's side.
+# Not awaited when nothing is required: CI that runs only on `push` (no pull_request trigger) and has
+# reported nothing yet. Required contexts are always awaited (step 2).
 set -u
 ME="$(basename "$0")"
 HERE="$(cd "$(dirname "$0")" && pwd)"
-DEADLINE="${DEPLOY_MERGE_DEADLINE:-540}"
+DEADLINE="${DEPLOY_MERGE_DEADLINE:-480}"
 CI_START="${DEPLOY_MERGE_CI_START:-60}"
 HEAD_WAIT="${DEPLOY_MERGE_HEAD_WAIT:-30}"
 POLL="${DEPLOY_MERGE_POLL:-15}"
@@ -145,6 +147,63 @@ if [ "$r" != 0 ]; then
         [ $((SECONDS - start)) -lt "$CI_START" ] \
             || refuse "CI did not start on PR #$n within ${CI_START}s, though .github/workflows has a pull_request trigger"
         sleep "$POLL"
+    done
+fi
+
+# Every context the branch rules require must report green: `--required` above sees only the ones
+# that have already reported, and right after a push a required check may not exist yet.
+gh api "repos/{owner}/{repo}/rules/branches/$base" --paginate > "$T/rules" 2> "$T/err" \
+    || refuse "rules of branch $base not read: $(oneline < "$T/err")"
+gh api "repos/{owner}/{repo}/branches/$base/protection/required_status_checks" > "$T/classic" 2> /dev/null || echo '{}' > "$T/classic"
+python3 -I - "$T/rules" "$T/classic" > "$T/need" 2> /dev/null <<'PY' || refuse "rules of branch $base not readable: unexpected response"
+import json, sys
+need = set()
+raw = open(sys.argv[1]).read().strip() or "[]"
+dec, i, rules = json.JSONDecoder(), 0, []
+while i < len(raw):                      # --paginate may print several JSON arrays back to back
+    part, i = dec.raw_decode(raw, i)
+    rules += part if isinstance(part, list) else []
+    while i < len(raw) and raw[i].isspace():
+        i += 1
+for r in rules:
+    if isinstance(r, dict) and r.get("type") == "required_status_checks":
+        for c in (r.get("parameters") or {}).get("required_status_checks") or []:
+            if c.get("context"):
+                need.add(c["context"])
+try:
+    classic = json.load(open(sys.argv[2]))
+    need.update(classic.get("contexts") or [])
+    need.update(c.get("context") for c in classic.get("checks") or [] if c.get("context"))
+except Exception:
+    pass
+print("\n".join(sorted(need)))
+PY
+if [ -s "$T/need" ]; then
+    while :; do
+        gh pr checks "$n" --json name,bucket > "$T/cj" 2> "$T/err" || [ -s "$T/cj" ] || : > "$T/cj"
+        state=$(python3 -I - "$T/cj" "$T/need" 2> /dev/null <<'PY'
+import json, sys
+try:
+    got = {}
+    for c in json.load(open(sys.argv[1])):
+        got.setdefault(c.get("name"), set()).add(c.get("bucket"))
+except Exception:
+    got = {}
+need = [l for l in open(sys.argv[2]).read().split("\n") if l]
+red = [c for c in need if got.get(c, set()) & {"fail", "cancel"}]
+wait = [c for c in need if c not in red and not (got.get(c) and got.get(c) <= {"pass", "skipping"})]
+print("red " + ", ".join(red) if red else ("wait " + ", ".join(wait) if wait else "green"))
+PY
+)
+        case "$state" in
+            green) break ;;
+            red\ *) refuse "required check(s) not green on PR #$n: ${state#red }" ;;
+            *) if [ "$SECONDS" -ge "$DEADLINE" ]; then
+                   printf '%s: required check(s) %s not green yet on PR #%s (%s) after %ss — nothing merged; run again with the same arguments\n' "$ME" "${state#wait }" "$n" "$sha" "$SECONDS"
+                   exit 3
+               fi
+               sleep "$POLL" ;;
+        esac
     done
 fi
 

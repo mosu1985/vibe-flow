@@ -36,6 +36,9 @@ reply() {
 case "$*" in
     "pr list "*)                        reply list ;;
     "pr create "*)                      reply create ;;
+    "api repos/{owner}/{repo}/rules/branches/"*) reply rules ;;
+    "api repos/{owner}/{repo}/branches/"*"/protection/required_status_checks") reply classic ;;
+    "pr checks "*" --json "*)           reply checks-json ;;
     "pr checks "*" --required")         reply checks-required ;;
     "pr checks "*)                      reply checks-all ;;
     "pr merge "*)                       reply merge ;;
@@ -73,7 +76,11 @@ scenario() {
     set_reply checks-all "ci${TAB}pass${TAB}1m${TAB}https://example.invalid/1${TAB}"
     set_reply merge ''
     set_reply merged-commit 'abcabcabcabcabcabcabcabcabcabcabcabcabca'
+    set_reply rules '[]'
+    set_reply classic '{"message":"Not Found","status":"404"}' 1 'gh: Not Found (HTTP 404)'
+    set_reply checks-json '[{"name":"ci","bucket":"pass"}]'
 }
+REQ='[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"ci"},{"context":"test"}]}}]'
 run() { out="$(cd "$FAKE/work" && FAKE="$FAKE" PATH="$TMP/bin:$PATH" DEPLOY_MERGE_POLL=0 DEPLOY_MERGE_CI_START=2 DEPLOY_MERGE_DEADLINE=3 DEPLOY_MERGE_HEAD_WAIT=1 bash "$TMP/scripts/deploy-merge.sh" "$@" 2>&1)"; rc=$?; }
 merged() { grep -q '^pr merge' "$FAKE/log" || grep -q '^admin-only-merge' "$FAKE/log"; }
 refused() { # $1 test name, $2 substring the reason must contain
@@ -153,6 +160,28 @@ scenario
 set_reply checks-required "ci${TAB}fail${TAB}1m${TAB}u${TAB}" 1
 run wt/x "$SHA" main
 refused "required check red → refused with its name" "ci"
+
+echo "== required contexts from the branch rules"
+scenario; set_reply rules "$REQ"
+printf '%s\n' '[{"name":"ci","bucket":"pass"}]' > "$FAKE/checks-json.1.out"
+printf '%s\n' '[{"name":"ci","bucket":"pass"},{"name":"test","bucket":"pass"}]' > "$FAKE/checks-json.2.out"
+run wt/x "$SHA" main
+[ "$rc" = 0 ] && merged && [ "$(grep -c -- '--json name,bucket' "$FAKE/log")" -ge 2 ] \
+    && ok "a required context not reported yet (--required already green) → waits for it, then merges" || bad "required wait: rc=$rc $out"
+scenario; set_reply rules "$REQ"
+run wt/x "$SHA" main
+[ "$rc" = 3 ] && ! merged && printf '%s' "$out" | grep -qF 'test' \
+    && ok "a required context never reports → exit 3 naming it, nothing merged" || bad "required never: rc=$rc $out"
+scenario; set_reply rules "$REQ"; set_reply checks-json '[{"name":"ci","bucket":"pass"},{"name":"test","bucket":"fail"}]'
+run wt/x "$SHA" main
+refused "a required context red → refused with its name" "test"
+scenario; set_reply classic '{"strict":false,"contexts":["legacy"],"checks":[{"context":"legacy","app_id":null}]}'
+set_reply checks-json '[{"name":"ci","bucket":"pass"},{"name":"legacy","bucket":"skipping"}]'
+run wt/x "$SHA" main
+[ "$rc" = 0 ] && merged && ok "classic protection context reported as skipping → counts as green, merged" || bad "classic: rc=$rc $out"
+scenario; set_reply rules '' 1 'gh: Forbidden (HTTP 403)'
+run wt/x "$SHA" main
+refused "branch rules not readable → refused" "rules of branch main"
 
 echo "== the head right after the push"
 scenario

@@ -57,13 +57,23 @@ If the hook refuses, you come back with a report and **do not fix** it yourself:
 
 ## 🔧 Push the approved commit
 
-🔴 **One Bash call, exactly as written** — the shell does not keep variables between calls, and an empty `FULL` turns the push into `git push origin :refs/heads/<branch>`, which **deletes** the remote branch. Fill in only `<tree>`, `<GG_PROTECTED>` and `<short-sha>` (from the quote; for a push-only reply — the current `HEAD` you just reported):
+🔴 **One Bash call, exactly as written** — the shell does not keep variables between calls, and an empty `FULL` turns the push into `git push origin :refs/heads/<branch>`, which **deletes** the remote branch. Fill in only `<tree>`, `<GG_PROTECTED>` and, for a deploy, `<short-sha>` — copied from the question the user answered.
 
+**Deploy** ("yes" to "Deploy `<short-sha>`?"):
 ```bash
+case "<short-sha>" in [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;; *) echo "REFUSE: no approved commit in the quote"; exit 1 ;; esac
 cd "<tree>" && BR=$(git symbolic-ref --short -q HEAD) && FULL=$(git rev-parse HEAD) \
   && [ -n "$BR" ] && [ -n "$FULL" ] || { echo "REFUSE: the tree is not on a branch"; exit 1; }
 [ "$BR" != "<GG_PROTECTED>" ] || { echo "REFUSE: the tree is on the production branch — a deploy goes through a PR"; exit 1; }
 case "$FULL" in "<short-sha>"*) ;; *) echo "REFUSE: HEAD is ${FULL}, the user approved <short-sha> — a new yes is needed"; exit 1 ;; esac
+git push origin "${FULL}:refs/heads/${BR}" && echo "PUSHED branch=${BR} sha=${FULL}"
+```
+
+**Push only** (a reply that names only the push) — the same without the commit check, and no deploy step after it:
+```bash
+cd "<tree>" && BR=$(git symbolic-ref --short -q HEAD) && FULL=$(git rev-parse HEAD) \
+  && [ -n "$BR" ] && [ -n "$FULL" ] || { echo "REFUSE: the tree is not on a branch"; exit 1; }
+[ "$BR" != "<GG_PROTECTED>" ] || { echo "REFUSE: the tree is on the production branch"; exit 1; }
 git push origin "${FULL}:refs/heads/${BR}" && echo "PUSHED branch=${BR} sha=${FULL}"
 ```
 - A line starting with `REFUSE:` — nothing was pushed: return it as is and stop
@@ -75,7 +85,7 @@ git push origin "${FULL}:refs/heads/${BR}" && echo "PUSHED branch=${BR} sha=${FU
 ```bash
 cd "<tree>" && bash "${CLAUDE_PLUGIN_ROOT}/scripts/deploy-merge.sh" "<branch from the PUSHED line>" "<sha from the PUSHED line>"
 ```
-Literal values, not `$BR`/`$FULL`: they do not survive between Bash calls (the script refuses empty arguments as a usage error). Bash timeout up to 600000 ms: the script waits for CI (up to 9 minutes). It finds the one open PR of the branch or creates it (`--base <production> --head <branch>`), refuses a PR into another base or with another head, waits for the required checks (when none are required — for every check, none red; when CI has not started yet — up to a minute for it to appear), reads the PR again and merges it with `--match-head-commit <the approved commit>`. A refusal "base branch policy prohibits the merge" (a `main-admin-only` ruleset) goes to the plugin's `admin-only-merge.sh <N> <approved commit>`, which merges with `--admin` only if nothing but that ruleset would be skipped. 🔴 Never type `gh pr merge` or `--admin` yourself: the checks live in the scripts because a list of steps is easy to skip; in projects with git-guards a hook denies `--admin`.
+Literal values, not `$BR`/`$FULL`: they do not survive between Bash calls (the script refuses empty arguments as a usage error). Bash timeout up to 600000 ms: the script waits for CI (up to 8 minutes). It merges when the required checks are green — and every check the branch rules require has reported, not only those already reported; when nothing is required, every check must be green. A red check that is not required does not stop the merge, exactly as on GitHub. It finds the one open PR of the branch or creates it (`--base <production> --head <branch>`), refuses a PR into another base or with another head, waits for the required checks (when none are required — for every check, none red; when CI has not started yet — up to a minute for it to appear), reads the PR again and merges it with `--match-head-commit <the approved commit>`. A refusal "base branch policy prohibits the merge" (a `main-admin-only` ruleset) goes to the plugin's `admin-only-merge.sh <N> <approved commit>`, which merges with `--admin` only if nothing but that ruleset would be skipped. 🔴 Never type `gh pr merge` or `--admin` yourself: the checks live in the scripts because a list of steps is easy to skip; in projects with git-guards a hook denies `--admin`.
 
 | Exit code | Your action |
 |---|---|
