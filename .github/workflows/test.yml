@@ -159,6 +159,9 @@ jobs:
       - name: admin-only-merge test (the --admin exception, fake gh)
         run: bash tools/test-admin-only-merge.sh
 
+      - name: deploy-merge test (one "yes" → PR, CI, pinned merge; fake gh)
+        run: bash tools/test-deploy-merge.sh
+
       - name: Rollout tool test
         run: bash tools/test-rollout-projects.sh
 

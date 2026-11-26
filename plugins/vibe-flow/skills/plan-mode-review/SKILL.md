@@ -7,7 +7,7 @@ description: Mandatory Plan Mode procedure — live verification of assumptions 
 
 Copy the prohibitions ("do NOT call `ExitPlanMode` until…") into the project's `CLAUDE.md` as well, so they stay in force even if the skill fails to load.
 
-**Order:** write the plan to a file → **verify assumptions about external systems live** (LIVE FACTS RULE) → launch the reviewer batch (in one message, in parallel), **each reviewer gives a score and a count of blocking findings per the rubric** → when the batch is back, run `vibe-flow:orchestration-router` **in a separate message** → ask the user the mandatory questions → `vibe-flow:codex-plan-critic` (external review on a different model, if Codex is installed) → **defect-class gate** → **size check** (`plan-size.py`, see PLAN SIZE RULE) → show the simplified plan + reviewer sections + the breakdown of the critic's findings + the orchestration verdict → `ExitPlanMode` only after approval.
+**Order:** write the plan to a file → **verify assumptions about external systems live** (LIVE FACTS RULE) → launch the reviewer batch (in one message, in parallel), **each reviewer gives a score and a count of blocking findings per the rubric** → when the batch is back, run `vibe-flow:orchestration-router` **in a separate message** → ask the user the mandatory questions (only those a reviewer marked: `🔴 USER QUESTION REQUIRED`, `❓ DECISION NEEDED`) → `vibe-flow:codex-plan-critic` (external review on a different model, if Codex is installed; full review in round 1, re-check in rounds 2–3) → **defect-class gate** → **size check** (`plan-size.py`, see PLAN SIZE RULE) → show the simplified plan + reviewer sections + the breakdown of the critic's findings + the orchestration verdict → `ExitPlanMode` only after approval.
 
 🔴 **Two-model gate:** if Codex CLI is installed, the plan goes to implementation only when **neither the Claude reviewers nor the external critic have any open `critical`/`high` findings**. One model cannot wave a plan through alone. If Codex is not installed, the Claude reviewers hold the gate (see CODEX CRITIC RULE). The score is computed and shown but is not the gate; for why, see PLAN GATE RULE.
 
@@ -65,7 +65,7 @@ Copy the prohibitions ("do NOT call `ExitPlanMode` until…") into the project's
 | Project domain reviewers | See below | Their own sections |
 | `vibe-flow:orchestration-router` | **In a separate message after the batch** — what to implement the plan with | `## 🚀 Implementation orchestration` |
 
-- 🔴 **Extension rule:** if the project's `.claude/agents/` has its own domain plan reviewers (their `description` says they review the plan in Plan Mode / before `ExitPlanMode`), launch them **in the same batch**, with the same rubric block. Self-excluding when the plan does not concern them is their own business
+- 🔴 **Extension rule:** if the project's `.claude/agents/` has its own domain plan reviewers (their `description` says they review the plan in Plan Mode / before `ExitPlanMode`), launch them **in the same batch**, with the same rubric block — **but only when the plan touches their domain**: the paths, systems or topics their `description` names. Otherwise do not launch them and write the gate row `| <reviewer> | ⚪ not run: the plan does not touch <domain> |`. Why: a measured project reviewer ran on 20 of 27 plans and answered "not required" in 25 of 30 runs, at an Opus price and ~7 minutes each
 - `security-reviewer` and `performance-reviewer` **do not duplicate** each other: security is safety and permissions, performance is load
 - 🔴 **Reviewers change the plan file ONLY via `Edit`** — append or replace their own section. `Write` on the plan file is forbidden: batch agents write to one file at the same time, and a whole-file overwrite wipes out the sections neighbors appended after the read. For a project domain reviewer that has `Write` in its `tools`, add this rule to its prompt
 - 🔴 **No temporary files in the plans directory.** The plans directory is the project's `plansDirectory` (the kit sets `.plans`, git-ignored) or, in older installs, the Claude config directory (`~/.claude/plans`, sometimes reached through a symlink), where Claude Code asks for manual confirmation on every write — even in bypass-permissions mode. Either way it is not a scratch space. Copies, slices (`sed -n … >`), round snapshots and drafts go only to the session scratchpad (or `mktemp -d` if there is none); in the plans directory only the plan file itself changes, and only via `Edit` — plus its two permanent companions next to it: `<plan>-crew.md` (written by `team-planner`) and `<plan>-history.md` (written by `plan-size.py archive`, see PLAN SIZE RULE). If a reviewer wrote its section into its own agent plan file (`<plan>-agent-<id>.md`) instead of the main one, the main session moves the section with `Read` + `Edit` of the main plan — not with `cp`, `>` or `Write`. Give each reviewer the absolute path of the main plan file and tell it to edit that file, not its own
@@ -100,8 +100,8 @@ Copy the prohibitions ("do NOT call `ExitPlanMode` until…") into the project's
 - **Goal:** at the plan stage (before code), determine the impact on tests — which to **update** (the plan changes the behavior of a covered function), which **new** ones to add (new pure logic / a regression test for a bug), or that tests are **not required**. If the project has no tests at all, say so honestly and propose a minimal start
 - The subagent **does NOT write or change tests itself** — it only recommends
 - 🔴 **Red first:** for a bug fix in logic or a new pure function the subagent must add `### 🔴 Red first` (test file, case, why it fails now); without it — `high`. The plan's `## 📌 Steps` then contains the step "test → red run → code". This is not checked automatically — it holds on this review and on the `test-runner` report
-- 🔴 **ASK THE USER:** if the verdict is not "✅ not required", you **MUST** use `AskUserQuestion` to ask what to do (update existing / add new / both / skip) — **BEFORE** `ExitPlanMode`, and write the answer into the plan
-- **Do NOT call `ExitPlanMode`** until `test-impact-reviewer` has finished and the user has decided what to do about tests
+- 🔴 **Apply the recommendation, do not ask:** write it into the plan as the line `Tests: <what> — as recommended` and show it in the summary before `ExitPlanMode`. Ask via `AskUserQuestion` **only** if the reviewer's reply starts with the marker `❓ DECISION NEEDED` (the project has no test setup at all; the recommended test writes to a shared database; or the recommendation is to skip tests although covered logic changes) — then write the answer into the plan. Why: over 52 such questions the user chose the recommended option 52 times
+- **Do NOT call `ExitPlanMode`** until `test-impact-reviewer` has finished (and, if it raised `❓ DECISION NEEDED`, the user has answered)
 
 ### 🚀 orchestration-router
 
@@ -131,14 +131,21 @@ Copy the prohibitions ("do NOT call `ExitPlanMode` until…") into the project's
   Keep every line of your section under 800 characters: a table cell that
   needs a paragraph gets a short cell and a note in a list under the table.
   Long lines can stop the approval window from showing the plan.
+
+  Your reply in chat: at most 3 lines and 400 characters — verdict, score,
+  blocking findings by ID. The details live only in your plan section. If you
+  have a marker for the main session (🔴 USER QUESTION REQUIRED, ❓ DECISION
+  NEEDED), the FIRST line of the reply is exactly that marker; it does not
+  count toward the limit.
   ```
+- **The chat-reply limit does not apply to `plan-reviewer`:** its reply is the simplified plan the user reads before approving. Why the limit for the rest: reviewer replies averaged 3.5–4.8 thousand characters, all of it staying in the main session's context for the rest of the session, while the same text is in the plan file
 - **Claude score = MINIMUM across all reviewers that ran.** Averaging is forbidden: one hole in data isolation must not be compensated by high scores for orchestration and tests
 - **Self-excluded reviewers** ("✅ not required") are **not included** in the minimum — they have nothing to score
 - 🔴 **A score without a list of deductions is invalid.** A reviewer that returns "9.5" with no breakdown or without the "blocking: N" line counts as not having run — ask them again for the deductions
 
 ## CODEX CRITIC RULE
 
-**Why:** Claude reviewers are a single model checking itself. An external critic on a different model (Codex CLI; the model comes from the user's `~/.codex/config.toml`, reasoning effort `xhigh`) catches what Claude has a blind spot for: its own architectural habits and whatever already "looks right".
+**Why:** Claude reviewers are a single model checking itself. An external critic on a different model (Codex CLI; the model comes from the user's `~/.codex/config.toml`; reasoning effort `xhigh` in round 1, `high` in the re-check rounds) catches what Claude has a blind spot for: its own architectural habits and whatever already "looks right".
 
 **The critic is optional to install but mandatory if installed.** `vibe-flow:codex-plan-critic` checks for its presence itself as the first step and returns one of three outcomes:
 
@@ -146,8 +153,10 @@ Copy the prohibitions ("do NOT call `ExitPlanMode` until…") into the project's
 |---|---|---|
 | `⚪️ Critic not installed` | `codex` is not in `PATH` | The Claude reviewers hold the gate. **Once per session**, tell the user: "The external critic is not installed — the gate goes by the Claude reviewers. To install: `npm i -g @openai/codex` (or `brew install codex`), then `codex login`". Do not repeat in later rounds |
 | `❌ Critic unavailable` | Codex is installed but not authorized, crashed, returned no JSON or hit the timeout | 🔴 **Gate NOT passed.** Show the user the exact error and ask: fix it and wait, or proceed without the external review at their own responsibility. Write the answer into the plan. Continuing silently is forbidden |
-| Report `## 🧑‍⚖️ External Codex review` | The critic ran | Go through each finding (below) |
+| A short report with `JSON: <path>` | The critic ran | Read the findings from that JSON file and go through each one (below) |
 
+- **Give the wrapper exact file paths:** `Answer file: <scratchpad>/codex-<plan name>-r<N>-<time>.json` (unique per run, so a re-planned iteration never reads an older round's answer) and, from round 2, `Previous answer: <the previous round's path>`. Handle the wrapper's explicit outcome first (`⚪️ not installed`, `❌ unavailable`); only after a run that was actually launched does "no fresh file at the answer path" mean `❌ Critic unavailable`
+- **Effort:** round 1 runs at `xhigh` (the full review), rounds 2–3 at `high` (a re-check, see PLAN GATE RULE). The wrapper reports the effort that actually ran
 - 🔴 **Critic unavailable ≠ critic satisfied.** A Codex that is installed but crashed is neither "passed" nor "not installed". It is a stop with a question to the user
 - **Order:** run **after** the whole Claude reviewer batch, when their sections and scores are already in the plan file — the critic is given the plan **together with** them. Otherwise it will deduct points for what has already been handled
 - 🔴 **Codex writes NOTHING** — neither to the plan nor to the repository. The sandbox is `-s read-only`, the wrapper agent has no `Edit`/`Write`. The plan's owner is the main Claude session
@@ -155,7 +164,7 @@ Copy the prohibitions ("do NOT call `ExitPlanMode` until…") into the project's
 - **Rejecting is allowed** — the critic is not the boss. But rejecting without a justification is forbidden: the table must say why the finding is wrong or inapplicable
 - **Data leaves the machine:** on the first critic run in a session, tell the user in one line that the plan and code fragments are sent to an external provider (OpenAI) — the agent returns this line in the round 1 report. Codex does not open secrets (`.env*`, keys, access files) per the prompt header
 - **Codex picks up the project rules itself:** it is launched from the project root and reads `AGENTS.md`; if the rules live only in `CLAUDE.md`, the wrapper agent tells it to read that too
-- ⚠️ **Plan Mode gotcha:** the harness may not let the wrapper agent write even to a temp folder — and the critic will not run before `ExitPlanMode`. In that case — with the user's explicit consent — run it **right after `ExitPlanMode` and BEFORE the first code edit**: the gate guards the start of implementation, not the exit from the plan
+- ⚠️ **Plan Mode gotcha:** the harness may not let the wrapper agent write even to a temp folder — and the critic will not run before `ExitPlanMode`. In that case run it **right after `ExitPlanMode` and BEFORE the first code edit, without asking** (users answered "yes" to this question 12 times out of 13): the gate guards the start of implementation, not the exit from the plan. Before the first `ExitPlanMode` the gate table carries `| Codex (external critic) | — | ⏳ after ExitPlanMode |` and no `Gate:` line; the approval hook then writes no mark, so after the critic: findings into the plan, the `Gate:` line, then `EnterPlanMode` → `ExitPlanMode` again
 - **Do NOT call `ExitPlanMode`** until `codex-plan-critic` has finished (or returned "not installed") and its findings are processed
 
 ## PLAN GATE RULE
@@ -166,13 +175,36 @@ The plan goes to implementation when **no open `critical` and `high` findings re
 
 - **Open finding** — one that has been neither accepted nor rejected with a justification. An accepted finding that has been folded into the plan is closed; one rejected **with a fact** (`file:line` or a reference to an explicit user decision) is closed too
 - **The "weight ↔ severity" mapping** is hard, in `${CLAUDE_SKILL_DIR}/rubric.md`: −4.0/−3.0 = `critical`, −2.5/−2.0 = `high`, −1.5/−1.0 = `medium`, −0.5/−0.3 = `low`
+- **How an accepted finding goes into the plan:** a short edit of the step it concerns (do not rewrite the step or duplicate it elsewhere) plus one row in `## 🧾 Review decisions` (ID — gist — decision — where it went). Prefer the simplest fix: when a finding targets a mechanism the plan added to fix an earlier finding, consider dropping the mechanism before adding another. Why: plans grew 7.8× from first draft to approval, and 18% of blocking findings targeted mechanisms added by earlier fixes
 - 🔴 **`critical`/`high` without a failure scenario does not block.** A blocking-class finding must name under which inputs or state what breaks. Without a scenario it is downgraded to `medium` — a guard against severity inflation, which the numeric gate lacked
+- 🔴 **…and a rare coincidence with recoverable harm does not block either**, unless the harm is of a dangerous class (the list is in the rubric: other tenants' data or actions, auth/signature/permission bypass incl. fail-open, secrets, money, irreversible data loss, deploy or external write without a "yes"). A dangerous class is never downgraded
 - 🔴 **Rejection is a legitimate way to close a finding, not a defeat.** With a numeric gate, arguing was unprofitable: over four rounds of one plan, out of eighteen critic findings **not one** was rejected — the critic de facto got a veto. Now a rejection with a fact closes the item on a par with a fix
 
 **Why not "≥ 9.0 on both sides".** With a weight of −2.0 for an ordinary logic defect, a 9.0 threshold meant "no more than one finding of weight 1.0" and for a plan of non-trivial size it was impassable in principle. On a real plan the critic gave 0.0 → 2.0 → 1.5, even though the plan got better from round to round and every finding was being closed. It went to implementation by the user's decision around the gate — a mechanism meant to decide turned out to be decorative. The threshold was not "lowered": it was replaced by one that measures danger, not quantity.
 
 **If the gate is not passed — auto-fix, up to 3 rounds:**
 
+0. **Before each round, snapshot the plan** into the scratchpad (`cp "<plan>" "<scratchpad>/<plan name>-r<N>.md"`). After the fixes, compute the changed parts mechanically, not from memory — the author of the plan is the one who wants it to pass:
+   ```
+   python3 - "<scratchpad>/<plan name>-r<N>.md" "<plan>" <<'PY'
+   import difflib, re, sys
+   a = open(sys.argv[1]).read().splitlines(); b = open(sys.argv[2]).read().splitlines()
+   def where(lines):
+       out, sec, step = [], "", None
+       for line in lines:
+           if line.startswith("## "): sec, step = line, None
+           m = re.match(r"^(\d+)\. \*\*", line)
+           if m: step = m.group(1)
+           out.append(sec + (f" step {step}" if sec and step else ""))
+       return out
+   wa, wb, changed = where(a), where(b), set()
+   for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b).get_opcodes():
+       if tag != "equal":   # both sides: a deleted line belongs to the section it was deleted from
+           changed.update(wa[i] for i in range(i1, i2))
+           changed.update(wb[j] for j in range(j1, min(max(j2, j1 + 1), len(b))))
+   print("\n".join(sorted(x for x in changed if x)))
+   PY
+   ```
 1. Claude fixes the plan per the **accepted** findings
 2. Re-runs the reviewers whose area the fix touched — for a new score **and a new count of blocking findings** — in **re-check mode**, adding to the prompt (with the round number and the list of plan sections/steps changed since the previous round):
    ```
@@ -184,14 +216,19 @@ The plan goes to implementation when **no open `critical` and `high` findings re
       medium/low there — they do not block the gate and were the job of round 1.
    Replace your section whole: the closure list, new findings, the new score.
    ```
-3. Re-runs `vibe-flow:codex-plan-critic` (if installed) with the round number and the list of rejections **with justification**
+3. Re-runs `vibe-flow:codex-plan-critic` (if installed) in the same **re-check mode**: the round number, `Answer file:` (a new unique path), `Previous answer:` (the previous round's path), `Changed sections:` (the list from step 0) and the decisions — accepted, rejected **with justification**. The critic runs at `high`, reports the status of every previous finding, reviews the changed parts in full and, elsewhere, raises only new `critical` or `high` of a dangerous class; a previous finding still open stays in its `findings` and keeps blocking. 🔴 Count the gate from `findings` **plus** `previous_findings`: a previous finding with status `open` or `rejection_disputed` whose previous severity was `critical`/`high` blocks even if the critic forgot to repeat it in `findings`
 4. The gate is recomputed
 
 **Why re-check mode, not a fresh review and not "only the changes".** A measurement over 68 real plans: almost half of the security reviewer's runs were rounds 2–4, each re-reading the whole plan at full price and adding about three hundred new medium/low findings, which block nothing but feed the next round. Cutting a round down to "only the changed parts" is not safe either: almost half of that reviewer's unique blocking findings came from rounds 2–4. So a re-check keeps hunting blockers across the whole plan and drops only the low-severity noise.
 
-🔴 **The limit is 3 rounds, hard.** After the third failure — **stop**: show the user the scores, the round history, what was accepted and what was rejected, and exactly where the disagreement lies. After that the user decides: edit by hand, push the plan through as is, or abandon it. Running a fourth round is forbidden — it burns tokens on a non-converging argument.
+**Why the critic re-checks too, at `high`.** The same measurement idea on 26 plans (November 2026), after the critic moved to `xhigh` in every round: 6.2 blocking findings per run instead of 1.8, a passing round on 1 plan in 31 instead of 28 in 45, and rounds 2–3 of the critic yielded 3% real defects — the rest were rare edge cases, procedure, and mechanisms the plan had added to fix the critic's own earlier findings. Round 1 found 45 of the 53 real defects.
 
-🔴 **Do not soften severity to make it pass.** If a plan stubbornly keeps `critical`/`high` findings, that is a signal about the plan, not about an overly strict gate. Reassigning a defect class against the weight table is forbidden; only the user changes the rule, by explicit instruction. A downgrade is permissible on exactly one ground: the finding itself has no failure scenario.
+🔴 **The limit is 3 rounds, hard.** A fourth round is forbidden — it burns tokens on a non-converging argument. After the third round:
+- **Every blocking finding accepted and folded, or rejected with a fact** → the gate passes **without a question**, with the note "round-3 fixes not re-checked by the critic" on the `Gate:` line. Users chose "accept the fixes and go" 21 times out of 26 when asked
+- **A round-3 fix touches a dangerous class** (rubric) → first a narrow re-check by `vibe-flow:security-reviewer` of that fix only; a new blocking finding there → ask the user
+- **A blocking finding cannot be folded without the user's decision** (it changes the scope, the UX or an agreed decision), or the only way to close it is a rejection without a fact → **stop** and ask the user: show the round history, what was accepted and rejected, and exactly where the disagreement lies. The user decides: edit by hand, push the plan through as is, or abandon it
+
+🔴 **Do not soften severity to make it pass.** If a plan stubbornly keeps `critical`/`high` findings, that is a signal about the plan, not about an overly strict gate. Reassigning a defect class against the weight table is forbidden; only the user changes the rule, by explicit instruction. A downgrade is permissible on exactly two grounds, both in the rubric: the finding has no failure scenario; or its scenario needs a rare coincidence, the harm is recoverable and it is not a dangerous class.
 
 **Show the user before `ExitPlanMode`:**
 

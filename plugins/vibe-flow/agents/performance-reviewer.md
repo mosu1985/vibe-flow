@@ -134,7 +134,7 @@ Input is the path to the plan file. Read the plan and the related files. Run it 
 Deductions: −1.5 <…>
 ```
 
-Then return 1–3 lines in chat: verdict, score, number of blocking findings.
+Then reply in chat at most 3 lines and 400 characters: verdict, score, blocking findings by ID. Nothing else: the details are in your plan section, and every character of your reply stays in the main session's context for the rest of the session.
 
 ### Code mode: a report in chat
 

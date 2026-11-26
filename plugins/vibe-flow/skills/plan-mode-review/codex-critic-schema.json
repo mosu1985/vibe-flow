@@ -6,6 +6,7 @@
     "verdict",
     "summary",
     "deductions",
+    "previous_findings",
     "findings"
   ],
   "properties": {
@@ -21,7 +22,7 @@
         "pass",
         "fail"
       ],
-      "description": "pass if there is NO finding with severity critical or high, otherwise fail. The score does NOT affect the verdict: a plan with score 6.5 and only medium/low findings is a pass"
+      "description": "pass if `findings` has NO critical or high, otherwise fail. Previous findings still open must be repeated in `findings`, so they count. The score does NOT affect the verdict: a plan with score 6.5 and only medium/low findings is a pass"
     },
     "summary": {
       "type": "string",
@@ -49,6 +50,38 @@
         }
       }
     },
+    "previous_findings": {
+      "type": "array",
+      "description": "Rounds 2-3 only (empty array in round 1): the status of EVERY finding from your previous round. A finding that is still open or whose rejection you dispute MUST also be repeated in `findings` under the same id and severity: the verdict, the score and the blocking count are computed from `findings` only",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "status",
+          "note"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The id from the previous round, e.g. C3"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "closed",
+              "open",
+              "rejection_disputed"
+            ],
+            "description": "closed: the plan now handles it, or it was rejected with a fact you accept; open: not handled; rejection_disputed: rejected, but the justification is factually wrong"
+          },
+          "note": {
+            "type": "string",
+            "description": "One line in English: the fact behind the status (plan section, path:line)"
+          }
+        }
+      }
+    },
     "findings": {
       "type": "array",
       "description": "Findings on the plan. Each must be an action, not an observation",
@@ -58,6 +91,7 @@
         "required": [
           "id",
           "severity",
+          "trigger",
           "title",
           "detail",
           "failure_scenario",
@@ -78,7 +112,16 @@
               "medium",
               "low"
             ],
-            "description": "Defect class strictly per the rubric weight table: critical = breaks production or loses data / hole in isolation or permissions; high = a critical project rule is violated, plan logic defect, unverified assumption about an external system on which access control or the data source depends; medium = load without an estimate, coverage gap, other unverified assumptions; low = incomplete description and cosmetics. critical and high BLOCK the plan: assigning them without a concrete failure scenario in failure_scenario is forbidden, such a finding is downgraded to medium"
+            "description": "Defect class strictly per the rubric. critical and high BLOCK the plan and require BOTH a concrete failure_scenario AND either trigger=normal_use or harm of a dangerous class. Dangerous classes (block at any likelihood, never downgraded): access to another user's or customer's data or actions; bypass of authentication, a signature check or permissions, including fail-open; a secret leak; money, balance, payments (races, double charges, missing idempotency); irreversible loss or corruption of data; a deploy or a write to an external system without the user's yes. critical = breaks production or loses data / hole in isolation or permissions; high = a critical project rule is violated, plan logic defect, unverified assumption about an external system on which access control or the data source depends; medium = load without an estimate, coverage gap, other unverified assumptions, AND any finding whose scenario is a rare_coincidence with recoverable harm outside the dangerous classes, AND findings about the review procedure itself (smoke-test method, plan wording, approval marks); low = incomplete description and cosmetics. A critical/high without a failure scenario is downgraded to medium"
+          },
+          "trigger": {
+            "type": "string",
+            "enum": [
+              "normal_use",
+              "rare_coincidence",
+              "n/a"
+            ],
+            "description": "When the failure scenario happens: normal_use = an ordinary action, a retry, a deploy, an expected cron overlap, a second user; rare_coincidence = needs a rare coincidence (same person in two tabs in the same second, a crash at one exact line, a narrow race window); n/a = medium/low findings without a failure scenario"
           },
           "title": {
             "type": "string",

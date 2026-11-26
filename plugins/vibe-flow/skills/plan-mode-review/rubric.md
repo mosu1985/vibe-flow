@@ -34,6 +34,40 @@ data"). A finding without a scenario is an observation, not a defect: it is
 automatically downgraded to `medium` and does not hold the gate. This is a
 guard against severity inflation, which the numeric gate lacked.
 
+🔴 **…and the scenario must happen in normal operation, unless the harm is of a
+dangerous class.** A blocking finding describes one of two things:
+
+1. **A failure in normal operation:** an ordinary user action, a retry, a
+   deploy, a cron run that will overlap, a second user working at the same time.
+2. **Harm of a dangerous class, at any likelihood.** The dangerous classes are
+   defined by the harm, not by the weight:
+   - access to another user's or customer's data or actions;
+   - bypass of authentication, a signature check or permissions, including
+     fail-open (an error that lets everyone through);
+   - a secret leak;
+   - money, balance, payments: races, double charges, missing idempotency;
+   - irreversible loss or corruption of data;
+   - a deploy, or a write to an external system, without the user's "yes".
+
+A finding whose scenario needs a **rare coincidence** (the same person in two
+tabs in the same second, a crash at one exact line, a narrow race window) **and**
+whose harm is **recoverable** is `medium` (−1.0, row below), not `high`.
+Recoverable means only a visible error or a retry by the same user: no data went
+out, no money moved, no wrong record was saved. **A dangerous class is never
+downgraded**, however unlikely the scenario.
+
+Findings about the review procedure itself (how to run a smoke test, wording of
+the plan, approval marks) are `medium`/`low` and do not block — except a write to
+a live external system without a "yes", which stays `high` (−2.5).
+
+**Why.** A measurement over 26 plans (November 2026): of 363 blocking findings
+only 14% were real defects likely to hurt in production; 47% were rare-coincidence
+edge cases with recoverable harm (often in tools a single operator uses), 17% were
+about the procedure, 18% targeted mechanisms the plan had added to fix an earlier
+round's finding. Every plan hit the round limit, and the external critic's rounds
+2–3 produced 3% real defects. The gate stopped telling danger from noise. The
+dangerous classes keep the old strictness where it matters.
+
 ## How the score is computed
 
 Start at **10.0**. For each defect found, subtract the weight from the table
@@ -62,6 +96,7 @@ mapping is hard and cannot be reassigned.
 | **−2.0** | `high` | 🔴 yes | **Unverified assumption about an external system on which access control or the data source rests** | "The `status` field in the API response will show the order is paid"; "this endpoint will return only the current user's records" — if what data leaks or where it comes from depends on the answer |
 | **−1.5** | `medium` | no | Load without an estimate | A query without an index on a large table; a change subscription without a server-side filter; a scheduled background job with a risk of overlapping runs; N+1 |
 | **−1.0** | `medium` | no | Coverage gap | Test-covered logic changes and tests are not mentioned; no verification step for a risky change |
+| **−1.0** | `medium` | no | Rare coincidence, recoverable harm, not a dangerous class | Two tabs of the same owner save at once and the second save is rejected with a visible conflict; a crash at one exact line leaves a retryable error |
 | **−1.0** | `medium` | no | Other unverified assumption about an external system | Field format, unit of measure, time zone, type name — where an error gives wrong numbers but does not expose data |
 | **−0.5** | `low` | no | Incomplete description | No file path given; a vague step wording; one of the UI languages forgotten in a multilingual project |
 | **−0.3** | `low` | no | Cosmetics | The plan template is not followed; no "Risks" section even though there are risks |

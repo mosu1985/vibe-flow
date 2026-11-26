@@ -145,7 +145,7 @@ Deductions: −3.0 <…>
 `🔴 USER QUESTION REQUIRED: <function name>`
 This is the signal to the main session that `ExitPlanMode` must not be called without `AskUserQuestion`.
 
-Then 1–3 lines: verdict, score, number of blocking findings. Do not duplicate the checklist; it is in the plan file.
+Then at most 3 lines and 400 characters: verdict, score, blocking findings by ID. Nothing else: the details are in your plan section, and every character of your reply stays in the main session's context for the rest of the session. The marker line does not count toward the limit.
 
 ## ⚖️ Severity and score
 
